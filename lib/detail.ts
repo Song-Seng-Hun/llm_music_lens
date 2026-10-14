@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { pitchContourSchema } from "./pitch-contour.ts";
 
 const time = z.number().finite().min(0).max(600);
 const unit = z.number().finite().min(0).max(1);
@@ -68,11 +69,12 @@ export const featuresSchema = z.object({
 export const detailSchema = z.object({
   schema: z.literal("music-lens-detail/1"),
   rhythm: rhythmSchema,
-  notes: z.object({ status: stage, mode: z.enum(["polyphonic", "solo-vocal"]).optional(), model: z.string().max(180), items: z.array(noteSchema).max(4000), truncated: z.boolean(), warnings }),
+  notes: z.object({ status: stage, mode: z.enum(["polyphonic", "solo-vocal"]).optional(), model: z.string().max(180), items: z.array(noteSchema).max(4000), contour: pitchContourSchema.optional(), truncated: z.boolean(), warnings }),
   lyrics: z.object({ status: stage, model: z.string().max(180), language: z.string().max(40), words: z.array(wordSchema).max(2000), truncated: z.boolean(), warnings }),
   features: featuresSchema.optional(), harmony: harmonySchema.optional(),
   warnings,
 }).superRefine((d, ctx) => {
+  if (d.notes.contour && (d.notes.mode !== "solo-vocal" || !["complete", "partial"].includes(d.notes.status))) ctx.addIssue({ code: "custom", message: "Contour requires an executed solo-vocal stage." });
   for (const [key, items] of [["notes", d.notes.items], ["lyrics", d.lyrics.words], ["sections", d.rhythm.sections], ["chords", d.rhythm.chords], ["harmonyChords", d.harmony?.chords ?? []], ["dynamics", d.features?.dynamics ?? []], ["vocalDensity", d.features?.vocalDensity ?? []], ["tempoSegments", d.rhythm.tempoEvidence?.segments ?? []], ["acoustics", d.rhythm.acoustics?.windows ?? []]] as const) {
     if (items.some(v => v.end <= v.start)) ctx.addIssue({ code: "custom", message: `Invalid ${key} interval.` });
   }

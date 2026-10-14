@@ -1,6 +1,6 @@
 // SOME outputs continuous MIDI, rests and durations, not calibrated confidence.
-export const VOCAL_MODEL = "SOME some-0.0.1; ONNX 7e0c73b6fbab; native fractional MIDI; frame-rest edges; browser WASM";
-export const VOCAL_MODEL_SHA256 = "7e0c73b6fbabde77f86304d2dcf817153e1518a626a7d49d0bec5c348c861b40";
+export const VOCAL_MODEL = "SOME some-0.0.1; ONNX 7b5a4eb8e5b1; native pitch contour; frame-rest edges; browser WASM";
+export const VOCAL_MODEL_SHA256 = "7b5a4eb8e5b1486902e3918516020a8f0f78d0d22c02ebd4d5410b2dc60e8e75";
 export const VOCAL_RATE = 44100;
 export const VOCAL_CORE_SECONDS = 40;
 export const VOCAL_CONTEXT_SECONDS = 2;

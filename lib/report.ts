@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { detailSchema } from "./detail.ts";
 import { wordContexts } from "./alignment.ts";
+import { contourInterval, contourSummary } from "./pitch-contour.ts";
 
 export const SCHEMA_VERSION = "music-lens/1" as const;
 export const MAX_DURATION = 600;
@@ -109,6 +110,7 @@ export function timelineOf(report: MusicReport, start: number, end: number) {
     acoustics: report.detail?.rhythm.acoustics ? { method: report.detail.rhythm.acoustics.method, windows: limited(report.detail.rhythm.acoustics.windows.filter(overlap)), warnings: report.detail.rhythm.acoustics.warnings } : null,
     harmony: report.detail?.harmony ? { ...report.detail.harmony, chords: limited(report.detail.harmony.chords.filter(overlap)) } : null,
     noteEvents: limited(report.detail?.notes.items.filter(overlap) ?? []),
+    pitchContour: contourInterval(report.detail?.notes.contour, start, end),
     words: limited(report.detail?.lyrics.words.filter(overlap) ?? []),
     bandOnsets: limited(report.detail?.rhythm.onsets.filter(v => v.time >= start && v.time < end) ?? []),
     estimatedChords: limited(report.detail?.rhythm.chords.filter(overlap) ?? []),
@@ -135,6 +137,7 @@ export function asMarkdown(report: MusicReport): string {
     `BPM (estimate): ${summaryOf(report).bpm ?? "unknown"}`, `Key (estimate): ${keyOf(report) ?? "unknown"}`, ``, a?.summary ?? "Local signal analysis only.", ``, `## Evidence-linked moments`];
   for (const m of a?.moments ?? []) lines.push(`- ${m.start.toFixed(2)}–${m.end.toFixed(2)}s | ${m.title}\n  Observation (model estimate): ${m.observation}\n  Interpretation: ${m.interpretation}`);
   if (report.detail) lines.push("", "## Browser specialist analysis", `Notes: ${report.detail.notes.status}; model ${report.detail.notes.model}; ${report.detail.notes.items.length} retained events; truncated ${report.detail.notes.truncated}.`, `Lyrics: ${report.detail.lyrics.status}; model ${report.detail.lyrics.model}; ${report.detail.lyrics.words.length} retained words; truncated ${report.detail.lyrics.truncated}.`, "Detailed estimated intervals in report JSON; neither transcription nor chord accuracy is independently validated.", ...report.detail.warnings.map(w => `- ${w}`));
+  if (report.detail?.notes.contour) { const c = contourSummary(report.detail.notes.contour); lines.push(`Vocal pitch contour: ${c.status}; ${c.samples} native frames, ${(c.stepSeconds! * 1000).toFixed(3)}ms spacing. Fractional MIDI/null in JSON and paged timeline; null is model-unvoiced, not silence. No validated vibrato/slide classification.`); }
   if (report.detail?.rhythm.tempoEvidence) lines.push(`Pulse support: ${report.detail.rhythm.tempoEvidence.status}; ${report.detail.rhythm.tempoEvidence.reason}. Supported means acoustic pulse fit, not verified musical meter.`);
   if (report.detail?.rhythm.acoustics) lines.push(`Acoustic texture: ${report.detail.rhythm.acoustics.windows.length} one-second windows in JSON (spectral centroid/flatness, power-band balance, RMS and onset density). Instrument/genre/quality unknown.`);
   if (report.detail?.harmony) {

@@ -4,6 +4,12 @@ Goal: a working music-analysis program, Sites-compatible, usable through a human
 
 Scope: this project only; no global skills/config changes, no deployment to another service, no media downloader, no paid model call. Preserve Sites integration. Earlier experiments excluded commit/push; the user's 2026-10-14 repository request now authorizes connecting and synchronizing this project to their new Song-Seng-Hun/llm_music_lens repository.
 
+## Continuous vocal contour (adopted locally, 2026-10-14)
+User: "시도해봐", following the continuous-pitch recommendation. Parent owns code/evaluation; one read-only reviewer. Scope: native frame pitch/rest, bounded report/timeline/UI, no new inference pass/API/dependency, no automatic vibrato/slide labels. Preserve adopted note results and old report compatibility.
+- [done] Pilot saved1/10/11/12 vs independent F0. E1 fixes decimal half-frame ties before confirm; originals retained. Corrected macro50c74.3047->75.3639%,20c48.9036->50.1761%. Plan/metric in evidence/vocal-contour-08.
+- [done] Frozen17-20:50cF1 67.95537->71.09609%,20c40.44437->43.88666%; all4 improve, false-voiced counts19/20 +2/+1 retained. C1 exact-EOF mechanical repair leaves scored contours unchanged. Eight cost runs +1.50246%/+224.4ms, +0.60564%/+116.45ms; original outputs/notes exact. Independent review supports results.
+- [done] Single production path: native chunks, interval paging, bounded handoff/UI.70tests/typecheck/lint/build pass; dense10min1,624,948bytes under existingcap. ActualUI17/20 notes and contours exact; JSON import, missing-model and cancellation pass. First UI attempts timed out and remain recorded; no code change/rebuild during passing run. Independent review no blocker; quality/cost meaningful improvement for frozen solo-voice question. Repo synchronization receipt in evidence/vocal-contour-08/git-receipt.json; no Sites deployment.
+
 ## Small-improvement product value (adopted locally, 2026-10-14)
 User: "진짜로 가성비적으로도 좋아진게 맞다면 제대로 반영해". Parent owns product/evaluation; no tuning/new quality data. Prior experiments/results preserved.
 - [done] value06 frozen before fresh13-16; all4 complete, independent exact recomputation. A1 frame78.71763->80.02464%, A2mean79.0000->80.24531%; event gains, offsets unchanged. Original acceptance FAILED only A2clip14 frame -0.12449pp. No gate rewriting.

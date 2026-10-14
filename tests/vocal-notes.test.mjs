@@ -1,6 +1,21 @@
 import test from 'node:test';
+import { appendVocalContour, CONTOUR_STEP } from '../analysis/vocal-contour.mjs';
 import assert from 'node:assert/strict';
 import { decodeVocalSequence, appendVocalWindow, VOCAL_FRAME_STEP as H } from '../analysis/vocal-notes.mjs';
+
+// Named failure: frame sampling loses rests or duplicates context/EOF evidence.
+test('native contour preserves fractional motion/rests and clips context and EOF', () => {
+  const tensor = (type, data) => ({ type, data, dims: [1, data.length] });
+  const chunks = [], step = CONTOUR_STEP;
+  appendVocalContour(chunks, tensor('float32', [60.123456, 60.5, 61, 61.5]), tensor('bool', [0, 1, 0, 0]), 0, 0, 3 * step, 5 * step);
+  appendVocalContour(chunks, tensor('float32', [10, 61.75, 62.25, 90]), tensor('bool', [0, 0, 0, 0]), 2 * step, 3 * step, 6 * step, 5 * step);
+  assert.deepEqual(chunks, [{ start: 0, midi: [60.1235, null, 61] }, { start: 3 * step, midi: [61.75, 62.25] }]);
+  assert.throws(() => appendVocalContour([], tensor('float32', [NaN]), tensor('bool', [1]), 0, 0, 1, 1));
+  assert.throws(() => appendVocalContour([], tensor('float32', [60]), tensor('bool', []), 0, 0, 1, 1));
+  const bounded = [{ start: 0, midi: Array(52000).fill(null) }];
+  assert.equal(appendVocalContour(bounded, tensor('float32', [60]), tensor('bool', [0]), 0, 0, 1, 1), true);
+  assert.equal(bounded.length, 1);
+});
 
 function fixture(counts, pitches, rests, masks) {
   const durations = counts.map(n => Math.fround(n * H));

@@ -8,5 +8,5 @@ Release notice: https://github.com/openvpi/SOME/releases/tag/v0.0.1
 OpenUtau distribution: https://github.com/xunmengshe/OpenUtau/releases/download/0.0.0.0/some-0.0.1.oudep
 Model: 0918_continuous128_clean_3spk.onnx
 SHA256: 9d55f9d239e9d70d1bf039506cf1c428b657df7bbb8b94104ca882af6b721e06
-Derived runtime SHA256: 7e0c73b6fbabde77f86304d2dcf817153e1518a626a7d49d0bec5c348c861b40
-Music Lens modification (2026-10-14): adds87bytes of graph output descriptors for existing frame-rest/mapping tensors; original nodes and weights unchanged. Exterior-rest trimming, input routing, bounded windows and presentation preserve fractional pitch and do not claim calibrated confidence. The derived model remains under CC BY-NC-SA4.0; retain this notice and the original attribution.
+Derived runtime SHA256: 7b5a4eb8e5b1486902e3918516020a8f0f78d0d22c02ebd4d5410b2dc60e8e75
+Music Lens modification (2026-10-14): adds128bytes of graph output descriptors for existing frame-rest/mapping/pitch tensors; original nodes and weights unchanged. Exterior-rest trimming, native pitch-contour evidence, input routing, bounded windows and presentation preserve fractional pitch and do not claim calibrated confidence. The derived model remains under CC BY-NC-SA4.0; retain this notice and the original attribution.

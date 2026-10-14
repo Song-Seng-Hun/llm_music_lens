@@ -10,12 +10,47 @@ import { detailSignal } from "../lib/browser-detail.ts";
 import { deriveMusicalFeatures } from "../public/analysis/musical-features.mjs";
 import { asTeamHandoff } from "../lib/handoff.ts";
 import { analyzeNoteHarmony } from "../public/analysis/harmony.mjs";
+import { pitchContourSchema } from "../lib/pitch-contour.ts";
 
 function detail(): DetailResult {
   return { schema: "music-lens-detail/1", rhythm: { method: "fixture", bpm: 120, tempoCandidates: [{ bpm: 120, score: 0.9 }], beats: [0, 0.5, 1, 1.5], onsets: [{ time: 0.5, strength: 0.8, band: "low" }, { time: 0.75, strength: 0.8, band: "high" }], envelope: [], sections: [], key: { label: null, score: 0 }, chords: [], warnings: [], truncated: { onsets: false, envelope: false, chords: false } },
     notes: { status: "complete", model: "test", items: [{ start: 0.5, end: 1, midi: 60, confidence: 0.7 }, { start: 1, end: 1.2, midi: 64, confidence: 0.8 }], truncated: false, warnings: [] },
     lyrics: { status: "complete", model: "test", language: "korean", words: [{ start: 0.6, end: 0.9, text: "가나다" }], truncated: false, warnings: [] }, warnings: [] };
 }
+
+test("native pitch contour survives report readers without flooding summaries and pages losslessly", async () => {
+  // Named failures: schema stripping, flat-pitch replacement, gaps lost in paging,
+  // or full native arrays leaking into the compact LLM handoff.
+  const d = detail(), step = 512 / 44100;
+  d.notes.mode = "solo-vocal";
+  d.notes.contour = pitchContourSchema.parse({ status: "complete", method: "SOME native frame MIDI/rest; centered STFT; no smoothing", duration: 500 * step, stepSeconds: step,
+    chunks: [{ start: 0, midi: Array.from({ length: 500 }, (_, i) => i % 7 ? 60 + i / 1000 : null) }], truncated: false });
+  const r = reportSchema.parse({ schema: "music-lens/1", id: "af32ed31-a267-4d03-a12d-cad4353f5ea3", createdAt: "2026-10-14T00:00:00Z", source: { kind: "synthetic", title: "contour fixture", duration: 500 * step }, signal: null, interpretation: null, detail: d, provenance: { mode: "local-signal", inputStatus: "fixture", accuracy: "unvalidated" } });
+  assert.deepEqual(r.detail!.notes.contour, d.notes.contour);
+  assert.deepEqual(r.detail!.notes.items, d.notes.items);
+  const frames: (number | null)[] = []; let start = 0;
+  do {
+    const page = timelineOf(r, start, 6).pitchContour;
+    assert.ok(page.items.length <= 200); frames.push(...page.items.map(p => p.midi));
+    if (page.nextStart === null) break;
+    assert.ok(page.nextStart > start); start = page.nextStart;
+  } while (true);
+  assert.deepEqual(frames, d.notes.contour!.chunks[0].midi);
+  const services = { get: async () => r, list: async () => [] };
+  const viaMcp = await callMusicTool("get_music_timeline", { id: r.id, start: 1, end: 2 }, services);
+  assert.deepEqual((viaMcp as ReturnType<typeof timelineOf>).pitchContour, timelineOf(r, 1, 2).pitchContour);
+  const summary = JSON.stringify(await callMusicTool("get_music_report", { id: r.id }, services));
+  assert.match(summary, /"samples":500/); assert.doesNotMatch(summary, /"chunks"/);
+  const handoff = asTeamHandoff(r); assert.match(handoff, /pitchContour.nextStart/); assert.doesNotMatch(handoff, /"chunks"/);
+  assert.match(asMarkdown(r), /Vocal pitch contour: complete; 500 native frames/);
+  assert.equal(timelineOf({ ...r, detail: detail() }, 0, 2).pitchContour.status, "unavailable");
+  for (const invalid of [
+    { ...d.notes.contour, chunks: [{ start: 0, midi: [60] }] },
+    { ...d.notes.contour, chunks: [{ start: 0, midi: [60, 61] }, { start: step, midi: [62] }] },
+    { ...d.notes.contour, stepSeconds: 0 }, { ...d.notes.contour, truncated: true },
+  ]) assert.equal(pitchContourSchema.safeParse(invalid).success, false);
+  assert.equal(detailSchema.safeParse({ ...d, notes: { ...d.notes, mode: "polyphonic" } }).success, false);
+});
 
 test("solo-vocal fractional pitches and unavailable confidence survive report readers", async () => {
   const d = detail();
