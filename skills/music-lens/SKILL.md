@@ -9,9 +9,13 @@ Use an existing report first: `list_music_reports` -> `get_music_report` -> `get
 
 Without the Site connection, read the user's exported `music-lens/1` JSON and AI-team handoff. Lists in the handoff are explicitly sampled; full detail stays in JSON. Never invent a server URL, caller identity or listening evidence.
 
-The Site runs browser-local Basic Pitch and optional Whisper models; no model API key or remote audio inference. Public model downloads are disclosed in the UI. You interpret results in the current conversation. Sites publication/connection is separate from local installation; use the platform-created private plugin after publication. Do not create a local OAuth stack or claim team access before an actual authorized tool call succeeds.
+For new beat analysis, use `analyze_music_timing`: the server executes Beat This! on supplied PCM audio without a browser, paid API or separate inference service. Input: base64 signed16 little-endian, mono22050Hz,1–30seconds; `offsetSeconds` plus duration <=600seconds. All output times are excerpt-relative. Read `docs/server-timing.md` for the exact contract, measured comparison and limits. The tool saves neither audio nor results.
 
-Read provenance:
+Optional `timedVocal` supplies already-timed phones/moras/syllables/words; `noteEvents` supplies note candidates. The tool preserves their times and links them to detected beats/downbeats and note overlaps. Attribution is not verification; overlapping mixture notes do not establish sung pitch. Automatic acoustic syllable alignment is unavailable on the server, not fabricated by dividing words. Downbeats and BPM are estimates; `meter` remains unknown.
+
+Existing browser analysis still supports Basic Pitch and optional Whisper; public model downloads are disclosed in the UI. You interpret results in the current conversation. Sites publication/connection is separate from verified local workerd/MCP execution; use the platform-created private plugin after publication. Do not create a local OAuth stack or claim team access before an actual authorized tool call succeeds.
+
+Read saved-report provenance (the timing tool uses the separate `music-lens-timing/1` result):
 - `local-signal`: browser estimates. If `detail` exists, inspect its independent notes/lyrics status, model, warnings and truncation. Otherwise the quick path provides only sparse pitch, not full notes or lyrics. Scores/confidence are uncalibrated; tempo can choose the wrong pulse subdivision.
 - `model-estimate` / `combined`: compatibility with externally supplied or historical reports; not evidence this Site called a model now. Treat supplied interpretations as unvalidated.
 - `imported`: client-supplied data. Repetition never verifies it.

@@ -24,7 +24,7 @@ test("JSON bytes and cross-site submissions are bounded", async () => {
   assert.throws(() => sameOrigin(new Request("https://site.example/api", { headers: { origin: "https://different.example" } })), (e: AppError) => e.status === 403);
   sameOrigin(new Request("https://site.example/mcp"));
 });
-test("MCP retains bounded half-open timelines and has no model-calling tool", async () => {
+test("MCP retains bounded half-open timelines beside explicit server timing analysis", async () => {
   const report = fixture();
   report.signal!.tempo.beats = Array.from({ length: 250 }, (_, i) => i / 25);
   const window = timelineOf(report, 0, 8);
@@ -36,7 +36,8 @@ test("MCP retains bounded half-open timelines and has no model-calling tool", as
   await callMusicTool("get_music_timeline", { id, start: 0, end: 120 }, services);
   await assert.rejects(callMusicTool("get_music_timeline", { id, start: 0, end: 121 }, services));
   await assert.rejects(callMusicTool("analyze_youtube", {}, services), (e: AppError) => e.code === "UNKNOWN_TOOL");
-  assert.equal(MCP_TOOLS.length, 3); assert.ok(MCP_TOOLS.every(t => t.annotations.readOnlyHint));
+  assert.equal(MCP_TOOLS.length, 4); assert.ok(MCP_TOOLS.every(t => t.annotations.readOnlyHint));
+  assert.ok(MCP_TOOLS.some(t => t.name === "analyze_music_timing"));
 });
 test("handoff preserves source, uncertainty and sampled timing without inventing analysis", () => {
   const report = fixture();

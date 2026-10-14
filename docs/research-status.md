@@ -1,6 +1,6 @@
 # Measured research status
 
-As of 2026-10-14. This is a summary of retained local experiments, not a claim of general music-transcription accuracy. The private repository contains the program, tests and preparation scripts. Downloaded recordings, annotations, model weights, browser traces and experimental outputs remain in the original local working directory and are excluded from Git. They were not deleted by repository setup.
+As of 2026-10-14. This summarizes retained experiments, not general music-transcription accuracy. The repository contains the program, tests, preparation scripts and the MIT small0-derived model needed by server inference. Downloaded recordings, annotations, other research model weights, traces and experimental outputs remain local and excluded from Git.
 
 ## Adopted program
 
@@ -38,7 +38,7 @@ Eight fixed paired browser runs preserved native outputs/notes and passed overhe
 
 ## Timing extensions and server execution
 
-The next two requested directions were actually exercised, independently of hosting constraints: Beat This! beat/downbeat inference on 12 fixed labelled clips and TIFA audio-grounded phone alignment on two Japanese singing clips. Local workerd also executed an exported five-second Beat This! graph with Torch parity; this goes beyond runtime initialization. The [timing pilot report](timing-pilot.md) records all denominators, substantial remaining errors, data overlap, runtime limits and unfinished Sites work. No frontend or production MCP behavior changed. These are retained experimental components, not a claim that the Sites analysis service is deployed.
+The initial [timing pilot](timing-pilot.md) retained working Beat This and TIFA components without changing production. The follow-up now connects server Beat This to the actual `analyze_music_timing` MCP tool. Same12 waveform/annotation comparison: beat macroF1 18.3250→79.4279%;11 wins/1 loss, predominantly recovered coverage. Precision95.45→80.89%, recall12.26→79.71%. New downbeat macroF1 58.3322%. Actual MCP12/12 produces exactly the frozen candidate events and PCM identities. Median per-case runner3.157s/30s excerpt; WASM capacity69.1875MiB is not whole-isolate peak. TIFA int8/int4 both exceed128MiB in actual workerd; server acoustic syllable alignment stays unavailable. Supplied timed units can be linked to detected beats/notes. [Full methods, failures and limits](server-timing.md); local evidence `evidence/timing-integration-10/`. Hosted Sites deployment is not claimed.
 
 ## Sources and assets
 

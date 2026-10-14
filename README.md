@@ -2,9 +2,9 @@
 
 음원에서 시간·박자·화음·음표·단어·에너지 단서를 뽑아 **LLM의 음악 분석 근거**로 제공하는 프로그램입니다. 작곡 레퍼런스, 스타일 해석, 영상 연출 등에서 같은 자료를 재사용할 수 있습니다. 목표는 **Sites 서버가 분석하고 AI 팀이 MCP로 결과를 받는 도구**입니다. 개인 모델 API 키나 열린 브라우저를 요구하지 않는 방향으로 개발합니다.
 
-현재 구현은 브라우저 분석과 저장된 결과를 읽는 MCP입니다. 서버 분석 경로와 Sites 게시·실제 팀 연결은 아직 완성되지 않았습니다. 첫박 검출·음소 정렬의 실제 모델 시험과 Sites 서버 실행 시험을 병행하며, 로컬 실험 성공을 Sites 실행 성공으로 보고하지 않습니다.
+MCP `analyze_music_timing`은 이제 서버에서 음원을 직접 분석해 박·마디 첫박 후보와 BPM을 반환합니다. 제공된 발음/음절 시각도 박·음표와 연결합니다. 실제 로컬 Worker와 MCP 호출을 검증했으며, Sites 게시·팀 연결은 아직 미검증입니다. 자동 음절 강제 정렬은 현재 서버 메모리 한도를 넘어 미지원입니다. [호출법·비교 결과·한계](docs/server-timing.md)를 확인하세요.
 
-프로젝트 저장소: [Song-Seng-Hun/llm_music_lens](https://github.com/Song-Seng-Hun/llm_music_lens). 현재 저장소에는 소스·테스트·설치 스크립트·라이선스 안내를 보관합니다. 모델, 음원, 정답 주석, 실행 로그와 실험 원자료는 커밋하지 않습니다. 이 문서의 `evidence/` 및 연구용 `examples/` 링크는 기존 로컬 작업 폴더의 기록이며 새 clone에는 없습니다. 저장소에서 읽을 수 있는 측정 요약은 [연구 상태와 한계](docs/research-status.md)에 있습니다.
+프로젝트 저장소: [Song-Seng-Hun/llm_music_lens](https://github.com/Song-Seng-Hun/llm_music_lens). 소스·테스트·설치 스크립트·라이선스와 서버 실행에 필요한 MIT Beat This 모델(약 9.4MB)을 보관합니다. 다른 연구 모델, 음원, 정답 주석, 실행 로그와 실험 원자료는 커밋하지 않습니다. `evidence/` 및 연구용 `examples/` 링크는 기존 로컬 기록이며 새 clone에는 없습니다. 측정 요약은 [연구 상태와 한계](docs/research-status.md)에 있습니다.
 
 ## 바로 실행
 
@@ -47,10 +47,11 @@ npm run dev -- --host 127.0.0.1
 
 ## 키 없이 ChatGPT와 연결하는 방식
 
-목표는 Sites 서버의 분석 결과를 **연결된 ChatGPT가 대화 안에서 해석**하는 것입니다. 아래 MCP는 현재 저장 결과 조회만 지원하며 분석을 시작하지 않습니다. Sites의 공식 MCP 연결은 모델 API 키와 별개입니다. 사이트가 ChatGPT의 내부 모델을 직접 호출하는 기능은 구현하지 않았습니다.
+Sites 서버의 분석 결과를 **연결된 ChatGPT가 대화 안에서 해석**하는 구조입니다. 아래 MCP는 새 음원의 서버 리듬 분석과 기존 저장 결과 조회를 지원합니다. Sites의 공식 MCP 연결은 모델 API 키와 별개입니다. 사이트가 ChatGPT의 내부 모델을 직접 호출하지 않습니다.
 
 | MCP 도구 | 읽기 전용 동작 |
 |---|---|
+| analyze_music_timing | 1~30초 PCM의 서버 박·마디 첫박·BPM 추정; 제공된 발음/음절·음표의 박 위상/시차 연결. 음원·결과 저장 없음 |
 | list_music_reports | 인증된 사용자의 최근 분석 최대 30개 |
 | get_music_report | 요약, 출처, 음역/음 클래스, 템포 근거, 음향 요약, 모델·단계 상태와 한계 |
 | get_music_timeline | 최대 120초 범위의 단어·박 시차·동시 음표/화음·타격·에너지·변화·밀도·1초 음색/대역 비중·구간 템포; 레이어당 200개, total/truncated 표시 |
@@ -90,7 +91,7 @@ npm run dev -- --host 127.0.0.1
 
 코드·조성 검증은 `evidence/harmony/CHECKS.md`, 리듬·음색 검증은 `evidence/improve-ears/CHECKS.md`; 이전 정밀 버전은 `evidence/precision/CHECKS.md`, 과거 버전은 `evidence/keyless/`, `evidence/CHECKS.md`에 구분합니다. `tests/browser-precision.cjs`는 실제 모델/UI/MCP를, `tests/browser-lyrics.cjs`는 공개 음성으로 전사 실행을 검사합니다. `MUSIC_EVIDENCE_DIR`로 결과 폴더, `MUSIC_REAL_FIXTURE`로 이용 조건을 확인한 로컬 음악 샘플을 지정할 수 있습니다. `PLAYWRIGHT_MODULE`과 `BROWSER_EXECUTABLE`로 기존 설치를 사용합니다. `tests/precision-storage.mjs`는 큰 JSON, 용량 거부, 사용자 격리를 검사하고 생성한 ID만 정리합니다.
 
-실제 경로: `components/music-lens.tsx` → `lib/browser-detail.ts` → 빌드한 `public/precision-worker.mjs` (소스 `analysis/precision-worker.mjs`). 리듬은 `public/precision-rhythm.mjs`, 파생 단서는 `public/analysis/musical-features.mjs`, 단어/박/음표 문맥은 `lib/alignment.ts`. 빠른 모드는 `public/audio-worker.mjs`. 공통 보고서 `lib/report.ts`의 선택적 `detail` 확장으로 이전 JSON을 보존합니다. 저장과 MCP는 `lib/server/reports.ts`, `lib/mcp.ts`입니다.
+서버 실제 경로: `app/mcp/route.ts` → `lib/mcp.ts` → `lib/server/music-timing.ts` → `lib/server/beat-analysis.mjs`. [서버 분석 안내](docs/server-timing.md). 기존 브라우저 경로는 `components/music-lens.tsx` → `lib/browser-detail.ts` → `public/precision-worker.mjs` (소스 `analysis/precision-worker.mjs`)이며 보존합니다. 공통 보고서 `lib/report.ts`의 선택적 `detail`로 이전 JSON을 보존합니다. 저장은 `lib/server/reports.ts`입니다.
 
 정밀 템포는 `public/analysis/tempo-grid.mjs` 하나로 교체했습니다. 음향 요약은 같은 FFT의 측정치를 `public/analysis/acoustics.mjs`에서 집계합니다. 이전 최고 자기상관 선택 함수는 제거했으며, 예전 JSON의 선택 필드가 없더라도 읽을 수 있습니다. 정밀 결과의 미확인을 과거 신호 값으로 대체하지 않습니다.
 

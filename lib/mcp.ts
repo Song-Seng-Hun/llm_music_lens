@@ -2,15 +2,22 @@ import { z } from "zod";
 import { MAX_DURATION, summaryOf, timelineOf, type MusicReport } from "./report.ts";
 import { AppError } from "./validation.ts";
 import { contourSummary } from "./pitch-contour.ts";
+import { TIMING_TOOL, timingInputSchema } from "./music-timing.ts";
 
 export const MCP_TOOLS = [
+  TIMING_TOOL,
   { name: "list_music_reports", description: "List up to 30 music reports saved by the authenticated user. No audio, lyrics or credentials returned.", inputSchema: { type: "object", properties: {}, additionalProperties: false }, annotations: { readOnlyHint: true, openWorldHint: false } },
   { name: "get_music_report", description: "Read a bounded summary and evidence-linked musical interpretations. All estimates remain unvalidated; a report is not precise transcription proof.", inputSchema: { type: "object", properties: { id: { type: "string", format: "uuid" } }, required: ["id"], additionalProperties: false }, annotations: { readOnlyHint: true, openWorldHint: false } },
   { name: "get_music_timeline", description: "Read <=120 seconds: words, beat offsets, note/chord candidates, band attacks, dynamics, transcript density, energy, tempo support and 1 s acoustic texture/band balance. Each layer <=200; inspect total/truncated. Solo-vocal native pitchContour frames use nextStart continuation with the same end; null=model-unvoiced, not silence. Pulse support is not meter; overlap is not vocal note identity; missing is unknown. Smaller intervals recover truncated layers.", inputSchema: { type: "object", properties: { id: { type: "string", format: "uuid" }, start: { type: "number", minimum: 0 }, end: { type: "number", maximum: 600 } }, required: ["id", "start", "end"], additionalProperties: false }, annotations: { readOnlyHint: true, openWorldHint: false } },
 ];
 
-export type McpServices = { list: () => Promise<unknown>; get: (id: string) => Promise<MusicReport> };
+export type McpServices = { list: () => Promise<unknown>; get: (id: string) => Promise<MusicReport>; analyzeTiming?: (args: unknown) => Promise<unknown> };
 export async function callMusicTool(name: string, args: unknown, services: McpServices) {
+  if (name === "analyze_music_timing") {
+    const input = timingInputSchema.parse(args);
+    if (!services.analyzeTiming) throw new AppError(503, "ANALYSIS_UNAVAILABLE", "이 서버에서 분석 실행 경로를 사용할 수 없습니다.");
+    return services.analyzeTiming(input);
+  }
   if (name === "list_music_reports") { z.object({}).strict().parse(args ?? {}); return services.list(); }
   if (name === "get_music_report") {
     const { id } = z.object({ id: z.string().uuid() }).strict().parse(args);

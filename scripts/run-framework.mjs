@@ -1,11 +1,13 @@
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { readExecutionProfile } from "./execution-profile.mjs";
+import { prepareServerBeat } from "./prepare-server-beat.mjs";
 
 const [command, ...args] = process.argv.slice(2);
 if (!["dev", "build"].includes(command)) throw new Error("Expected dev or build.");
 const managedLinux = readExecutionProfile() === "managed-linux";
 await import("./prepare-analysis.mjs");
+await prepareServerBeat();
 
 if (managedLinux && command === "build") {
   const result = spawnSync("bash", [

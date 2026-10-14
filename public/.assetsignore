@@ -1,0 +1,3 @@
+# Local-preview optional SOME weights exceed Workers' 25 MiB static-asset limit.
+# Keep the local file; it is not part of the Sites static-asset package.
+/models/some/**
