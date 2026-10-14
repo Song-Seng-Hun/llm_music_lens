@@ -36,7 +36,8 @@ test("MCP retains bounded half-open timelines beside explicit server timing anal
   await callMusicTool("get_music_timeline", { id, start: 0, end: 120 }, services);
   await assert.rejects(callMusicTool("get_music_timeline", { id, start: 0, end: 121 }, services));
   await assert.rejects(callMusicTool("analyze_youtube", {}, services), (e: AppError) => e.code === "UNKNOWN_TOOL");
-  assert.equal(MCP_TOOLS.length, 5); assert.ok(MCP_TOOLS.every(t => t.annotations.readOnlyHint));
+  assert.equal(MCP_TOOLS.length, 6); assert.ok(MCP_TOOLS.every(t => t.annotations.readOnlyHint));
+  assert.ok(MCP_TOOLS.some(t => t.name === "compose_music_timeline"));
   assert.ok(MCP_TOOLS.some(t => t.name === "analyze_music_structure"));
   assert.ok(MCP_TOOLS.some(t => t.name === "analyze_music_timing"));
 });

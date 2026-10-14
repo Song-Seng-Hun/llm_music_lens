@@ -28,6 +28,10 @@ are excerpt-relative; add `source.offsetSeconds` for song time. Offset plus
 excerpt length cannot exceed600seconds. Independent excerpts can disagree at
 their edges: they are not a verified whole-song meter track.
 
+Use [compose_music_timeline](music-continuity.md) with these results' unchanged
+source/timing/pitch subobjects to retrieve bounded song-clock evidence across
+clips. It retains separate overlap views and unknowns; it does not rerun detection.
+
 Results include detected beats, downbeat candidates, median-interval BPM,
 counts of detected beats between downbeat candidates, model/recipe hashes and
 warnings. `meter` remains null: a missed downbeat can combine several bars.

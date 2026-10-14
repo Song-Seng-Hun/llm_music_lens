@@ -14,6 +14,8 @@ MCP `analyze_music_timing`은 이제 서버에서 음원을 직접 분석해 박
 
 **곡 전체 전환 분석:** 각 30초 분석의 `structurePacket`을 `analyze_music_structure`에 모으면 최대 10분의 전환 후보·주파수/음량 변화·미분석 구간을 비교합니다. 별도 합성 확인 샘플에서 전환 7곳을 모두 찾고 추가 후보 2곳을 반환했습니다. 같은 음량의 전환은 기존 음량 단서 0/5 → 5/5였습니다. 반복 구간은 평가 기준 미달이어서 기본 출력에서 보류하며, `includeExperimentalRepetitions: true`로만 실험 후보를 받습니다. 후렴/절 판정이나 실제 곡 전반의 정확도 보증은 아닙니다. [실패를 포함한 비교 결과·호출법](docs/music-structure.md).
 
+**구간을 잇는 시간축:** `compose_music_timeline`은 기존 분석의 박·마디 첫박·보컬 음높이를 곡 전체 시각으로 묶어 필요한 구간만 반환합니다. 같은 자료의 중복은 제거하고, 겹친 구간의 다른 추정과 알 수 없는 값은 출처별로 유지합니다. 새 모델 실행 없이 동작하며, 음높이 검출 정확도를 바꾸거나 빈 구간을 채우지는 않습니다. [호출법·페이지 경계·한계](docs/music-continuity.md).
+
 프로젝트 저장소: [Song-Seng-Hun/llm_music_lens](https://github.com/Song-Seng-Hun/llm_music_lens). 소스·테스트·설치 스크립트·라이선스와 서버 실행에 필요한 MIT Beat This 모델(약 9.4MB)을 보관합니다. 다른 연구 모델, 음원, 정답 주석, 실행 로그와 실험 원자료는 커밋하지 않습니다. `evidence/` 및 연구용 `examples/` 링크는 기존 로컬 기록이며 새 clone에는 없습니다. 측정 요약은 [연구 상태와 한계](docs/research-status.md)에 있습니다.
 
 ## 바로 실행
@@ -62,6 +64,8 @@ Sites 서버의 분석 결과를 **연결된 ChatGPT가 대화 안에서 해석*
 | MCP 도구 | 읽기 전용 동작 |
 |---|---|
 | analyze_music_timing | 1~30초 PCM의 서버 박·마디 첫박·BPM, 파형 강약, 주파수 질감, 타격 후보·박 대비 시각·밀도; 보컬 단독 입력의 연속 음높이; 제공된 발음/음절·음표와 연결. 음원·결과 저장 없음 |
+| analyze_music_structure | 10분 이내 곡의 1초 특징 묶음 비교, 전환 후보·음량/스펙트럼 변화·미분석 구간 |
+| compose_music_timeline | 분석 구간의 박·음높이를 곡 시각으로 조합, 중복 제거·출처별 겹침·미확인 값 보존, 공통 페이지 경계로 이어 조회 |
 | list_music_reports | 인증된 사용자의 최근 분석 최대 30개 |
 | get_music_report | 요약, 출처, 음역/음 클래스, 템포 근거, 음향 요약, 모델·단계 상태와 한계 |
 | get_music_timeline | 최대 120초 범위의 단어·박 시차·동시 음표/화음·타격·에너지·변화·밀도·1초 음색/대역 비중·구간 템포; 레이어당 200개, total/truncated 표시 |
