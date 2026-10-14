@@ -4,12 +4,12 @@ Goal: a working music-analysis program, Sites-compatible, usable through a human
 
 Scope: this project only; no global skills/config changes, no deployment to another service, no media downloader, no paid model call. Preserve Sites integration. Earlier experiments excluded commit/push; the user's 2026-10-14 repository request now authorizes connecting and synchronizing this project to their new Song-Seng-Hun/llm_music_lens repository.
 
-## Own repository setup (active, 2026-10-14)
+## Own repository setup (complete, 2026-10-14)
 User: "이 내 레포지토리를 이용해서 작업해줘 이번에 새로 만들었어", URL https://github.com/Song-Seng-Hun/llm_music_lens. Keep the existing working directory and all local evidence. Parent owns Git/docs/exclusions; one read-only worker checks publication inventory. No unrelated repositories, settings, deployment or sample redistribution.
 - [done] Remote verified: private, empty, default master, owner Song-Seng-Hun, push permission. Existing directory had no Git repository. Initialize master and set exact origin; do not alter remote visibility/default branch.
 - [done] Exclude local evidence/sample datasets/model caches/build/runtime/environment files; retain required Sites binding declaration, authored sources and third-party notices. Add fresh-clone setup and tracked research summary; preserve all excluded files locally.
 - [done] Upload payload181files/~1.62MB, required bootstrap files and license notices present; targeted known-secret pattern scan no findings (not a proof of absence). Ignored sample/model/evidence/cache/environment paths checked. Export of staged sources:66tests pass, typecheck and portable build pass using existing dependencies; optional SOME absent as documented. Initial dependency-link sandbox failure and typecheck-not-started log retained, scoped retry passed. Fresh npm install on another machine and deployment untested.
-- [in progress] Commit/push source to exact origin/master; verify remote SHA, tracking and working state. Local transfer evidence: evidence/repository-setup-01/.
+- [done] Initial source commit f458874ef827d5f98b9e7efabd4936ee41ed0cab pushed to exact origin/master; remote SHA matched, tracking set, source working state clean. Continue project changes in this checkout/repository. Repository remains private; excluded original evidence and installed models remain local. Local transfer evidence: evidence/repository-setup-01/.
 
 ## SOME internal evidence (closed; no adoption, 2026-10-14)
 Human continuation: "한번 해봐" approves one internal-output-based candidate. Evidence home evidence/vocal-internals-05; parent owns plan/recipe/scoring/integration, temporary graph worker owns only contracted extraction files. No production adoption before demonstrated gain.
