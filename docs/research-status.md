@@ -4,7 +4,7 @@ As of 2026-10-14. This summarizes retained experiments, not general music-transc
 
 ## Adopted program
 
-- Server isolated-vocal pitch: CPU-only custom YIN-style contour,20ms Hz/fractional MIDI/nulls,70–1000Hz; no new API/model. Frozen vocadito21–24 confirmation versus unchanged quick pitch intervals: macro50c frameF1 **51.5280->80.9930%**, precision76.6938->82.1155%, recall39.6133->80.8953%. All12600duration rows retained, no alignment fitting. False voicing15.9535->23.9634%, gross error2.3232->4.4517% and octave error1.0354->1.9730% worsen; no per-metric universal win. The old server had no automatic pitch; this does not compare against SOME. Single normalized Node cost161.77–206.56ms/30s, dense whole-MCP added bytes71834. [Methods, failure history and limits](server-vocal-pitch.md); local evidence `evidence/server-pitch-14/`. Whole-song structure is a separate next stage.
+- Server isolated-vocal pitch: CPU-only custom YIN-style contour,20ms Hz/fractional MIDI/nulls,70–1000Hz; no new API/model. Frozen vocadito21–24 confirmation versus unchanged quick pitch intervals: macro50c frameF1 **51.5280->80.9930%**, precision76.6938->82.1155%, recall39.6133->80.8953%. All12600duration rows retained, no alignment fitting. False voicing15.9535->23.9634%, gross error2.3232->4.4517% and octave error1.0354->1.9730% worsen; no per-metric universal win. The old server had no automatic pitch; this does not compare against SOME. Single normalized Node cost161.77–206.56ms/30s, dense whole-MCP added bytes71834. [Methods, failure history and limits](server-vocal-pitch.md); local evidence `evidence/server-pitch-14/`. Song-wide transition evidence is now implemented; recurrence stays explicit experimental opt-in after a failed full-phrase gate (see below).
 
 - Default mixed/polyphonic notes: Spotify Basic Pitch1.0.1. Fractional pitches, duration evidence, bounded results and uncertainty remain explicit. A ChoraleBricks AN1 four-part wind performance pilot scored onset/pitch F1 50.47%, precision39.56%, recall69.70% (50ms/50cents,231reference events); one piece does not estimate general accuracy.
 - Optional solo voice: SOME `some-0.0.1`, source SHA256 `9d55f9d239e9d70d1bf039506cf1c428b657df7bbb8b94104ca882af6b721e06`, current derived runtime SHA256 `7b5a4eb8e5b1486902e3918516020a8f0f78d0d22c02ebd4d5410b2dc60e8e75`. On two locally heldout vocadito human solo clips, onset/pitch F1 increased48.56→71.04% versus Basic Pitch. Native fractional MIDI and null confidence are preserved. This does not establish Vocaloid, mixed-song, rap or lyric accuracy. Upstream training overlap is unknown.
@@ -74,9 +74,17 @@ Final compiled MCP acceptance passes 8/8 checks; repository tests pass 93/93.
 The first approximately 63ms and final 43ms lack sufficient unreflected
 context and are not evaluated for attacks. Candidate counts are not drum or
 rap-syllable counts; beat and attack estimation errors both affect offsets.
-Bounded server vocal pitch is now implemented and measured above; whole-song
-structure remains a separate follow-up.
+Bounded server vocal pitch and song-wide transition evidence are now implemented;
+recurrence remains experimental after its failed confirmation gate.
 Local evidence: `evidence/attack-beat-13/`; definitions: [attack/beat guide](attack-beat.md).
+
+## Song-wide transitions; experimental recurrence (2026-10-14)
+
+The new stateless MCP tool compares compact1s packets from actual timing calls across <=600s. Default returns transition candidates, observed contrasts and explicit coverage/gaps. Recurrence is withheld unless explicitly requested as experimental; withheld is not zero detections. No new model/API/dependency or browser requirement. [Contract, metrics and failure interpretation](music-structure.md).
+
+Frozen B Confirm: six distinct synthetic clips,376s. Transitions macroF1 .885714,7TP/2FP/0FN; equal-energy recall5/5 vs0/5 unchanged waveform-change cues. Steady/drift/silence controls all0pairs/0transitions. Substantial phrase-pair retrieval fails the original F1>=.80 gate: .555556,3TP/4FP/1FN, macrorecall .833333. One long return merges two reference sections; four short motifs fall outside section labels. Original score/criteriaPass=false retained, no post-result rescoring. Default transition adoption is a restricted practical choice supported by its separately frozen gate; the original combined experiment did not pass. Clean full-section recurrence stays inconclusive under this data/budget.
+
+One actual600s comparator call54.9471ms (guard500ms), fixed real-input extraction<=18.689ms/30s (guard25ms); all old frontend features/spectral frames exact on three inputs. Local evidence: `evidence/structure-15/`. Synthetic/constructed examples are not ground truth for the form of real songs. Whole-request speed, whole-isolate peak and hosted deployment remain unverified.
 
 ## Sources and assets
 

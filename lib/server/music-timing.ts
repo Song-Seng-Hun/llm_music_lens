@@ -17,7 +17,7 @@ export async function analyzeMusicTiming(args: unknown) {
   const sha256 = Array.from(new Uint8Array(hash), n => n.toString(16).padStart(2, "0")).join("");
   try {
     const { analyzeBeatPcm } = await import("./beat-analysis.mjs");
-    const { acoustics, attackCandidates, ...timing } = await analyzeBeatPcm(samples, { sampleRate: TIMING_SAMPLE_RATE });
+    const { acoustics, attackCandidates, structureFrames, ...timing } = await analyzeBeatPcm(samples, { sampleRate: TIMING_SAMPLE_RATE });
     const pitch = vocalPitchContext(input.sourceKind === "isolated-vocal" ? analyzeVocalPitch(samples, TIMING_SAMPLE_RATE) : undefined);
     const envelope = analyzeWaveformEnvelope(samples, TIMING_SAMPLE_RATE, { detail: input.waveformDetail });
     const context = waveformContext(envelope.activity.regions, input, timing.beats);
@@ -27,6 +27,7 @@ export async function analyzeMusicTiming(args: unknown) {
       // Times stay excerpt-relative: offsetSeconds is explicit instead of
       // silently mixing global timestamps with excerpt-local provenance.
       clock: "excerpt-relative-seconds; add source.offsetSeconds for song time",
+      structurePacket: { schema: "music-structure-packet/1", recipe: "logmel16-1s-sequence-v1", source: { sha256, offsetSeconds: input.offsetSeconds, duration }, frames: structureFrames },
       timing: { ...timing, ...beatContext(timing.beats, timing.downbeats) },
       vocalTiming: linkVocalTiming(input, timing.beats, timing.downbeats, duration),
       pitch,

@@ -12,6 +12,8 @@ MCP `analyze_music_timing`은 이제 서버에서 음원을 직접 분석해 박
 
 **서버 보컬 음높이:** `sourceKind: "isolated-vocal"`로 보컬 단독 PCM을 주면 `pitch`에 20ms 간격의 Hz·소수 MIDI·주기성과 음 이름 요약을 반환합니다. 알 수 없는 값과 파일 양끝은 null이며 혼합음에서는 비활성입니다. 새 모델/API가 없는 방식으로, 별도 보컬 4개의 50센트 음높이 프레임 F1은 기존 빠른 분석 대비 **51.53% → 80.99%**였습니다. 무성 구간 오검출·옥타브 오류는 늘었으며 자동 음표 경계나 악보 전사는 아닙니다. [비교 조건과 한계](docs/server-vocal-pitch.md).
 
+**곡 전체 전환 분석:** 각 30초 분석의 `structurePacket`을 `analyze_music_structure`에 모으면 최대 10분의 전환 후보·주파수/음량 변화·미분석 구간을 비교합니다. 별도 합성 확인 샘플에서 전환 7곳을 모두 찾고 추가 후보 2곳을 반환했습니다. 같은 음량의 전환은 기존 음량 단서 0/5 → 5/5였습니다. 반복 구간은 평가 기준 미달이어서 기본 출력에서 보류하며, `includeExperimentalRepetitions: true`로만 실험 후보를 받습니다. 후렴/절 판정이나 실제 곡 전반의 정확도 보증은 아닙니다. [실패를 포함한 비교 결과·호출법](docs/music-structure.md).
+
 프로젝트 저장소: [Song-Seng-Hun/llm_music_lens](https://github.com/Song-Seng-Hun/llm_music_lens). 소스·테스트·설치 스크립트·라이선스와 서버 실행에 필요한 MIT Beat This 모델(약 9.4MB)을 보관합니다. 다른 연구 모델, 음원, 정답 주석, 실행 로그와 실험 원자료는 커밋하지 않습니다. `evidence/` 및 연구용 `examples/` 링크는 기존 로컬 기록이며 새 clone에는 없습니다. 측정 요약은 [연구 상태와 한계](docs/research-status.md)에 있습니다.
 
 ## 바로 실행
