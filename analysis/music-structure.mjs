@@ -147,11 +147,15 @@ function transitions(frames) {
 }
 
 /** Stateless caller-packet evidence; hashes do not authenticate the audio. */
-export function analyzeStructure({ duration, packets }) {
+export function analyzeStructure({ duration, packets, includeExperimentalRepetitions = true }) {
   const { frames, rows, coverage } = checkedFrames(duration, packets);
-  const { comparisonCells, ...repeats } = recurrence(frames);
+  const { comparisonCells, ...repeats } = includeExperimentalRepetitions ? recurrence(frames) : {
+    repetitions: [], repetitionsTotal: 0, repetitionsTruncated: false, comparisonCells: 0,
+  };
   return { schema: 'music-structure/1', recipe: STRUCTURE_RECIPE, durationSeconds: duration, coverage, ...repeats, ...transitions(frames),
-    method: '16 grouped log-mel bands; aligned cosine sequences >=4s, <=60s; variation and 0.5 unaligned-distance specificity gates; maximal pairs suppress >=80% overlapping/contained subpatterns; 3s before/after novelty; 1s resolution',
+    method: includeExperimentalRepetitions
+      ? '16 grouped log-mel bands; aligned cosine sequences >=4s, <=60s; variation and 0.5 unaligned-distance specificity gates; maximal pairs suppress >=80% overlapping/contained subpatterns; 3s before/after novelty; 1s resolution'
+      : '16 grouped log-mel bands; recurrence withheld (not computed); 3s before/after novelty; 1s resolution',
     warnings: [
       'Caller-held packets are unverified observations; source hashes and offsets do not authenticate a song, continuity or source attribution.',
       'Similarity and novelty are heuristic measurements, not probabilities or verified chorus, verse, instrument or artistic-intent labels.',

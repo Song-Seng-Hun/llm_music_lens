@@ -53,6 +53,7 @@ test("MCP structure dispatch preserves fractional source offsets, gaps and parti
   assert.equal(result.coverage.complete, false);
   assert.deepEqual(result.coverage.gaps, [{ start: 0, end: 0.25 }, { start: 4.25, end: 7 }, { start: 11.25, end: 12 }]);
   assert.equal(result.repetitionEvidence.status, "experimental");
+  assert.ok(result.diagnostics.comparisonCells > 0);
   assert.ok(result.repetitions!.every(pair => pair.first.end <= 4.25 && pair.second.start >= 7));
   assert.ok(result.transitions.every(transition => transition.time < 4.25 || transition.time >= 7));
   assert.deepEqual(result, await callMusicTool("analyze_music_structure", args, services));
@@ -61,6 +62,9 @@ test("MCP structure dispatch preserves fractional source offsets, gaps and parti
   assert.equal("repetitions" in normal, false);
   assert.equal("repetitionsTotal" in normal, false);
   assert.equal("repetitionsTruncated" in normal, false);
+  // Withheld recurrence must skip its work, not compute then discard results.
+  assert.equal(normal.diagnostics.comparisonCells, 0);
+  assert.equal(normal.method, "16 grouped log-mel bands; recurrence withheld (not computed); 3s before/after novelty; 1s resolution");
   assert.deepEqual(normal.transitions, result.transitions);
   assert.ok(MCP_TOOLS.some(tool => tool.name === "analyze_music_structure"));
 });

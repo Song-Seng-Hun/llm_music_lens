@@ -22,7 +22,7 @@ Experimental sequence comparison uses aligned full1s rows; 4–60s occurrences, 
 
 Transitions compare contiguous3s windows before/after a candidate. `support` names those intervals; spectral distance, RMS change and low-share change explain the candidate. Timing resolution is about1s, not measured boundary accuracy. Similarity and novelty are heuristics, not probabilities. No verified verse/chorus, instrument, emotion, style or artistic-intent labels.
 
-At most16 repeat pairs and24 transition peaks are returned; `Total` and `Truncated` fields disclose omitted detail. Comparisons use at most600 full rows and a bounded pair matrix. This does not establish whole-isolate peak memory or hosted throughput.
+At most16 repeat pairs and24 transition peaks are returned; `Total` and `Truncated` fields disclose omitted detail. Comparisons use at most600 full rows. Default requests skip recurrence computation entirely and report `diagnostics.comparisonCells: 0`; the method string identifies transition-only execution. Only explicit experimental recurrence allocates the bounded pair matrix (up to1,440,000bytes of Float32 storage). Withheld arrays/totals remain omitted, never reported as no repetition. This does not establish whole-isolate peak memory or hosted throughput.
 
 ## Evaluation
 
