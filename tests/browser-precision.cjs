@@ -1,0 +1,100 @@
+// Intent: validate real browser model assets, worker/UI, exports, storage and
+// MCP evidence. Synthetic audio only; not a real-song accuracy evaluation.
+/* eslint-disable @typescript-eslint/no-require-imports -- This .cjs Node harness resolves the user's existing Playwright installation. */
+const fs = require('node:fs');
+const path = require('node:path');
+const assert = require('node:assert/strict');
+const { chromium } = require(process.env.PLAYWRIGHT_MODULE);
+const evidence = path.resolve(process.env.MUSIC_EVIDENCE_DIR || 'evidence/precision'); fs.mkdirSync(evidence, { recursive: true });
+const checks = [], issues = [], requests = [], savedIds = [];
+const base = 'http://127.0.0.1:5173';
+(async () => {
+  const browser = await chromium.launch({ executablePath: process.env.BROWSER_EXECUTABLE, headless: true });
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1050 }, acceptDownloads: true });
+  const page = await context.newPage();
+  page.on('pageerror', e => issues.push(e.message));
+  page.on('console', m => { if (m.type() === 'error') console.error(m.text()); });
+  context.on('request', r => requests.push({ method: r.method(), url: r.url() }));
+  try {
+    await page.goto(base); await page.waitForLoadState('networkidle');
+    await page.getByRole('button', { name: /파일 없이 합성 데모/ }).click();
+    await page.getByRole('button', { name: '정밀 분석 시작', exact: true }).click();
+    await page.getByRole('region', { name: '분석 결과' }).waitFor({ timeout: 240000 });
+    const d = page.waitForEvent('download'); await page.getByRole('button', { name: 'JSON', exact: true }).click();
+    await (await d).saveAs(path.join(evidence, 'browser-report.json'));
+    const report = JSON.parse(fs.readFileSync(path.join(evidence, 'browser-report.json'), 'utf8'));
+    assert.equal(report.detail.notes.status, 'complete', JSON.stringify(report.detail.notes.warnings));
+    assert.ok(report.detail.notes.items.length > 0); assert.equal(report.detail.lyrics.status, 'skipped');
+    assert.ok(report.detail.rhythm.beats.length > 10); assert.ok(report.detail.rhythm.onsets.length > 10);
+    assert.ok(Math.abs(report.detail.rhythm.bpm - 120) <= 1.5, `demo BPM ${report.detail.rhythm.bpm}`);
+    assert.ok(report.detail.features.percussion.length > 0);
+    assert.equal(report.detail.rhythm.tempoEvidence.status, 'supported');
+    assert.equal(report.detail.rhythm.acoustics.windows.length, 16);
+    assert.ok(report.detail.rhythm.acoustics.windows.some(w => w.centroidHz > 0 && w.bandBalance));
+    assert.equal(report.detail.harmony.source, 'note-events');
+    assert.equal(report.detail.rhythm.key.label, report.detail.harmony.key.label);
+    assert.ok(report.detail.harmony.key.candidates.every(k => / (major|minor)$/.test(k.label)));
+    assert.deepEqual(report.detail.rhythm.chords, report.detail.harmony.chords.map(({start,end,label,confidence}) => ({start,end,label,confidence})));
+    checks.push('real Basic Pitch WASM inference + spectral analysis -> UI -> JSON');
+    await page.getByRole('tab', { name: '음높이 · 화음' }).click(); await page.getByRole('img', { name: '현재 20초 구간의 음표 후보' }).waitFor();
+    await page.getByRole('region', { name: '코드와 장단조' }).waitFor();
+    assert.ok((await page.getByTestId('harmony-key').innerText()).length > 0);
+    await page.getByRole('slider', { name: '재생 위치' }).fill('3'); await page.waitForTimeout(100);
+    assert.ok(await page.locator('audio').evaluate(a => a.currentTime) >= 3); checks.push('polyphonic note view and actual audio seek');
+    await page.screenshot({ path: path.join(evidence, 'detail-desktop.png'), fullPage: true });
+    await context.request.get(base + '/signin-with-chatgpt?return_to=/');
+    const stored = await context.request.post(base + '/api/reports', { data: report }); assert.equal(stored.status(), 201, await stored.text());
+    const saved = (await stored.json()).report; savedIds.push(saved.id); assert.deepEqual(saved.detail, report.detail);
+    const rpc = async (name, args) => (await context.request.post(base + '/mcp', { data: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } } })).json();
+    const timeline = await rpc('get_music_timeline', { id: saved.id, start: 0, end: 16 });
+    assert.equal(timeline.result.isError, false); const result = JSON.parse(timeline.result.content[0].text);
+    assert.ok(result.noteEvents.items.length > 0); assert.ok(result.bandOnsets.items.length > 0); assert.ok(result.energy.items.length > 0);
+    assert.ok(result.features.percussionCandidates.items.length > 0);
+    assert.equal(result.detailStatus.models.notes, report.detail.notes.model);
+    assert.deepEqual(result.acoustics.windows.items, report.detail.rhythm.acoustics.windows);
+    assert.deepEqual(result.tempoEvidence.segments.items, report.detail.rhythm.tempoEvidence.segments);
+    assert.deepEqual(result.harmony.chords.items, report.detail.harmony.chords);
+    assert.deepEqual(result.harmony.key, report.detail.harmony.key);
+    const summary = JSON.parse((await rpc('get_music_report', { id: saved.id })).result.content[0].text);
+    assert.deepEqual(summary.detail.features.pitchSummary, report.detail.features.pitchSummary);
+    assert.deepEqual(summary.detail.acoustics.summary, report.detail.rhythm.acoustics.summary);
+    assert.deepEqual(summary.key, report.detail.harmony.key);
+    checks.push('detail D1 round-trip and real bounded MCP evidence');
+    await page.setViewportSize({ width: 390, height: 844 });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+    await page.screenshot({ path: path.join(evidence, 'harmony-mobile.png'), fullPage: true });
+    checks.push('harmony key alternatives and chord members fit mobile viewport');
+    await page.getByRole('tab', { name: '분석 단서' }).click();
+    await page.getByRole('heading', { name: '곡에서 뽑은 해석 단서', exact: true }).waitFor();
+    await page.getByRole('region', { name: '음색과 타격 밀도' }).waitFor();
+    await page.getByRole('region', { name: '템포 근거' }).waitFor();
+    await page.setViewportSize({ width: 390, height: 844 });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+    await page.screenshot({ path: path.join(evidence, 'detail-mobile.png'), fullPage: true }); checks.push('mobile detail fits viewport');
+    await page.getByRole('button', { name: '정밀 분석 시작', exact: true }).click(); await page.getByRole('button', { name: '취소', exact: true }).click();
+    await page.getByRole('status').filter({ hasText: '로컬 분석을 취소' }).waitFor();
+    const oldId = report.id; await page.waitForTimeout(1200);
+    const d2 = page.waitForEvent('download'); await page.getByRole('button', { name: 'JSON', exact: true }).click(); const finalPath = path.join(evidence, 'after-cancel.json'); await (await d2).saveAs(finalPath);
+    assert.equal(JSON.parse(fs.readFileSync(finalPath, 'utf8')).id, oldId); checks.push('cancel preserves earlier report; no late replacement');
+    if (process.env.MUSIC_REAL_FIXTURE) {
+      await page.getByTestId('audio-file').setInputFiles(path.resolve(process.env.MUSIC_REAL_FIXTURE));
+      await page.getByRole('button', { name: '정밀 분석 시작', exact: true }).click();
+      await page.getByRole('status').filter({ hasText: '브라우저 분석 완료' }).waitFor({ timeout: 240000 });
+      const realDownload = page.waitForEvent('download');
+      await page.getByRole('button', { name: 'JSON', exact: true }).click();
+      const realPath = path.join(evidence, 'real-music-report.json'); await (await realDownload).saveAs(realPath);
+      const real = JSON.parse(fs.readFileSync(realPath, 'utf8'));
+      assert.notEqual(real.id, oldId); assert.equal(real.detail.notes.status, 'complete');
+      assert.ok(real.detail.rhythm.acoustics.windows.length > 10);
+      assert.ok(real.detail.notes.items.length > 0);
+      checks.push('licensed drum/bass excerpt: actual decoder + FFT/tempo + Basic Pitch -> validated report (accuracy unscored)');
+      const handoff = page.waitForEvent('download'); await page.getByRole('button', { name: 'AI 팀 전달문', exact: true }).click();
+      await (await handoff).saveAs(path.join(evidence, 'real-music-handoff.md'));
+    }
+    assert.deepEqual(issues, []); assert.equal(requests.some(r => /^https?:/.test(r.url) && new URL(r.url).origin !== base), false);
+    checks.push('note-only browser flow makes no off-origin requests');
+  } finally {
+    await browser.close(); fs.writeFileSync(path.join(evidence, 'browser-checks.json'), JSON.stringify({ checks, issues, savedIds, requests }, null, 2));
+  }
+  console.log(JSON.stringify({ checks, issues, savedIds }));
+})().catch(e => { console.error(e); process.exitCode = 1; });

@@ -1,0 +1,11 @@
+SOME: Singing-Oriented MIDI Extractor
+Authors: openvpi / SOME contributors.
+Source: https://github.com/openvpi/SOME
+Code license: MIT (source LICENSE).
+Published model license: Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International.
+License: https://creativecommons.org/licenses/by-nc-sa/4.0/
+Release notice: https://github.com/openvpi/SOME/releases/tag/v0.0.1
+OpenUtau distribution: https://github.com/xunmengshe/OpenUtau/releases/download/0.0.0.0/some-0.0.1.oudep
+Model: 0918_continuous128_clean_3spk.onnx
+SHA256: 9d55f9d239e9d70d1bf039506cf1c428b657df7bbb8b94104ca882af6b721e06
+Model bytes are unchanged. Music Lens adds input routing, bounded windows and output presentation; it preserves the model's fractional pitch and does not claim calibrated confidence.
