@@ -1,6 +1,7 @@
 // Bounded local spectral measurements. All scores are heuristics, not probabilities.
 import { aggregateAcoustics } from './analysis/acoustics.mjs';
 import { spectralDescriptors } from './analysis/spectral-descriptors.mjs';
+import { spectralFlux, pickSpectralOnsets, BROWSER_ONSET_OPTIONS } from './analysis/spectral-onsets.mjs';
 import { estimateTempo } from './analysis/tempo-grid.mjs';
 const MAX_SECONDS = 600;
 const HOP = 1024;
@@ -55,7 +56,7 @@ export function analyzeRhythm(samples, sampleRate, onProgress = () => {}) {
   if (duration > MAX_SECONDS) throw new Error('Precision rhythm analysis supports at most 600 seconds.');
   for (const x of samples) if (!Number.isFinite(x)) throw new Error('Audio contains non-finite samples.');
   const frameRate = sampleRate / HOP, frameCount = Math.ceil(samples.length / HOP);
-  const fftRe = new Float64Array(SIZE), fftIm = new Float64Array(SIZE), prev = new Float64Array(SIZE / 2);
+  const fftRe = new Float64Array(SIZE), fftIm = new Float64Array(SIZE), prev = new Float64Array(SIZE / 2 - 1), magnitudes = new Float64Array(SIZE / 2 - 1);
   const frameFeatures = [], onsetSeries = [], chordBuckets = [];
   let totalEnergy = 0;
   for (let f = 0; f < frameCount; f++) {
@@ -68,42 +69,33 @@ export function analyzeRhythm(samples, sampleRate, onProgress = () => {}) {
       fftRe[i] = x * w; fftIm[i] = 0; rmsSum += x * x;
     }
     fft(fftRe, fftIm);
-    let lo = 0, mid = 0, hi = 0, fluxLo = 0, fluxMid = 0, fluxHi = 0;
+    let lo = 0, mid = 0, hi = 0;
     const frameChroma = Array(12).fill(0);
     for (let k = 1; k < SIZE / 2; k++) {
       const hz = k * sampleRate / SIZE, mag = Math.hypot(fftRe[k], fftIm[k]) / SIZE;
-      const d = Math.max(0, mag - prev[k - 1]); prev[k - 1] = mag;
-      if (hz < 180) { lo += mag; fluxLo += d; }
-      else if (hz < 2000) { mid += mag; fluxMid += d; }
-      else { hi += mag; fluxHi += d; }
+      magnitudes[k - 1] = mag;
+      if (hz < 180) lo += mag;
+      else if (hz < 2000) mid += mag;
+      else hi += mag;
       if (hz >= 45 && hz <= 4000 && mag > 0) {
         const midi = Math.round(69 + 12 * Math.log2(hz / 440));
         if (midi >= 36 && midi <= 84) { const pc = (midi % 12 + 12) % 12; frameChroma[pc] += mag; }
       }
     }
     const rms = Math.sqrt(rmsSum / SIZE);
+    const flux = spectralFlux(magnitudes, prev, sampleRate, SIZE);
     totalEnergy += rmsSum;
-    frameFeatures.push({ time: Math.min(duration, center / sampleRate), lo, mid, hi, rms, fluxLo, fluxMid, fluxHi,
-      ...spectralDescriptors(prev.subarray(0, SIZE / 2 - 1), sampleRate, SIZE) });
-    onsetSeries.push(fluxLo + fluxMid + fluxHi);
+    frameFeatures.push({ time: Math.min(duration, center / sampleRate), lo, mid, hi, rms, ...flux,
+      ...spectralDescriptors(magnitudes, sampleRate, SIZE) });
+    onsetSeries.push(flux.fluxLow + flux.fluxMid + flux.fluxHigh);
     const bucket = Math.floor(center / sampleRate);
     chordBuckets[bucket] ??= Array(12).fill(0);
     for (let pc = 0; pc < 12; pc++) chordBuckets[bucket][pc] += frameChroma[pc];
     if (f % 128 === 0) onProgress(Math.min(0.8, f / frameCount * 0.8), 'Spectral rhythm and harmony');
   }
   const active = Math.sqrt(totalEnergy / samples.length) > 0.0005;
-  const maxFlux = Math.max(0, ...onsetSeries);
-  const onsetsAll = [];
-  if (active && maxFlux > 0) {
-    const smooth = onsetSeries.map((x, i) => (x + (onsetSeries[i - 1] ?? 0) * 0.5 + (onsetSeries[i + 1] ?? 0) * 0.5) / 2);
-    const threshold = Math.max(maxFlux * 0.08, smooth.reduce((a, b) => a + b, 0) / smooth.length * 1.8);
-    let last = -Infinity;
-    for (let i = 1; i + 1 < smooth.length; i++) {
-      if (smooth[i] < threshold || smooth[i] < smooth[i - 1] || smooth[i] <= smooth[i + 1] || i / frameRate - last < 0.07) continue;
-      const ff = frameFeatures[i], bands = [['low', ff.fluxLo], ['mid', ff.fluxMid], ['high', ff.fluxHi]].sort((a, b) => b[1] - a[1]);
-      onsetsAll.push({ time: ff.time, strength: clamp(smooth[i] / maxFlux), band: bands[0][0] }); last = ff.time;
-    }
-  }
+  const onsetsAll = pickSpectralOnsets(frameFeatures, duration, { ...BROWSER_ONSET_OPTIONS, active })
+    .map(({ time, strength, band }) => ({ time, strength, band }));
   const envAll = [];
   const envStep = Math.max(1, Math.ceil(frameCount / 2400));
   for (let i = 0; i < frameFeatures.length; i += envStep) {

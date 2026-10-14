@@ -106,6 +106,21 @@ try {
   receipt.addedSpectralWireBytes = Buffer.byteLength(JSON.stringify(result.value)) - Buffer.byteLength(JSON.stringify(withoutSpectral));
   assert.ok(receipt.addedSpectralWireBytes <= 30000);
   receipt.cases.push({ name: 'Actual shared FFT spectral texture reaches MCP with bounded wire bytes', status: result.status, pass: true });
+  assert.ok(analysis.attacks.total > 0);
+  assert.equal(analysis.attacks.events.length, Math.min(64, analysis.attacks.total));
+  assert.equal(analysis.attacks.truncated, analysis.attacks.total > 64);
+  assert.equal(analysis.attacks.density.reduce((sum, window) => sum + window.count, 0), analysis.attacks.total);
+  assert.equal(analysis.attacks.sourceKind, 'mixture');
+  assert.ok(!('attackCandidates' in analysis.timing));
+  assert.ok(analysis.attacks.events.every(event => event.time >= 0 && event.time < analysis.source.duration));
+  const withoutAttacks = structuredClone(result.value);
+  delete withoutAttacks.result.structuredContent.result.attacks;
+  const withoutAttackText = JSON.parse(withoutAttacks.result.content[0].text);
+  delete withoutAttackText.attacks;
+  withoutAttacks.result.content[0].text = JSON.stringify(withoutAttackText);
+  receipt.addedAttackWireBytes = Buffer.byteLength(JSON.stringify(result.value)) - Buffer.byteLength(JSON.stringify(withoutAttacks));
+  assert.ok(receipt.addedAttackWireBytes <= 50000);
+  receipt.cases.push({ name: 'Actual spectral attacks link to beats with capped detail and complete density', status: result.status, pass: true });
   receipt.result = analysis;
   receipt.pass = true;
 } catch (error) {

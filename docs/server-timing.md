@@ -47,6 +47,12 @@ power shares, magnitude centroid,85%power rolloff and power flatness. Below the
 noise probability is implied. See [spectral texture](spectral-texture.md) for
 frequency boundaries, averaging, padding and verification limits.
 
+`attacks` adds frequency-change candidates from the same FFT, signed offsets
+to actual detected beats, local beat phase and one-second candidate density.
+It retains64event details with total/truncated; density counts all candidates.
+These are not drum or rap-syllable counts, and offsets do not establish swing
+or intentional groove. See [attack/beat observations](attack-beat.md).
+
 Optional `timedVocal` accepts `{unit,source,items:[{start,end,text}]}` with
 unit `phone`, `mora`, `syllable` or `word`, at most256items. Optional `noteEvents`
 accepts `{source,mode,items:[{start,end,midi}]}`, mode `solo-vocal` or `polyphonic`,

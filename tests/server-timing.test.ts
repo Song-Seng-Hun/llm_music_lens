@@ -6,6 +6,7 @@ import { AppError } from "../lib/validation.ts";
 import { linkVocalTiming } from "../lib/vocal-timing.ts";
 import { beatContext } from "../lib/beat-context.ts";
 import { waveformContext } from "../lib/waveform-context.ts";
+import { attackContext } from "../lib/attack-context.ts";
 
 function input(seconds = 1) {
   const bytes = Buffer.alloc(TIMING_SAMPLE_RATE * seconds * 2);
@@ -81,6 +82,40 @@ test("vocal timing links supplied intervals without manufacturing syllables or m
   const context = beatContext([0, 0.5, 1, 1.5, 2], [0, 2]);
   assert.equal(context.tempo.bpm, 120); assert.equal(context.meter, null);
   assert.equal(context.downbeatSpans[0].detectedBeatCount, 4);
+});
+
+// Candidate-to-beat signs, midpoint ties and excerpt-edge extrapolation affect
+// groove interpretation; onset arithmetic alone cannot check these relations.
+test("attack context uses actual beat intervals, signed offsets and no extrapolation", () => {
+  const times = [0.1, 0.5, 0.92, 1.08, 1.3, 1.6, 1.8];
+  const candidates = times.map(time => ({ time, strength: 0.7, band: 'mid', fluxLow: 1, fluxMid: 3, fluxHigh: 0 }));
+  const before = JSON.stringify(candidates);
+  const { events } = attackContext(candidates, [0.5, 1, 1.6], 2);
+  assert.equal(events[0].nearestBeat, null); assert.equal(events[6].beatPhase, null);
+  assert.equal(events[1].beatPhase?.fraction, 0);
+  assert.equal(events[2].nearestBeat?.offsetSeconds, -0.08);
+  assert.equal(events[3].nearestBeat?.offsetSeconds, 0.08);
+  assert.equal(events[4].nearestBeat?.index, 1);
+  assert.equal(events[4].beatPhase?.fraction, 0.5);
+  assert.equal(events[5].nearestBeat?.index, 2); assert.equal(events[5].beatPhase?.fraction, 1);
+  assert.equal(JSON.stringify(candidates), before);
+  assert.ok(attackContext(candidates, [1], 2).events.every(event => event.nearestBeat === null));
+  const midpoint = attackContext([{ ...candidates[0], time: 0.2 }], [0.1, 0.3], 1).events[0];
+  assert.equal(midpoint.nearestBeat?.index, 0, 'decimal midpoint ties choose earlier beat');
+  assert.equal(midpoint.nearestBeat?.offsetSeconds, 0.1);
+});
+
+// The cap must not silently lower density, overrun fractional tails, or make
+// the text+structured MCP duplication exceed the frozen response budget.
+test("attack context bounds event details while retaining all density counts", () => {
+  const duration = 29 + 1 / 22050;
+  const candidates = Array.from({ length: 290 }, (_, i) => ({ time: i / 10, strength: 0.7654321, band: ['low', 'mid', 'high'][i % 3], fluxLow: 1.111, fluxMid: 2.222, fluxHigh: 3.334 }));
+  const result = attackContext(candidates, Array.from({ length: 60 }, (_, i) => i / 2), duration);
+  assert.equal(result.events.length, 64); assert.equal(result.total, 290); assert.equal(result.truncated, true);
+  assert.equal(result.density.reduce((sum, window) => sum + window.count, 0), 290);
+  assert.equal(result.density.at(-1)?.end, duration);
+  const wire = JSON.stringify({ content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: { result } });
+  assert.ok(Buffer.byteLength(wire) < 48000, 'allow at least 2KB for method/warning fields within 50KB guard');
 });
 
 // Dispatch can silently remain on saved-report paths even with working DSP.

@@ -4,6 +4,8 @@ import { beatContext } from "../beat-context.ts";
 import { linkVocalTiming } from "../vocal-timing.ts";
 import { analyzeWaveformEnvelope } from "../../analysis/waveform-envelope.mjs";
 import { waveformContext } from "../waveform-context.ts";
+import { attackContext } from "../attack-context.ts";
+import { SERVER_ONSET_OPTIONS } from "../../public/analysis/spectral-onsets.mjs";
 
 // The production MCP route calls this function. Loading the model is lazy so
 // saved-report reads do not initialize the inference runtime.
@@ -13,7 +15,7 @@ export async function analyzeMusicTiming(args: unknown) {
   const sha256 = Array.from(new Uint8Array(hash), n => n.toString(16).padStart(2, "0")).join("");
   try {
     const { analyzeBeatPcm } = await import("./beat-analysis.mjs");
-    const { acoustics, ...timing } = await analyzeBeatPcm(samples, { sampleRate: TIMING_SAMPLE_RATE });
+    const { acoustics, attackCandidates, ...timing } = await analyzeBeatPcm(samples, { sampleRate: TIMING_SAMPLE_RATE });
     const envelope = analyzeWaveformEnvelope(samples, TIMING_SAMPLE_RATE, { detail: input.waveformDetail });
     const context = waveformContext(envelope.activity.regions, input, timing.beats);
     return {
@@ -24,6 +26,27 @@ export async function analyzeMusicTiming(args: unknown) {
       clock: "excerpt-relative-seconds; add source.offsetSeconds for song time",
       timing: { ...timing, ...beatContext(timing.beats, timing.downbeats) },
       vocalTiming: linkVocalTiming(input, timing.beats, timing.downbeats, duration),
+      attacks: {
+        ...attackContext(attackCandidates, timing.beats, duration),
+        method: { ...SERVER_ONSET_OPTIONS,
+          fftSize: 1024, sampleRate: TIMING_SAMPLE_RATE, hopSeconds: 0.02,
+          input: "positive changes in interior FFT magnitude / fftSize, summed <180/180-2000/>=2000 Hz",
+          firstFrame: "reference only; no observed preceding audio",
+          edgeSupport: "Candidates withheld before frameContextSeconds + 2 hops and after duration - frameContextSeconds - 1 hop; missing candidates there are unknown, not absence of an attack",
+          clock: "excerpt-relative-seconds; add source.offsetSeconds for song time",
+          strength: "smoothed total flux / excerpt maximum raw flux; uncalibrated and crop-dependent",
+          fluxShares: "unsmoothed positive magnitude changes at candidate frame; not power shares",
+          beatRelation: "inside bracketing detected beats only; offset=candidate time minus nearest beat time, midpoint ties earlier",
+        },
+        sourceKind: input.sourceKind,
+        sourceAttribution: input.sourceKind === "isolated-vocal" ? "caller-declared isolated vocal; not verified or separated by this tool" : "mixture changes; cannot attribute a candidate to a voice or instrument",
+        warnings: [
+          "Candidates are spectral changes, not identified drums, syllables, breaths, notes or rap articulation. Density counts detected candidates, not actual performed hits.",
+          "Twenty-millisecond frame spacing is not timing accuracy. Centered windows, smoothing, thresholding and crop edges can shift, merge or miss attacks.",
+          "Offsets and phase depend on estimated beats and attack timing. They do not certify syncopation, swing or intentional ahead/behind playing. No beat grid is extrapolated outside observed intervals.",
+          "Only the first 64 events are retained; total and one-second density include every detected candidate. Use a shorter excerpt when truncated.",
+        ],
+      },
       acoustics: {
         ...acoustics,
         sourceKind: input.sourceKind,

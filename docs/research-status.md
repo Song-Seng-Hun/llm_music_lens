@@ -40,6 +40,41 @@ Eight fixed paired browser runs preserved native outputs/notes and passed overhe
 
 The initial [timing pilot](timing-pilot.md) retained working Beat This and TIFA components without changing production. The follow-up now connects server Beat This to the actual `analyze_music_timing` MCP tool. Same12 waveform/annotation comparison: beat macroF1 18.3250→79.4279%;11 wins/1 loss, predominantly recovered coverage. Precision95.45→80.89%, recall12.26→79.71%. New downbeat macroF1 58.3322%. Actual MCP12/12 produces exactly the frozen candidate events and PCM identities. Median per-case runner3.157s/30s excerpt; WASM capacity69.1875MiB is not whole-isolate peak. TIFA int8/int4 both exceed128MiB in actual workerd; server acoustic syllable alignment stays unavailable. Supplied timed units can be linked to detected beats/notes. [Full methods, failures and limits](server-timing.md); local evidence `evidence/timing-integration-10/`. Hosted Sites deployment is not claimed.
 
+## Server spectral attacks and beat relations
+
+The actual `analyze_music_timing` path now returns positive spectral-change
+candidates, signed offsets to observed beats, phase within actual beat
+intervals, and one-second candidate density. It reuses the existing FFT;
+there is no additional model or external inference. Candidate detail is
+capped at 64 with total/truncated; density includes every candidate.
+
+A bounded three-fixture pilot selected recipe B after removing one reflected
+crop-edge false event. Before confirmation, six distinct 12-second synthetic
+fixtures and a 60ms one-to-one matching tolerance were frozen. The three
+positive fixtures scored **22/22 starts, zero false positives or misses**;
+steady tone, gradual crescendo and silence produced zero detections. On the
+14 sustained-background starts, recall rose from **0/14 energy cues to 14/14
+spectral candidates**. The energy cues are a capability comparator, not a
+competing onset model. This is not a real-song onset accuracy estimate.
+
+Ten complete browser outputs/progress traces remain exact. On the fixed
+three real excerpts, 449,920 model-input floats and 28,120 pre-existing
+spectral scalars remain exact. Single paired Node frontend measurements
+added 13.46ms for 10.25s and 42.47/8.83ms for 30s, within the frozen 100ms
+local guard; peak selection and relation calculations were measured separately.
+No speedup or general hosted-latency claim follows from these single pairs.
+Three actual old/new compiled MCP calls preserve every prior result except
+two diagnostic timers; added response bytes are 15,454 / 42,006 / 41,706,
+including text and structured copies. A 290-candidate serialization fixture
+with complete metadata adds 39,814 bytes, under the frozen 50,000-byte guard.
+Final compiled MCP acceptance passes 8/8 checks; repository tests pass 93/93.
+
+The first approximately 63ms and final 43ms lack sufficient unreflected
+context and are not evaluated for attacks. Candidate counts are not drum or
+rap-syllable counts; beat and attack estimation errors both affect offsets.
+Server vocal pitch tracking and whole-song structure are separate follow-ups.
+Local evidence: `evidence/attack-beat-13/`; definitions: [attack/beat guide](attack-beat.md).
+
 ## Sources and assets
 
 - [vocadito v3](https://zenodo.org/records/5578807): human unaccompanied singing and two musician annotations.
