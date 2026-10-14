@@ -13,6 +13,8 @@ For new beat analysis, use `analyze_music_timing`: the server executes Beat This
 
 Optional `timedVocal` supplies already-timed phones/moras/syllables/words; `noteEvents` supplies note candidates. The tool preserves their times and links them to detected beats/downbeats and note overlaps. Attribution is not verification; overlapping mixture notes do not establish sung pitch. Automatic acoustic syllable alignment is unavailable on the server, not fabricated by dividing words. Downbeats and BPM are estimates; `meter` remains unknown.
 
+`waveform` adds20ms-window/10ms-hop recorded-energy observations. Default100ms curve; `waveformDetail: "fine"` returns10ms points. Inspect activity thresholds, peak/rise/fall candidates, crop-edge flags and truncation. `sourceKind` defaults to mixture; `isolated-vocal` is an unverified caller declaration. Energy is not automatic voice/phoneme/breath detection, perceived loudness or vocal effort. Do not move supplied unit boundaries; context indices only link overlapping evidence. Read `docs/waveform-dynamics.md` for measurement definitions.
+
 Existing browser analysis still supports Basic Pitch and optional Whisper; public model downloads are disclosed in the UI. You interpret results in the current conversation. Sites publication/connection is separate from verified local workerd/MCP execution; use the platform-created private plugin after publication. Do not create a local OAuth stack or claim team access before an actual authorized tool call succeeds.
 
 Read saved-report provenance (the timing tool uses the separate `music-lens-timing/1` result):

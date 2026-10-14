@@ -14,7 +14,7 @@
     "db:generate": "drizzle-kit generate",
     "db:local": "node scripts/local-db.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test tests/keyless-contracts.test.ts tests/audio-engine.test.mjs tests/precision-rhythm.test.mjs tests/musical-features.test.mjs tests/precision-contracts.test.ts tests/tempo-grid.test.mjs tests/harmony.test.mjs tests/vocal-notes.test.mjs tests/server-timing.test.ts"
+    "test": "node --experimental-strip-types --test tests/keyless-contracts.test.ts tests/audio-engine.test.mjs tests/precision-rhythm.test.mjs tests/musical-features.test.mjs tests/precision-contracts.test.ts tests/tempo-grid.test.mjs tests/harmony.test.mjs tests/vocal-notes.test.mjs tests/server-timing.test.ts tests/waveform-envelope.test.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",

@@ -18,6 +18,8 @@ export const timingInputSchema = z.object({
     channels: z.literal(1), data: z.string().min(4).max(TIMING_MAX_BASE64),
   }).strict(),
   offsetSeconds: z.number().finite().min(0).max(600).default(0),
+  sourceKind: z.enum(["mixture", "isolated-vocal"]).default("mixture"),
+  waveformDetail: z.enum(["summary", "fine"]).default("summary"),
   timedVocal: z.object({
     unit: z.enum(["phone", "mora", "syllable", "word"]), source: z.string().min(1).max(300),
     items: z.array(vocalItem).max(256),
@@ -57,11 +59,13 @@ export function decodeTimingAudio(value: unknown) {
 
 export const TIMING_TOOL = {
   name: "analyze_music_timing",
-  description: "Analyze supplied audio on the server (no browser, API key or external inference). Send 1–30s mono22050Hz signed16 little-endian PCM base64. Returns estimated beats, downbeats, BPM and provenance; downbeats are not certified meter. Optional timedVocal/noteEvents (excerpt-relative times) get beat phase/offset and overlap links; supplied timestamps are NOT new acoustic alignment. offsetSeconds places the excerpt in a <=600s song. Independent excerpts may disagree at boundaries. No URL downloads, automatic lyrics/notes, audio/result storage.",
+  description: "Analyze supplied audio on the server (no browser, API key or external inference). Send 1–30s mono22050Hz signed16 little-endian PCM base64. Returns estimated beats, downbeats, BPM, waveform RMS/energy regions/rises/falls and provenance; downbeats are not certified meter. sourceKind defaults to mixture; isolated-vocal is caller attribution, not voice detection. waveformDetail summary returns a100ms curve; fine a10ms curve (same20ms/10ms analysis). Cropped edges are not true onsets/offsets. Optional timedVocal/noteEvents (excerpt-relative times) get beat phase/offset and overlap links; supplied timestamps are NOT new acoustic alignment. offsetSeconds places the excerpt in a <=600s song. Independent excerpts may disagree at boundaries. No URL downloads, automatic lyrics/notes, audio/result storage.",
   inputSchema: {
     type: "object", properties: {
       audio: { type: "object", properties: { encoding: { const: "pcm_s16le", type: "string" }, sampleRate: { const: 22050, type: "integer" }, channels: { const: 1, type: "integer" }, data: { type: "string", minLength: 4, maxLength: TIMING_MAX_BASE64 } }, required: ["encoding", "sampleRate", "channels", "data"], additionalProperties: false },
       offsetSeconds: { type: "number", minimum: 0, maximum: 600, default: 0 },
+      sourceKind: { type: "string", enum: ["mixture", "isolated-vocal"], default: "mixture", description: "Caller-declared signal content; no source separation or voice identification is performed." },
+      waveformDetail: { type: "string", enum: ["summary", "fine"], default: "summary", description: "Output curve at100ms or10ms; both modes use20ms windows every10ms, with sustained changes derived from100ms power groups." },
       timedVocal: { type: "object", properties: {
         unit: { type: "string", enum: ["phone", "mora", "syllable", "word"] }, source: { type: "string", minLength: 1, maxLength: 300 },
         items: { type: "array", maxItems: 256, items: { type: "object", properties: { start: { type: "number", minimum: 0, maximum: 30 }, end: { type: "number", minimum: 0, maximum: 30 }, text: { type: "string", minLength: 1, maxLength: 64 } }, required: ["start", "end", "text"], additionalProperties: false } },

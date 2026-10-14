@@ -33,6 +33,14 @@ counts of detected beats between downbeat candidates, model/recipe hashes and
 warnings. `meter` remains null: a missed downbeat can combine several bars.
 Neither peak strength nor model agreement is a calibrated confidence.
 
+The same call returns `waveform`: short-time RMS, energy-region boundaries,
+peaks and sustained rises/falls, with beat and supplied-unit/note references.
+`sourceKind` defaults to `mixture`; `isolated-vocal` is caller attribution, not
+automatic separation or identification. `waveformDetail` chooses `summary`
+(100ms output curve) or `fine` (10ms); internal20ms/10ms analysis stays the same.
+Clipped edges are not true vocal starts/ends. See [waveform dynamics](waveform-dynamics.md)
+for thresholds, clocks, bounded output and interpretation.
+
 Optional `timedVocal` accepts `{unit,source,items:[{start,end,text}]}` with
 unit `phone`, `mora`, `syllable` or `word`, at most256items. Optional `noteEvents`
 accepts `{source,mode,items:[{start,end,midi}]}`, mode `solo-vocal` or `polyphonic`,

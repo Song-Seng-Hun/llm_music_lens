@@ -80,7 +80,17 @@ try {
   assert.equal(analysis.vocalTiming.unit, vocal.unit);
   assert.deepEqual(analysis.vocalTiming.items.map(({ start, end, text }) => ({ start, end, text })), vocal.items);
   assert.ok(analysis.unavailable.includes('server acoustic syllable alignment'));
+  assert.equal(analysis.waveform.sourceKind, 'mixture');
+  assert.equal(analysis.waveform.analysisWindowSeconds, 0.02);
+  assert.equal(analysis.waveform.analysisHopSeconds, 0.01);
+  assert.equal(analysis.waveform.curve.stepSeconds, 0.1);
+  assert.ok(analysis.waveform.curve.rmsDbfs.length > 0);
+  assert.equal(analysis.waveform.context.total, analysis.waveform.activity.regions.length);
+  assert.equal(analysis.waveform.context.items.length, Math.min(16, analysis.waveform.context.total));
+  assert.equal(analysis.waveform.context.truncated, analysis.waveform.context.total > 16);
+  assert.ok(Buffer.byteLength(JSON.stringify(analysis.waveform)) <= 50000);
   receipt.cases.push({ name: 'Actual model plus supplied phone timing linked, originals intact', status: result.status, count: vocal.items.length, pass: true });
+  receipt.cases.push({ name: 'Actual server waveform evidence returned with mixture attribution and bounded summary', status: result.status, pass: true });
   receipt.result = analysis;
   receipt.pass = true;
 } catch (error) {

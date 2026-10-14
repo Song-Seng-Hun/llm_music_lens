@@ -2,6 +2,8 @@ import { decodeTimingAudio, TIMING_SAMPLE_RATE } from "../music-timing.ts";
 import { AppError } from "../validation.ts";
 import { beatContext } from "../beat-context.ts";
 import { linkVocalTiming } from "../vocal-timing.ts";
+import { analyzeWaveformEnvelope } from "../../analysis/waveform-envelope.mjs";
+import { waveformContext } from "../waveform-context.ts";
 
 // The production MCP route calls this function. Loading the model is lazy so
 // saved-report reads do not initialize the inference runtime.
@@ -12,6 +14,8 @@ export async function analyzeMusicTiming(args: unknown) {
   try {
     const { analyzeBeatPcm } = await import("./beat-analysis.mjs");
     const timing = await analyzeBeatPcm(samples, { sampleRate: TIMING_SAMPLE_RATE });
+    const envelope = analyzeWaveformEnvelope(samples, TIMING_SAMPLE_RATE, { detail: input.waveformDetail });
+    const context = waveformContext(envelope.activity.regions, input, timing.beats);
     return {
       schema: "music-lens-timing/1",
       source: { encoding: "pcm_s16le", sampleRate: TIMING_SAMPLE_RATE, channels: 1, sha256, duration, offsetSeconds: input.offsetSeconds },
@@ -20,6 +24,13 @@ export async function analyzeMusicTiming(args: unknown) {
       clock: "excerpt-relative-seconds; add source.offsetSeconds for song time",
       timing: { ...timing, ...beatContext(timing.beats, timing.downbeats) },
       vocalTiming: linkVocalTiming(input, timing.beats, timing.downbeats, duration),
+      waveform: {
+        ...envelope,
+        sourceKind: input.sourceKind,
+        sourceAttribution: input.sourceKind === "isolated-vocal" ? "caller-declared isolated vocal; not verified or separated by this tool" : "mixture energy; cannot attribute changes to a voice or instrument",
+        context,
+        warnings: [...envelope.warnings, "Energy regions are not phonemes, syllables, breaths or automatic voice detection. RMS is not perceived loudness or vocal effort. Overlap links never establish lyric-to-pitch identity."],
+      },
       unavailable: ["automatic lyrics", "server acoustic syllable alignment", "note transcription"],
     };
   } catch (error) {

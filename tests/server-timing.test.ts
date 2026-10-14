@@ -5,6 +5,7 @@ import { callMusicTool } from "../lib/mcp.ts";
 import { AppError } from "../lib/validation.ts";
 import { linkVocalTiming } from "../lib/vocal-timing.ts";
 import { beatContext } from "../lib/beat-context.ts";
+import { waveformContext } from "../lib/waveform-context.ts";
 
 function input(seconds = 1) {
   const bytes = Buffer.alloc(TIMING_SAMPLE_RATE * seconds * 2);
@@ -34,9 +35,31 @@ test("server audio rejects unsupported formats and invalid bounds", () => {
     { ...valid, audio: { ...valid.audio, data: "A".repeat(TIMING_MAX_BASE64 + 4) } },
     { ...valid, audio: { ...valid.audio, url: "https://example.test/audio" } },
     { ...valid, offsetSeconds: 600 },
+    { ...valid, sourceKind: "automatically-verified-voice" },
+    { ...valid, waveformDetail: "unbounded" },
     { ...valid, timedVocal: { unit: "phone", source: "fixture", items: [{ start: 0.5, end: 2, text: "a" }] } },
     { ...valid, noteEvents: { source: "fixture", mode: "solo-vocal", items: [{ start: 0.8, end: 0.5, midi: 60 }] } },
   ]) assert.throws(() => decodeTimingAudio(value));
+});
+
+// A cropped excerpt must not fabricate a vocal entrance; supplied timings and
+// note identity remain independent evidence even when their intervals overlap.
+test("waveform context distinguishes cropped edges and preserves bounded source references", () => {
+  const decoded = decodeTimingAudio({ ...input(2), timedVocal: { unit: "word", source: "caller", items: Array.from({ length: 12 }, (_, i) => ({ start: i / 10, end: i / 10 + 0.08, text: String(i) })) } });
+  assert.equal(decoded.input.sourceKind, "mixture");
+  assert.equal(decoded.input.waveformDetail, "summary");
+  const before = JSON.stringify(decoded.input.timedVocal);
+  const result = waveformContext([
+    { start: 0, end: 2, peakTime: 0.52, startClipped: true, endClipped: true },
+    { start: 0.31, end: 1.3, peakTime: 1, startClipped: false, endClipped: false },
+  ], decoded.input, [0, 0.5, 1, 1.5]).items;
+  assert.equal(result[0].startBeat, null); assert.equal(result[0].endBeat, null);
+  assert.equal(result[0].peakBeat?.offsetSeconds, 0.02);
+  assert.deepEqual(result[0].suppliedVocalUnits, { indices: [0, 1, 2, 3, 4, 5, 6, 7], total: 12, truncated: true });
+  assert.equal(result[1].startBeat?.offsetSeconds, -0.19);
+  assert.equal(JSON.stringify(decoded.input.timedVocal), before);
+  const dense = waveformContext(Array.from({ length: 64 }, () => ({ start: 0, end: 2, peakTime: 0.52, startClipped: true, endClipped: true })), decoded.input, [0, 0.5, 1, 1.5]);
+  assert.equal(dense.total, 64); assert.equal(dense.items.length, 16); assert.equal(dense.truncated, true);
 });
 
 // Real unit boundaries must survive linkage; even word subdivision would hide
