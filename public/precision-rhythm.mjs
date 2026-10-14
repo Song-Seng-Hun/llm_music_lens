@@ -1,5 +1,6 @@
 // Bounded local spectral measurements. All scores are heuristics, not probabilities.
 import { aggregateAcoustics } from './analysis/acoustics.mjs';
+import { spectralDescriptors } from './analysis/spectral-descriptors.mjs';
 import { estimateTempo } from './analysis/tempo-grid.mjs';
 const MAX_SECONDS = 600;
 const HOP = 1024;
@@ -68,13 +69,9 @@ export function analyzeRhythm(samples, sampleRate, onProgress = () => {}) {
     }
     fft(fftRe, fftIm);
     let lo = 0, mid = 0, hi = 0, fluxLo = 0, fluxMid = 0, fluxHi = 0;
-    let weightedHz = 0, powerLow = 0, powerMid = 0, powerHigh = 0, logPower = 0;
     const frameChroma = Array(12).fill(0);
     for (let k = 1; k < SIZE / 2; k++) {
       const hz = k * sampleRate / SIZE, mag = Math.hypot(fftRe[k], fftIm[k]) / SIZE;
-      const power = mag * mag;
-      weightedHz += hz * mag; logPower += Math.log(Math.max(1e-20, power));
-      if (hz < 180) powerLow += power; else if (hz < 2000) powerMid += power; else powerHigh += power;
       const d = Math.max(0, mag - prev[k - 1]); prev[k - 1] = mag;
       if (hz < 180) { lo += mag; fluxLo += d; }
       else if (hz < 2000) { mid += mag; fluxMid += d; }
@@ -85,17 +82,9 @@ export function analyzeRhythm(samples, sampleRate, onProgress = () => {}) {
       }
     }
     const rms = Math.sqrt(rmsSum / SIZE);
-    const totalPower = powerLow + powerMid + powerHigh, totalMagnitude = lo + mid + hi;
-    let cumulative = 0, rolloffHz = null;
-    if (totalPower > 1e-20) for (let k = 1; k < SIZE / 2; k++) {
-      cumulative += prev[k - 1] ** 2;
-      if (cumulative >= 0.85 * totalPower) { rolloffHz = k * sampleRate / SIZE; break; }
-    }
     totalEnergy += rmsSum;
     frameFeatures.push({ time: Math.min(duration, center / sampleRate), lo, mid, hi, rms, fluxLo, fluxMid, fluxHi,
-      centroidHz: totalMagnitude > 1e-10 ? weightedHz / totalMagnitude : null,
-      flatness: totalPower > 1e-20 ? clamp(Math.exp(logPower / (SIZE / 2 - 1)) / (totalPower / (SIZE / 2 - 1))) : null,
-      rolloffHz, powerLow, powerMid, powerHigh });
+      ...spectralDescriptors(prev.subarray(0, SIZE / 2 - 1), sampleRate, SIZE) });
     onsetSeries.push(fluxLo + fluxMid + fluxHi);
     const bucket = Math.floor(center / sampleRate);
     chordBuckets[bucket] ??= Array(12).fill(0);

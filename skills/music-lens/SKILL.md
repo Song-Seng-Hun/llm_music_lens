@@ -17,6 +17,8 @@ Optional `timedVocal` supplies already-timed phones/moras/syllables/words; `note
 
 Existing browser analysis still supports Basic Pitch and optional Whisper; public model downloads are disclosed in the UI. You interpret results in the current conversation. Sites publication/connection is separate from verified local workerd/MCP execution; use the platform-created private plugin after publication. Do not create a local OAuth stack or claim team access before an actual authorized tool call succeeds.
 
+Server `acoustics` adds1second low/mid/high power shares, centroid,85%power rolloff and flatness from the existing FFT. Read `docs/spectral-texture.md`. Compare timestamped texture; null below -80dBFS means unknown. Flatness is not a noise probability; band balance does not identify instruments, voice, emotion or quality. Frame centers and neighboring context differ from exact sound duration. Keep existing `waveform` energy and `timing` beat evidence separate. The1024-point server and4096-point browser spectra are not numerically interchangeable.
+
 Read saved-report provenance (the timing tool uses the separate `music-lens-timing/1` result):
 - `local-signal`: browser estimates. If `detail` exists, inspect its independent notes/lyrics status, model, warnings and truncation. Otherwise the quick path provides only sparse pitch, not full notes or lyrics. Scores/confidence are uncalibrated; tempo can choose the wrong pulse subdivision.
 - `model-estimate` / `combined`: compatibility with externally supplied or historical reports; not evidence this Site called a model now. Treat supplied interpretations as unvalidated.

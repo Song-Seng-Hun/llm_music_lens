@@ -41,6 +41,12 @@ automatic separation or identification. `waveformDetail` chooses `summary`
 Clipped edges are not true vocal starts/ends. See [waveform dynamics](waveform-dynamics.md)
 for thresholds, clocks, bounded output and interpretation.
 
+`acoustics` adds bounded1second spectral texture from the same FFT: low/mid/high
+power shares, magnitude centroid,85%power rolloff and power flatness. Below the
+-80dBFS RMS gate values are unknown. No extra inference, instrument label or
+noise probability is implied. See [spectral texture](spectral-texture.md) for
+frequency boundaries, averaging, padding and verification limits.
+
 Optional `timedVocal` accepts `{unit,source,items:[{start,end,text}]}` with
 unit `phone`, `mora`, `syllable` or `word`, at most256items. Optional `noteEvents`
 accepts `{source,mode,items:[{start,end,midi}]}`, mode `solo-vocal` or `polyphonic`,

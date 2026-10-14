@@ -13,7 +13,7 @@ export async function analyzeMusicTiming(args: unknown) {
   const sha256 = Array.from(new Uint8Array(hash), n => n.toString(16).padStart(2, "0")).join("");
   try {
     const { analyzeBeatPcm } = await import("./beat-analysis.mjs");
-    const timing = await analyzeBeatPcm(samples, { sampleRate: TIMING_SAMPLE_RATE });
+    const { acoustics, ...timing } = await analyzeBeatPcm(samples, { sampleRate: TIMING_SAMPLE_RATE });
     const envelope = analyzeWaveformEnvelope(samples, TIMING_SAMPLE_RATE, { detail: input.waveformDetail });
     const context = waveformContext(envelope.activity.regions, input, timing.beats);
     return {
@@ -24,6 +24,11 @@ export async function analyzeMusicTiming(args: unknown) {
       clock: "excerpt-relative-seconds; add source.offsetSeconds for song time",
       timing: { ...timing, ...beatContext(timing.beats, timing.downbeats) },
       vocalTiming: linkVocalTiming(input, timing.beats, timing.downbeats, duration),
+      acoustics: {
+        ...acoustics,
+        sourceKind: input.sourceKind,
+        sourceAttribution: input.sourceKind === "isolated-vocal" ? "caller-declared isolated vocal; not verified or separated by this tool" : "mixture spectrum; cannot attribute changes to a voice or instrument",
+      },
       waveform: {
         ...envelope,
         sourceKind: input.sourceKind,

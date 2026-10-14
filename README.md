@@ -6,6 +6,8 @@ MCP `analyze_music_timing`은 이제 서버에서 음원을 직접 분석해 박
 
 **파형의 강약 변화:** 같은 서버 도구가 20ms 창을 10ms 간격으로 분석해 RMS·소리 구간의 시작/끝 후보·최고점·지속적인 상승/하강을 반환합니다. 기본 곡선은 100ms 간격이며 `waveformDetail: "fine"`으로 10ms 곡선을 받습니다. 기본값은 혼합음이고, `sourceKind: "isolated-vocal"`은 사용자가 보컬 단독 입력이라고 밝히는 설정입니다. 자동 보컬 분리·음절 판정은 아닙니다. [측정 기준과 해석](docs/waveform-dynamics.md).
 
+**주파수 질감:** `acoustics`는 기존 박자 FFT를 함께 써서 1초마다 저·중·고역 파워 비중, 주파수 중심, 85% 파워 경계, 스펙트럼 평탄도를 반환합니다. 조용한 구간은 ‘알 수 없음’으로 표시합니다. 새 모델/API 없이 동작하며 악기·감정 식별과는 구분합니다. [정의와 검증 범위](docs/spectral-texture.md).
+
 프로젝트 저장소: [Song-Seng-Hun/llm_music_lens](https://github.com/Song-Seng-Hun/llm_music_lens). 소스·테스트·설치 스크립트·라이선스와 서버 실행에 필요한 MIT Beat This 모델(약 9.4MB)을 보관합니다. 다른 연구 모델, 음원, 정답 주석, 실행 로그와 실험 원자료는 커밋하지 않습니다. `evidence/` 및 연구용 `examples/` 링크는 기존 로컬 기록이며 새 clone에는 없습니다. 측정 요약은 [연구 상태와 한계](docs/research-status.md)에 있습니다.
 
 ## 바로 실행
@@ -53,7 +55,7 @@ Sites 서버의 분석 결과를 **연결된 ChatGPT가 대화 안에서 해석*
 
 | MCP 도구 | 읽기 전용 동작 |
 |---|---|
-| analyze_music_timing | 1~30초 PCM의 서버 박·마디 첫박·BPM, 파형 강약·소리 구간·상승/하강; 제공된 발음/음절·음표와 연결. 음원·결과 저장 없음 |
+| analyze_music_timing | 1~30초 PCM의 서버 박·마디 첫박·BPM, 파형 강약·소리 구간·상승/하강, 1초 주파수 질감·대역 비중; 제공된 발음/음절·음표와 연결. 음원·결과 저장 없음 |
 | list_music_reports | 인증된 사용자의 최근 분석 최대 30개 |
 | get_music_report | 요약, 출처, 음역/음 클래스, 템포 근거, 음향 요약, 모델·단계 상태와 한계 |
 | get_music_timeline | 최대 120초 범위의 단어·박 시차·동시 음표/화음·타격·에너지·변화·밀도·1초 음색/대역 비중·구간 템포; 레이어당 200개, total/truncated 표시 |

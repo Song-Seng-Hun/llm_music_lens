@@ -91,6 +91,21 @@ try {
   assert.ok(Buffer.byteLength(JSON.stringify(analysis.waveform)) <= 50000);
   receipt.cases.push({ name: 'Actual model plus supplied phone timing linked, originals intact', status: result.status, count: vocal.items.length, pass: true });
   receipt.cases.push({ name: 'Actual server waveform evidence returned with mixture attribution and bounded summary', status: result.status, pass: true });
+  assert.equal(analysis.acoustics.schema, 'spectral-texture/1');
+  assert.equal(analysis.acoustics.sourceKind, 'mixture');
+  assert.equal(analysis.acoustics.analysis.fftSize, 1024);
+  assert.equal(analysis.acoustics.windows.length, Math.ceil(pcm.length / 2 / 22050));
+  assert.ok(analysis.acoustics.windows.length <= 30);
+  assert.ok(analysis.acoustics.windows.some(window => window.centroidHz !== null));
+  assert.ok(!('acoustics' in analysis.timing), 'spectral output has one owning field');
+  const withoutSpectral = structuredClone(result.value);
+  delete withoutSpectral.result.structuredContent.result.acoustics;
+  const oldText = JSON.parse(withoutSpectral.result.content[0].text);
+  delete oldText.acoustics;
+  withoutSpectral.result.content[0].text = JSON.stringify(oldText);
+  receipt.addedSpectralWireBytes = Buffer.byteLength(JSON.stringify(result.value)) - Buffer.byteLength(JSON.stringify(withoutSpectral));
+  assert.ok(receipt.addedSpectralWireBytes <= 30000);
+  receipt.cases.push({ name: 'Actual shared FFT spectral texture reaches MCP with bounded wire bytes', status: result.status, pass: true });
   receipt.result = analysis;
   receipt.pass = true;
 } catch (error) {
