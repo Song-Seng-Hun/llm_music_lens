@@ -44,7 +44,72 @@ reject outside70–1000Hz. AC RMS<.001 abstains. No global-minimum fallback.
 Periodicity=clamped1-minus-interpolated-depth.20ms spacing is resolution,
 not measured timing accuracy; ~97ms support can blur rapid transitions.
 
-## Frozen comparison, 2026-10-14
+Current method `monophonic-yin-style-central-check-v2` adds one bounded check:
+when long-frame periodicity<.95, use a centered256sample frame (~46.26ms)
+from the same filtered signal and the same YIN thresholds/range. Retain the
+original long-frame Hz/periodicity only if the short estimate is within50c;
+otherwise return null for both. Strong estimates and the original crop guard
+are unchanged. No averaging, octave folding, temporal interpolation or unknown filling.
+The windows are correlated evidence, not independent proof of a voiced source.
+
+## Current refinement, 2026-10-14
+
+Question: reduce false voicing relative to the existing server tracker while
+retaining pitch accuracy, genuine leaps/vibrato and bounded local cost.
+Pilot used previously seen vocadito10/11/21/24. A single shorter-window recipe
+improved development F1 and false voicing; the second allowed recipe was unused.
+Candidate, inputs, scorer, projection and gates were then frozen before fresh
+vocadito25–28 predictions/annotation parsing. Same archive and resampling as
+the initial comparison below. No post-Confirm tuning or cost-run selection.
+
+All9378reference rows remain (6138voiced/3240unvoiced), including crop edges.
+The same all-row nearest20ms/4decimalMIDI scoring applies. Primary gates:
+macrofalsevoicing reduction>=3pp; macro50cF1 decline<=.5pp and each clip<=3pp.
+All pass. Four recordings are a bounded confirmation, not general-song,
+Vocaloid, rap or mixed-audio accuracy.
+
+| Macro metric | Previous server | Current server |
+|---|---:|---:|
+| False voicing / reference unvoiced | 22.96% | 9.73% |
+| 50cent frame F1 | 85.04% | 88.18% |
+| 20cent frame F1 | 69.05% | 71.98% |
+| Pitch precision50c | 83.09% | 90.99% |
+| Pitch recall50c | 87.22% | 85.79% |
+
+Every clip F1 improves (+3.18/+3.60/+3.27/+2.53pp). False-voiced counts
+744->318; correctly pitched voiced rows5370->5284. This is a precision/recall
+tradeoff, not recovery of more true notes. Gross/octave errors were0on both
+sides of this fresh set, so it establishes no octave-error improvement.
+Known leaps reach the correct plateau within120ms; supported plateau accuracy
+100%. Synthetic vibrato range/phase/error remain unchanged; crop unknowns,
+missing-fundamental, noise and silence guards pass. Synthetic cases do not
+certify all real musical transitions.
+
+One paired cost run: three fixed seen clips10/11/21, one warmup and four serial
+ABBA blocks each (eight observations per method). Tracker plus unchanged
+projection adds32.81/27.18/29.77ms normalized per30s; median ratios
+1.212/1.170/1.183. All pass <=100ms/30s added and <=1.5x. This is a modest
+extra computation for fewer false pitches, not a speed gain or a whole-MCP
+latency measurement. The short-frame buffer adds2048bytes; whole-isolate
+peak remains unmeasured.
+
+Independent preflight found a baseline-qualified leap guard weaker than the
+declared absolute requirement. Corrected before Confirm; original Pilot
+output/scorer kept, same predictions rescored, verdict unchanged. No budget
+reset. Local audit: `evidence/pitch-refinement-17/` (inputs, freeze, original
+and repaired scorer, all predictions/counts/timings, integration and review).
+
+Integrated through the existing `analyze_music_timing` route. Three fixed
+actual built-MCP calls match the frozen direct candidate and preserve all
+non-pitch fields except two diagnostic timers. Both mixture calls are exactly
+unchanged; the isolated-vocal response adds816bytes including metadata.
+Repository tests108/108, typecheck/build pass; lint0errors/3existing warnings.
+The first sandbox runtime connection failed before comparisons; its receipt
+is retained. The same built artifact/harness passes with scoped local runtime
+access. Single whole-request timings are not a speed comparison. Hosted
+deployment and whole-isolate memory peak remain unverified.
+
+## Initial tracker comparison, 2026-10-14 (before the refinement)
 
 Question: is this complete server recipe useful compared with the unchanged
 cheap `public/audio-engine.mjs` quick pitch intervals at bounded local cost?

@@ -1,7 +1,7 @@
 // Bounded monophonic periodic-pitch evidence. This YIN-style recipe is not
 // pYIN, voice detection, calibrated confidence or automatic note boundaries.
 const RATE = 22050, DECIMATION = 4, PITCH_RATE = RATE / DECIMATION;
-const FRAME_SIZE = 512, HOP = 441, FILTER_RADIUS = 47, CUTOFF_HZ = 1800;
+const FRAME_SIZE = 512, SHORT_FRAME_SIZE = 256, HOP = 441, FILTER_RADIUS = 47, CUTOFF_HZ = 1800;
 const FRAME_RADIUS = (FRAME_SIZE - 1) * DECIMATION / 2;
 const SUPPORT_RADIUS = FRAME_RADIUS + FILTER_RADIUS;
 const MIN_HZ = 70, MAX_HZ = 1000, MAX_LAG = Math.ceil(PITCH_RATE / MIN_HZ);
@@ -29,17 +29,18 @@ function lowpass(samples) {
 }
 
 function framePitch(frame, normalizedDifference) {
+  const size = frame.length;
   let mean = 0;
   for (const value of frame) mean += value;
-  mean /= FRAME_SIZE;
+  mean /= size;
   let energy = 0;
-  for (let i = 0; i < FRAME_SIZE; i++) { frame[i] -= mean; energy += frame[i] * frame[i]; }
-  if (Math.sqrt(energy / FRAME_SIZE) < MIN_AC_RMS) return null;
+  for (let i = 0; i < size; i++) { frame[i] -= mean; energy += frame[i] * frame[i]; }
+  if (Math.sqrt(energy / size) < MIN_AC_RMS) return null;
   let cumulative = 0;
   normalizedDifference[0] = 1;
   for (let lag = 1; lag <= MAX_LAG + 1; lag++) {
     let difference = 0;
-    const count = FRAME_SIZE - lag;
+    const count = size - lag;
     // All pairs of this lag within one fixed frame: their mean midpoint is
     // always the frame center. Divide by count before cumulative normalization.
     for (let i = 0; i < count; i++) { const delta = frame[i] - frame[i + lag]; difference += delta * delta; }
@@ -71,7 +72,7 @@ export function analyzeVocalPitch(samples, sampleRate = RATE) {
   for (const value of samples) if (!Number.isFinite(value) || value < -1 || value > 1) throw new RangeError('PCM must contain finite samples within [-1, 1]');
   const count = Math.ceil(samples.length / HOP), duration = samples.length / RATE;
   const hz = Array(count).fill(null), periodicity = Array(count).fill(null);
-  const filtered = lowpass(samples), frame = new Float64Array(FRAME_SIZE), normalizedDifference = new Float64Array(MAX_LAG + 2);
+  const filtered = lowpass(samples), frame = new Float64Array(FRAME_SIZE), shortFrame = new Float64Array(SHORT_FRAME_SIZE), normalizedDifference = new Float64Array(MAX_LAG + 2);
   for (let index = 0; index < count; index++) {
     const center = index * HOP;
     if (center - SUPPORT_RADIUS < 0 || center + SUPPORT_RADIUS >= samples.length) continue;
@@ -79,18 +80,25 @@ export function analyzeVocalPitch(samples, sampleRate = RATE) {
     // centered on k*441 even while the decimation phase cycles through 0..3.
     for (let j = 0; j < FRAME_SIZE; j++) frame[j] = filtered[center - FRAME_RADIUS + j * DECIMATION];
     const candidate = framePitch(frame, normalizedDifference);
+    if (candidate && candidate.periodicity < 0.95) {
+      const shortRadius = (SHORT_FRAME_SIZE - 1) * DECIMATION / 2;
+      for (let j = 0; j < SHORT_FRAME_SIZE; j++) shortFrame[j] = filtered[center - shortRadius + j * DECIMATION];
+      const corroboration = framePitch(shortFrame, normalizedDifference);
+      if (!corroboration || Math.abs(1200 * Math.log2(corroboration.hz / candidate.hz)) > 50) continue;
+    }
     if (candidate) { hz[index] = candidate.hz; periodicity[index] = candidate.periodicity; }
   }
   return {
     start: 0, stepSeconds: HOP / RATE, duration, hz, periodicity,
     method: {
-      id: 'monophonic-yin-style-v1', sampleRate: RATE, analysisRate: PITCH_RATE, frameSize: FRAME_SIZE,
+      id: 'monophonic-yin-style-central-check-v2', sampleRate: RATE, analysisRate: PITCH_RATE, frameSize: FRAME_SIZE,
       frameSpanSeconds: 2 * FRAME_RADIUS / RATE, hopSeconds: HOP / RATE,
       rangeHz: [MIN_HZ, MAX_HZ], threshold: THRESHOLD, minAcRms: MIN_AC_RMS,
       filter: { kind: 'symmetric Blackman-windowed sinc', taps: 2 * FILTER_RADIUS + 1, cutoffHz: CUTOFF_HZ, dcGain: 1, delay: 'centered; no padding', decimation: DECIMATION },
       edgeSupportSeconds: SUPPORT_RADIUS / RATE,
       difference: 'mean squared difference over all frameSize-lag pairs; every lag has the same mean pair midpoint; cumulative mean normalization',
-      selection: 'first local trough whose parabolically interpolated depth is below threshold, parabolic lag refinement, range rejection; no global-minimum fallback or temporal smoothing',
+      selection: 'first accepted long-frame trough with parabolic lag refinement and range rejection; periodicity below 0.95 requires centered 256-sample decimated-frame trough within 50 cents; retain original long-frame Hz/periodicity or null; no smoothing or unknown filling',
+      corroboration: { weakPeriodicityBelow: 0.95, frameSize: SHORT_FRAME_SIZE, frameSpanSeconds: (SHORT_FRAME_SIZE - 1) * DECIMATION / RATE, maximumDifferenceCents: 50, threshold: THRESHOLD, minAcRms: MIN_AC_RMS },
       periodicity: '1 minus parabolically interpolated normalized-difference depth, clamped to [0,1]; uncalibrated, not a voicing probability; null when pitch is unavailable',
       clock: 'exact native sample centers k*441; all centers below duration retained, including unknowns',
     },
@@ -99,6 +107,7 @@ export function analyzeVocalPitch(samples, sampleRate = RATE) {
       'Null means insufficient in-range periodic-pitch evidence or missing crop context, not verified silence.',
       'Twenty-millisecond spacing is not temporal accuracy. The approximately 97 ms filter/frame support can blur pitch changes; no frame uses zero or reflected crop padding.',
       'Periodicity is an uncalibrated signal measure, not confidence or a voicing probability. Harmonics, breathiness, noise and multiple sources can cause missed or octave-shifted estimates.',
+      'Weak periodicity uses centered shorter-frame corroboration, a correlated signal heuristic rather than independent voice evidence; retained estimates are unchanged and rejected estimates remain unknown.',
       'These frames do not infer note boundaries, lyrics, syllables, key, emotion or vocal effort.',
     ],
   };
