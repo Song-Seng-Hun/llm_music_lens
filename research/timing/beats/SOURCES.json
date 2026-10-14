@@ -1,0 +1,38 @@
+{
+  "packages_observed": {
+    "torch": "2.8.0+cpu",
+    "torchaudio": "2.8.0+cpu",
+    "beat-this": "1.1.0",
+    "numpy": "2.2.6",
+    "psutil": "7.2.2",
+    "soundfile": "0.13.1",
+    "soxr": "1.1.0"
+  },
+  "installed_source_sha256_observed": {
+    "inference": "ccccff4665399b931ebf181b73d264a6ad64fc1fe8acb4d3b950df825c47ce2d",
+    "postprocessor": "431d6aeef41a8e9e9e63ee2577e895a5e214e0dbbcd2d505458cdfec02a611ee",
+    "preprocessing": "5aaeefa811c2fd1340c8a45233af4c2e814720b65c2124e59e78538fed03b3bc"
+  },
+  "upstream": {
+    "repository": "https://github.com/CPJKU/beat_this",
+    "inference": "https://github.com/CPJKU/beat_this/blob/main/beat_this/inference.py",
+    "postprocessor": "https://github.com/CPJKU/beat_this/blob/main/beat_this/model/postprocessor.py",
+    "preprocessing": "https://github.com/CPJKU/beat_this/blob/main/beat_this/preprocessing.py"
+  },
+  "asset_identities_observed": {
+    "checkpoint": {
+      "sha256": "6074be2c4d490c5f6101fcc374a1ec72ae93456e23bb6019783b849f5dc7d47b"
+    },
+    "spectrograms": {
+      "sha256": "275aaa0dadd431dd1f3ceb624d11b031bedfe58f39a9544ecb36996718aa96e9"
+    },
+    "annotations": {
+      "sha256": "391e21cba2420f5f81f5fcbafe75bed0520c8da1509c1a4cb7a36d984a7dc52e"
+    }
+  },
+  "limitations": [
+    "No weights/audio/labels/predictions are stored in this source folder.",
+    "Training/data overlap is unverified; do not call this subset held out.",
+    "Upstream main URLs locate source; installed source hashes/package versions identify the actual measured implementation."
+  ]
+}

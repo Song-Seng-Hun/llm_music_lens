@@ -36,6 +36,10 @@ Native frame pitch/rest, alongside unchanged note events, is now exposed through
 
 Eight fixed paired browser runs preserved native outputs/notes and passed overhead gates: **+1.50246%/+224.4ms**, **+0.60564%/+116.45ms**. Added model descriptors41bytes over prior runtime; output4bytes/frame; peak memory unmeasured. Keep native nulls, bounded52,000samples,200sample timeline pages and unchanged report byte cap. E1 evaluator tie repair before confirmation and C1 exact-EOF repair retain original evidence; C1 replay changes none of the four scores. Evidence: `evidence/vocal-contour-08/`; detailed schema/limits in [solo-vocal guide](vocal-specialist.md#continuous-pitch-evidence-2026-10-14).
 
+## Timing extensions and server execution
+
+The next two requested directions were actually exercised, independently of hosting constraints: Beat This! beat/downbeat inference on 12 fixed labelled clips and TIFA audio-grounded phone alignment on two Japanese singing clips. Local workerd also executed an exported five-second Beat This! graph with Torch parity; this goes beyond runtime initialization. The [timing pilot report](timing-pilot.md) records all denominators, substantial remaining errors, data overlap, runtime limits and unfinished Sites work. No frontend or production MCP behavior changed. These are retained experimental components, not a claim that the Sites analysis service is deployed.
+
 ## Sources and assets
 
 - [vocadito v3](https://zenodo.org/records/5578807): human unaccompanied singing and two musician annotations.

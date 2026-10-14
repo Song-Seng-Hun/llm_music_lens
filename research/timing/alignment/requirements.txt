@@ -1,0 +1,9 @@
+# Tested with Python 3.10; install Torch CPU separately as described in README.
+numpy==2.2.6
+scipy==1.15.3
+numba==0.68.0
+librosa==0.11.0
+pydantic==2.14.1
+PyYAML==6.0.3
+soundfile==0.13.1
+einops==0.8.2

@@ -1,0 +1,90 @@
+{
+  "frozen_before_predictions": false,
+  "selection": "Before predictions, inventory original tracks; select the lexicographic first3 each in blues,classical,hiphop,rock. Preserve every result; no replacement by output quality.",
+  "checkpoint": {
+    "path": "REPLACE_WITH_LOCAL_SMALL0_CKPT",
+    "sha256": "REPLACE_WITH_VERIFIED_SHA256"
+  },
+  "spectrograms": {
+    "path": "REPLACE_WITH_LOCAL_GTZAN_NPZ",
+    "sha256": "REPLACE_WITH_VERIFIED_SHA256"
+  },
+  "annotations": {
+    "path": "REPLACE_WITH_LOCAL_ANNOTATIONS_ZIP",
+    "sha256": "REPLACE_WITH_VERIFIED_SHA256"
+  },
+  "cases": [
+    {
+      "key": "gtzan_blues_00000",
+      "spectrogram_member": "gtzan_blues_00000/track.npy",
+      "annotation_member": "beat_this_annotations-1.0/gtzan/annotations/beats/gtzan_blues_00000.beats"
+    },
+    {
+      "key": "gtzan_blues_00001",
+      "spectrogram_member": "gtzan_blues_00001/track.npy",
+      "annotation_member": "beat_this_annotations-1.0/gtzan/annotations/beats/gtzan_blues_00001.beats"
+    },
+    {
+      "key": "gtzan_blues_00002",
+      "spectrogram_member": "gtzan_blues_00002/track.npy",
+      "annotation_member": "beat_this_annotations-1.0/gtzan/annotations/beats/gtzan_blues_00002.beats"
+    },
+    {
+      "key": "gtzan_classical_00000",
+      "spectrogram_member": "gtzan_classical_00000/track.npy",
+      "annotation_member": "beat_this_annotations-1.0/gtzan/annotations/beats/gtzan_classical_00000.beats"
+    },
+    {
+      "key": "gtzan_classical_00001",
+      "spectrogram_member": "gtzan_classical_00001/track.npy",
+      "annotation_member": "beat_this_annotations-1.0/gtzan/annotations/beats/gtzan_classical_00001.beats"
+    },
+    {
+      "key": "gtzan_classical_00002",
+      "spectrogram_member": "gtzan_classical_00002/track.npy",
+      "annotation_member": "beat_this_annotations-1.0/gtzan/annotations/beats/gtzan_classical_00002.beats"
+    },
+    {
+      "key": "gtzan_hiphop_00000",
+      "spectrogram_member": "gtzan_hiphop_00000/track.npy",
+      "annotation_member": "beat_this_annotations-1.0/gtzan/annotations/beats/gtzan_hiphop_00000.beats"
+    },
+    {
+      "key": "gtzan_hiphop_00001",
+      "spectrogram_member": "gtzan_hiphop_00001/track.npy",
+      "annotation_member": "beat_this_annotations-1.0/gtzan/annotations/beats/gtzan_hiphop_00001.beats"
+    },
+    {
+      "key": "gtzan_hiphop_00002",
+      "spectrogram_member": "gtzan_hiphop_00002/track.npy",
+      "annotation_member": "beat_this_annotations-1.0/gtzan/annotations/beats/gtzan_hiphop_00002.beats"
+    },
+    {
+      "key": "gtzan_rock_00000",
+      "spectrogram_member": "gtzan_rock_00000/track.npy",
+      "annotation_member": "beat_this_annotations-1.0/gtzan/annotations/beats/gtzan_rock_00000.beats"
+    },
+    {
+      "key": "gtzan_rock_00001",
+      "spectrogram_member": "gtzan_rock_00001/track.npy",
+      "annotation_member": "beat_this_annotations-1.0/gtzan/annotations/beats/gtzan_rock_00001.beats"
+    },
+    {
+      "key": "gtzan_rock_00002",
+      "spectrogram_member": "gtzan_rock_00002/track.npy",
+      "annotation_member": "beat_this_annotations-1.0/gtzan/annotations/beats/gtzan_rock_00002.beats"
+    }
+  ],
+  "smokes": [
+    {
+      "key": "short_waveform",
+      "path": "REPLACE_WITH_SHORT_LOCAL_WAV",
+      "sha256": "REPLACE_WITH_VERIFIED_SHA256"
+    },
+    {
+      "key": "over30sec_waveform",
+      "path": "REPLACE_WITH_OVER30SEC_LOCAL_WAV",
+      "sha256": "REPLACE_WITH_VERIFIED_SHA256"
+    }
+  ]
+}
