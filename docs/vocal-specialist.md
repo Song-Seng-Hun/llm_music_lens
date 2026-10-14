@@ -13,16 +13,17 @@ python scripts/prepare-vocal-model.py
 node scripts/prepare-analysis.mjs
 ```
 
-An existing `some-0.0.1.oudep` can be passed as the Python script's first argument. The script verifies archive and model SHA256 and extracts only the literal ONNX member; no downloaded installer or Python is executed. The optional model is about 450 MiB and is not committed. Missing model => visible failed note stage, no hidden replacement by another model. Cancellation terminates the worker.
+An existing `some-0.0.1.oudep` can be passed as the Python script's first argument. The script verifies archive and source-model SHA256, extracts only the literal ONNX member, and adds two output descriptors to expose the existing frame-rest mask and note mapping. Nodes and weights stay unchanged. The derived graph has its own SHA256; no downloaded installer or Python is executed. Re-run both commands when upgrading an existing installation; an old graph is rejected instead of silently using the old decoder. The optional model is about 450 MiB and is not committed. Missing model => visible failed note stage, no hidden replacement by another model. Cancellation terminates the worker.
 
-Deployment remains separate and unverified: the 471,381,796-byte weight asset may exceed a host's per-file limit. This change installs and verifies the local program, not a published Sites deployment. We do not claim that copying this asset directly will deploy on Sites.
+Deployment remains separate and unverified: the 471,381,883-byte runtime asset may exceed a host's per-file limit. This change installs and verifies the local program, not a published Sites deployment. We do not claim that copying this asset directly will deploy on Sites.
 
 ## Provenance
 
 - Model: [openvpi/SOME](https://github.com/openvpi/SOME), distributed in [OpenUtau some-0.0.1.oudep](https://github.com/xunmengshe/OpenUtau/releases/download/0.0.0.0/some-0.0.1.oudep).
 - Archive SHA256: `b98a350b60740e3a153b15e137ed025832956d918c44853048bec93af657f478`.
 - ONNX member `0918_continuous128_clean_3spk.onnx`, SHA256: `9d55f9d239e9d70d1bf039506cf1c428b657df7bbb8b94104ca882af6b721e06`.
-- Configuration: mono float32, 44,100 Hz, graph contains feature extraction/decoding. Output `note_midi`, `note_rest`, `note_dur` seconds. Native rest durations advance the clock.
+- Derived runtime SHA256: `7e0c73b6fbabde77f86304d2dcf817153e1518a626a7d49d0bec5c348c861b40` (+87 bytes, reversible descriptor-only patch). Its identity is also included in the runtime URL to separate cached old models.
+- Configuration: mono float32, 44,100 Hz, graph contains feature extraction/decoding. Outputs `note_midi`, `note_rest`, `note_dur`, `/Less_1_output_0` (frame rests), `/Mul_2_output_0` (one-based frame-to-note IDs). Native rest durations advance the clock. Only exterior rest frames trim a voiced note; internal gaps, native pitch, segment identities and the original clock are preserved. Invalid dimensions, IDs or aggregation fail visibly.
 - Code MIT; released model weights [CC BY-NC-SA 4.0](https://github.com/openvpi/SOME/releases/tag/v0.0.1). Local evaluation here is noncommercial. Retain attribution/license when preparing a later distribution.
 
 ## Measured accuracy and limits
@@ -34,3 +35,13 @@ The initial integer-rounded pilot failed the frame gate. Native fractional outpu
 Heldout mean A1 event F1: **48.56% Basic Pitch -> 71.04% SOME**. Both clips improved event recall and note-frame F1; A2 also improved. This supports a local solo-vocal option, not general song accuracy. Note offsets are not directly part of event F1; note-frame F1 adds duration/pitch evidence. False/missed notes remain. No lyric, chord, beat, rap or Vocaloid accuracy claim follows from this set.
 
 Whole evaluation clips fit one inference window. Longer inputs use 40-second cores plus 2-second context; boundary accuracy on long recordings is unvalidated. Maximum input remains 10 minutes/12 MiB; 4,000 note events. Notes outside MIDI 21–108 are explicitly omitted with partial status. Runtime depends on the computer; the 33-second development clip took about 42 seconds of model inference here, plus loading and other analysis.
+
+## Frame-edge refinement (2026-10-14)
+
+A fresh four-clip confirmation (vocadito13–16, fixed recipe, no tuning) measured A1 mean pitch-frame F1 **78.71763→80.02464%** (+1.30701 percentage points), onset/pitch F1 **59.12985→59.65068%**. A2 mean frame F1 **79.0000→80.24531%**. Offset-aware event F1 was unchanged. Three clips improved the primary metric; one was unchanged. Eight of179predicted notes changed.
+
+The original confirmation acceptance **failed** its zero-per-clip-regression guard: clip14's A2 frame F1 declined0.12449pp when one onset moved11.609977ms; A1 improved on that clip. This loss is retained, not dismissed as noise. The subsequent practical product decision explicitly accepts this measured secondary-annotation tradeoff for aggregate gains; it does not relabel the original confirmation as passing or establish superiority on arbitrary songs.
+
+A separately recorded cost-only check reused the reserved eight runs (clip10 ABBA, clip11 BAAB; fresh Chrome/worker, one WASM thread). Original outputs, frame internals and final notes matched exactly. Median load+run+decode+release:14.6251→14.9066s (+1.92%) and20.4199→20.4131s (-0.03%), both within the frozen allowance: the greater of5% or250ms. These are local measurements, not universal latency guarantees. No extra model pass, dependency, API or weights;87bytes of graph descriptors and approximately33KiB of extra output tensors per maximum window. Peak runtime memory remains unmeasured.
+
+Audit records: `evidence/vocal-value-06/` (frozen results/failed guard), `evidence/vocal-value-cost-07/` (post-result selection, cost, integration checks). The production decoder is the single updated path; Git retains the prior implementation. Long-recording musical seam accuracy, mixtures, Vocaloid and lyrics remain unvalidated by this comparison.

@@ -33,10 +33,30 @@ with zipfile.ZipFile(archive) as z:
     if entry.file_size!=MODEL_BYTES: raise ValueError('Unexpected model size')
     model=z.read(entry)
 if hashlib.sha256(model).hexdigest()!=MODEL_SHA: raise ValueError('Model identity mismatch')
+# Source SHA above pins these offsets; append only bool frame rest and int64 frame-to-note outputs.
+RUNTIME_SHA='7e0c73b6fbabde77f86304d2dcf817153e1518a626a7d49d0bec5c348c861b40'
+RUNTIME_BYTES=471381883
+EXTRA_OUTPUTS=bytes.fromhex(
+    '622a0a102f4c6573735f315f6f75747075745f3012160a14080912100a0208010a0a12086e5f6672616d6573'
+    '62290a0f2f4d756c5f325f6f75747075745f3012160a14080712100a0208010a0a12086e5f6672616d6573'
+)
+GRAPH_END=471381790
+OLD_LENGTH=bytes.fromhex('86eee2e001')
+NEW_LENGTH=bytes.fromhex('ddeee2e001')
+if model[18:24]!=b'\x3a'+OLD_LENGTH or len(EXTRA_OUTPUTS)!=87:
+    raise ValueError('Pinned graph layout mismatch; model not installed')
+patched=b''.join((model[:19],NEW_LENGTH,memoryview(model)[24:GRAPH_END],EXTRA_OUTPUTS,memoryview(model)[GRAPH_END:]))
+if len(patched)!=RUNTIME_BYTES or hashlib.sha256(patched).hexdigest()!=RUNTIME_SHA:
+    raise ValueError('Runtime model identity mismatch; model not installed')
+restored=b''.join((patched[:19],OLD_LENGTH,memoryview(patched)[24:GRAPH_END],memoryview(patched)[GRAPH_END+87:]))
+if restored!=model:
+    raise ValueError('Graph patch inverse mismatch; model not installed')
+del restored
+model=patched
 target=ROOT/'public/models/some/model.onnx'
 target.parent.mkdir(parents=True,exist_ok=True)
 temporary=target.with_suffix('.preparing')
 temporary.write_bytes(model)
 temporary.replace(target)
-print(f'Prepared SOME model: {MODEL_BYTES} bytes, SHA256 {MODEL_SHA}')
+print(f'Prepared SOME model: source {MODEL_BYTES} bytes SHA256 {MODEL_SHA}; runtime {RUNTIME_BYTES} bytes SHA256 {RUNTIME_SHA}; weights/nodes unchanged, two output descriptors added')
 print('Code MIT; model CC BY-NC-SA 4.0. See docs/vocal-specialist.md. Run node scripts/prepare-analysis.mjs next.')

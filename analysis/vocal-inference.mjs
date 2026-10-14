@@ -1,5 +1,5 @@
 import * as ort from "onnxruntime-web/wasm";
-import { VOCAL_MODEL, VOCAL_RATE, VOCAL_CORE_SECONDS, VOCAL_CONTEXT_SECONDS, decodeVocalSequence, appendVocalWindow } from "./vocal-notes.mjs";
+import { VOCAL_MODEL, VOCAL_MODEL_SHA256, VOCAL_RATE, VOCAL_CORE_SECONDS, VOCAL_CONTEXT_SECONDS, decodeVocalSequence, appendVocalWindow } from "./vocal-notes.mjs";
 
 export async function vocalNotesFromAudio(samples, progress) {
   const result = { status: "complete", mode: "solo-vocal", model: VOCAL_MODEL, items: [], truncated: false, warnings: [
@@ -10,9 +10,9 @@ export async function vocalNotesFromAudio(samples, progress) {
   ort.env.wasm.proxy = false;
   ort.env.wasm.wasmPaths = new URL("/models/ort/", self.location.origin).href;
   progress("notes", 0.28, "보컬 음표 모델 준비 중 · 약 450 MiB");
-  const session = await ort.InferenceSession.create(new URL("/models/some/model.onnx", self.location.origin).href, { executionProviders: ["wasm"] });
+  const session = await ort.InferenceSession.create(new URL(`/models/some/model.onnx?sha=${VOCAL_MODEL_SHA256}`, self.location.origin).href, { executionProviders: ["wasm"] });
   const duration = samples.length / VOCAL_RATE, core = VOCAL_CORE_SECONDS * VOCAL_RATE, context = VOCAL_CONTEXT_SECONDS * VOCAL_RATE;
-  let omitted = 0;
+  let omitted = 0, preserved = 0;
   try {
     for (let offset = 0; offset < samples.length; offset += core) {
       const left = Math.max(0, offset - context), right = Math.min(samples.length, offset + core + context);
@@ -21,13 +21,15 @@ export async function vocalNotesFromAudio(samples, progress) {
       let output;
       try {
         output = await session.run({ waveform: tensor });
-        const decoded = decodeVocalSequence(Object.fromEntries(Object.entries(output).map(([key, value]) => [key, value.data])), (right - left) / VOCAL_RATE);
+        const decoded = decodeVocalSequence(Object.fromEntries(Object.entries(output).map(([key, value]) => [key, value.data])), (right - left) / VOCAL_RATE, { rest: output["/Less_1_output_0"], mapping: output["/Mul_2_output_0"] });
         omitted += decoded.omitted;
+        preserved += decoded.preserved;
         result.truncated = appendVocalWindow(result.items, decoded.events, left / VOCAL_RATE, offset / VOCAL_RATE, Math.min(offset + core, samples.length) / VOCAL_RATE, duration) || result.truncated;
       } finally { tensor.dispose(); if (output) for (const value of Object.values(output)) value.dispose(); }
     }
   } finally { await session.release(); }
   if (samples.length > core) result.warnings.push("40초 중심 구간과 양쪽 2초 문맥으로 처리했습니다. 긴 곡의 구간 경계 정확도는 별도 검증하지 않았습니다.");
+  if (preserved) result.warnings.push(`끝부분의 보정 근거가 오디오 밖에 있는 후보 ${preserved}개는 원래 음표 구간을 유지했습니다.`);
   if (omitted) { result.status = "partial"; result.warnings.push(`지원 음역 MIDI 21–108 밖의 후보 ${omitted}개를 생략했습니다(문맥 중복 포함).`); }
   if (result.truncated) { result.status = "partial"; result.warnings.push("음표 4,000개 한도로 일부 이벤트가 생략되었습니다."); }
   return result;

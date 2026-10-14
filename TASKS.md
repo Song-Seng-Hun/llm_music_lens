@@ -4,6 +4,12 @@ Goal: a working music-analysis program, Sites-compatible, usable through a human
 
 Scope: this project only; no global skills/config changes, no deployment to another service, no media downloader, no paid model call. Preserve Sites integration. Earlier experiments excluded commit/push; the user's 2026-10-14 repository request now authorizes connecting and synchronizing this project to their new Song-Seng-Hun/llm_music_lens repository.
 
+## Small-improvement product value (adopted locally, 2026-10-14)
+User: "진짜로 가성비적으로도 좋아진게 맞다면 제대로 반영해". Parent owns product/evaluation; no tuning/new quality data. Prior experiments/results preserved.
+- [done] value06 frozen before fresh13-16; all4 complete, independent exact recomputation. A1 frame78.71763->80.02464%, A2mean79.0000->80.24531%; event gains, offsets unchanged. Original acceptance FAILED only A2clip14 frame -0.12449pp. No gate rewriting.
+- [done] Separate post-result operational decision accepts measured aggregate gain vs oneclip secondary loss; originalfailedgate preserved. Reserved8costruns pass perclip: +1.92477%/+281.5ms and -0.03355%/-6.85ms; original3outputs, internals, PCM and finalnotes exact. No new quality cutoff or sample selection. Evidence: vocal-value-cost-07/PLAN.json + timing.json.
+- [done] Actual solo-vocal route updated, derivedmodel+87bytes/no extra pass; sourcehash validation, BigInt IDs, cache identity, attribution. 68tests/typecheck/lint/build pass; UI14/15 exact, polyphonic10 unchanged, missingmodel/cancel pass; independent review no blocker. REPORT.md and git-receipt.json in evidence/vocal-value-cost-07 retain acceptance and source synchronization evidence. No automatic further experiments. Longrecording accuracy/peak memory/Sites deployment untested.
+
 ## Own repository setup (complete, 2026-10-14)
 User: "이 내 레포지토리를 이용해서 작업해줘 이번에 새로 만들었어", URL https://github.com/Song-Seng-Hun/llm_music_lens. Keep the existing working directory and all local evidence. Parent owns Git/docs/exclusions; one read-only worker checks publication inventory. No unrelated repositories, settings, deployment or sample redistribution.
 - [done] Remote verified: private, empty, default master, owner Song-Seng-Hun, push permission. Existing directory had no Git repository. Initialize master and set exact origin; do not alter remote visibility/default branch.

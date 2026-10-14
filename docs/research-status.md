@@ -5,7 +5,7 @@ As of 2026-10-14. This is a summary of retained local experiments, not a claim o
 ## Adopted program
 
 - Default mixed/polyphonic notes: Spotify Basic Pitch1.0.1. Fractional pitches, duration evidence, bounded results and uncertainty remain explicit. A ChoraleBricks AN1 four-part wind performance pilot scored onset/pitch F1 50.47%, precision39.56%, recall69.70% (50ms/50cents,231reference events); one piece does not estimate general accuracy.
-- Optional solo voice: SOME `some-0.0.1`, model SHA256 `9d55f9d239e9d70d1bf039506cf1c428b657df7bbb8b94104ca882af6b721e06`. On two locally heldout vocadito human solo clips, onset/pitch F1 increased48.56→71.04% versus Basic Pitch. Native fractional MIDI and null confidence are preserved. This does not establish Vocaloid, mixed-song, rap or lyric accuracy. Upstream training overlap is unknown.
+- Optional solo voice: SOME `some-0.0.1`, source SHA256 `9d55f9d239e9d70d1bf039506cf1c428b657df7bbb8b94104ca882af6b721e06`, current derived runtime SHA256 `7e0c73b6fbabde77f86304d2dcf817153e1518a626a7d49d0bec5c348c861b40`. On two locally heldout vocadito human solo clips, onset/pitch F1 increased48.56→71.04% versus Basic Pitch. Native fractional MIDI and null confidence are preserved. This does not establish Vocaloid, mixed-song, rap or lyric accuracy. Upstream training overlap is unknown.
 - The program also estimates tempo, beat support, tonal/chord candidates, onsets, acoustic features and optional Whisper word timings. The vocal-note experiments do not validate those separate outputs.
 
 ## Closed follow-ups, not adopted
@@ -16,11 +16,19 @@ On four already-seen vocadito clips1/10/11/12, current SOME macro onset/pitch F1
 |---|---|---|
 | Larger GAME model, vocal-accuracy-03 | Onset/pitch and frame F1 declined on development clips | Retain SOME |
 | Waveform edge/gap refinement, vocal-boundaries-04 | Neither fixed candidate changed real predictions | No adoption |
-| SOME internal frame-rest edges, vocal-internals-05 | 1/155notes changed; frame F1 84.465891→84.533524%, offset-aware F1 unchanged37.147974%; required offset gain3pp not met | No adoption; confirmation13–16 unopened |
+| SOME internal frame-rest edges, vocal-internals-05 | 1/155notes changed; frame F1 84.465891→84.533524%, offset-aware F1 unchanged37.147974%; required offset gain3pp not met | No adoption in that experiment; confirmation13–16 unopened at its closure |
 
 The internal-output experiment restored original model bytes exactly after removing diagnostic descriptors; actual-browser original output and input hashes matched on all four clips. Independent review recomputed all scores and agreed with closure. Internal extraction alone is not accuracy improvement.
 
 Local audit records: `evidence/vocal-specialist-02/REPORT.md`, `evidence/vocal-accuracy-03/`, `evidence/vocal-boundaries-04/REPORT.md`, `evidence/vocal-internals-05/REPORT.md`. These paths are absent from a clean clone. Do not manufacture a pass from their absence or recreate heldout results from this summary. Standard source tests are available through `npm test`; dataset evaluations require separately acquired, versioned inputs and frozen criteria.
+
+## Small-gain practical adoption
+
+On fresh vocadito13–16, the fixed exterior-rest trim improved A1 frame F1 **78.71763→80.02464%** and onset/pitch F1 **59.12985→59.65068%**; A2 mean frame F1 **79.0000→80.24531%**. Offset-aware F1 unchanged. The frozen value06 acceptance FAILED: clip14's A2 frame F1 declined0.12449pp. All original outputs, conditions and that failure remain recorded.
+
+A separate, explicit post-result product decision accepted this secondary-annotation tradeoff for aggregate gains, conditional on bounded cost and preserved behavior. The unchanged eight-run cost plan passed: clip10 median14.6251→14.9066s (+1.92%), clip11 20.4199→20.4131s (-0.03%), including load/inference/decode/release. Original3outputs, both exposed tensors and final predictions matched the diagnostic reference exactly. Graph +87bytes, no extra model pass/dependency/API; total peak memory unmeasured. This justifies a small local product choice, not a universal accuracy or latency claim. Integration uses one updated solo-vocal decoder; prior code remains in Git.
+
+Evidence: `evidence/vocal-value-06/`, `evidence/vocal-value-cost-07/`. The original internals05/value06 gate failures are not relabeled as passes. See [solo-vocal preparation and limits](vocal-specialist.md) for model migration and exact scope.
 
 ## Sources and assets
 
