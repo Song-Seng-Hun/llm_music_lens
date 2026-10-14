@@ -7,6 +7,7 @@ import { linkVocalTiming } from "../lib/vocal-timing.ts";
 import { beatContext } from "../lib/beat-context.ts";
 import { waveformContext } from "../lib/waveform-context.ts";
 import { attackContext } from "../lib/attack-context.ts";
+import { vocalPitchContext } from "../lib/vocal-pitch-context.ts";
 
 function input(seconds = 1) {
   const bytes = Buffer.alloc(TIMING_SAMPLE_RATE * seconds * 2);
@@ -116,6 +117,44 @@ test("attack context bounds event details while retaining all density counts", (
   assert.equal(result.density.at(-1)?.end, duration);
   const wire = JSON.stringify({ content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: { result } });
   assert.ok(Buffer.byteLength(wire) < 48000, 'allow at least 2KB for method/warning fields within 50KB guard');
+});
+
+// Pitch names must preserve fractional movement and unknown frames, without
+// rewriting caller-supplied notes or representing every frame as a new note.
+test("vocal pitch projection preserves unknowns, fractional MIDI and note conventions", () => {
+  assert.equal(vocalPitchContext().status, 'unavailable');
+  const estimate = { start: 0, stepSeconds: 0.02, duration: 1,
+    hz: [null, 440, 880, 440 * 2 ** (0.25 / 12), null], periodicity: [null, 0.95, 0.99, 0.91, null],
+    method: { id: 'fixture-only' }, warnings: ['fixture, not accuracy evidence'] };
+  const before = JSON.stringify(estimate);
+  const result = vocalPitchContext(estimate);
+  assert.equal(result.status, 'estimated');
+  if (result.status !== 'estimated') throw new Error('Expected supported pitch fixture');
+  assert.deepEqual(result.contour.midi, [null, 69, 81, 69.25, null]);
+  assert.deepEqual(result.contour.periodicity, estimate.periodicity);
+  assert.equal(result.summary.range?.lowestNearestNote, 'A4');
+  assert.equal(result.summary.range?.highestNearestNote, 'A5');
+  assert.deepEqual(result.summary.mostObservedNotes, [{ note: 'A4', midi: 69, frames: 2 }, { note: 'A5', midi: 81, frames: 1 }]);
+  assert.equal(result.summary.estimatedFrames, 3);
+  assert.equal(result.contour.truncated, false);
+  assert.equal(JSON.stringify(estimate), before);
+});
+
+// Compact arrays keep every 20ms observation; serializing rich objects per
+// frame would double through MCP and silently exhaust the output budget.
+test("vocal pitch contour remains complete and bounded in a dense 30-second response", () => {
+  const estimate = { start: 0, stepSeconds: 0.02, duration: 30,
+    hz: Array.from({ length: 1500 }, (_, i) => 300 + 199 * Math.sin(i / 43)),
+    periodicity: Array.from({ length: 1500 }, (_, i) => 0.9 + (i % 99) / 1000),
+    method: { id: 'fixture-only' }, warnings: ['fixture, not accuracy evidence'] };
+  const pitch = vocalPitchContext(estimate);
+  if (pitch.status !== 'estimated') throw new Error('Expected supported pitch fixture');
+  assert.equal(pitch.contour.hz.length, 1500); assert.equal(pitch.contour.midi.length, 1500);
+  assert.equal(pitch.contour.periodicity.length, 1500); assert.equal(pitch.summary.estimatedFrames, 1500);
+  assert.equal(pitch.summary.mostObservedNotes.length, 12);
+  const result = { pitch };
+  const wire = JSON.stringify({ content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: { result } });
+  assert.ok(Buffer.byteLength(wire) < 74000, 'reserve 6KB for actual tracker metadata inside the 80KB gate');
 });
 
 // Dispatch can silently remain on saved-report paths even with working DSP.

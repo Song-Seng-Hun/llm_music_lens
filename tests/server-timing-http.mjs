@@ -5,7 +5,8 @@ import { relative, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { parseArgs } from 'node:util';
 import assert from 'node:assert/strict';
-const { values } = parseArgs({ options: { endpoint: { type: 'string' }, 'built-worker': { type: 'string' }, pcm: { type: 'string' }, vocal: { type: 'string' }, output: { type: 'string' } } });
+const { values } = parseArgs({ options: { endpoint: { type: 'string' }, 'built-worker': { type: 'string' }, pcm: { type: 'string' }, vocal: { type: 'string' }, output: { type: 'string' }, 'source-kind': { type: 'string', default: 'mixture' } } });
+assert.ok(['mixture', 'isolated-vocal'].includes(values['source-kind']));
 for (const key of ['pcm', 'vocal', 'output']) if (!values[key]) throw new Error(`Missing --${key}`);
 if (Boolean(values.endpoint) === Boolean(values['built-worker'])) throw new Error('Choose exactly one of --endpoint URL or --built-worker DIR');
 const url = new URL(values.endpoint ?? 'http://localhost/mcp');
@@ -68,10 +69,10 @@ try {
   const vocalBytes = await readFile(resolve(values.vocal));
   const vocal = JSON.parse(vocalBytes.toString('utf8'));
   const pcm = await readFile(resolve(values.pcm));
-  receipt.inputs = { pcmSha256: sha256(pcm), vocalSha256: sha256(vocalBytes) };
+  receipt.inputs = { pcmSha256: sha256(pcm), vocalSha256: sha256(vocalBytes), sourceKind: values['source-kind'] };
   const result = await request('tools/call', { name: 'analyze_music_timing', arguments: {
     audio: { encoding: 'pcm_s16le', sampleRate: 22050, channels: 1, data: pcm.toString('base64') },
-    timedVocal: vocal, offsetSeconds: 0,
+    timedVocal: vocal, offsetSeconds: 0, sourceKind: values['source-kind'],
   } });
   assert.equal(result.status, 200); assert.equal(result.value.result.isError, false);
   const analysis = result.value.result.structuredContent.result;
@@ -80,7 +81,7 @@ try {
   assert.equal(analysis.vocalTiming.unit, vocal.unit);
   assert.deepEqual(analysis.vocalTiming.items.map(({ start, end, text }) => ({ start, end, text })), vocal.items);
   assert.ok(analysis.unavailable.includes('server acoustic syllable alignment'));
-  assert.equal(analysis.waveform.sourceKind, 'mixture');
+  assert.equal(analysis.waveform.sourceKind, values['source-kind']);
   assert.equal(analysis.waveform.analysisWindowSeconds, 0.02);
   assert.equal(analysis.waveform.analysisHopSeconds, 0.01);
   assert.equal(analysis.waveform.curve.stepSeconds, 0.1);
@@ -90,9 +91,9 @@ try {
   assert.equal(analysis.waveform.context.truncated, analysis.waveform.context.total > 16);
   assert.ok(Buffer.byteLength(JSON.stringify(analysis.waveform)) <= 50000);
   receipt.cases.push({ name: 'Actual model plus supplied phone timing linked, originals intact', status: result.status, count: vocal.items.length, pass: true });
-  receipt.cases.push({ name: 'Actual server waveform evidence returned with mixture attribution and bounded summary', status: result.status, pass: true });
+  receipt.cases.push({ name: 'Actual server waveform evidence returned with caller attribution and bounded summary', status: result.status, pass: true });
   assert.equal(analysis.acoustics.schema, 'spectral-texture/1');
-  assert.equal(analysis.acoustics.sourceKind, 'mixture');
+  assert.equal(analysis.acoustics.sourceKind, values['source-kind']);
   assert.equal(analysis.acoustics.analysis.fftSize, 1024);
   assert.equal(analysis.acoustics.windows.length, Math.ceil(pcm.length / 2 / 22050));
   assert.ok(analysis.acoustics.windows.length <= 30);
@@ -110,7 +111,7 @@ try {
   assert.equal(analysis.attacks.events.length, Math.min(64, analysis.attacks.total));
   assert.equal(analysis.attacks.truncated, analysis.attacks.total > 64);
   assert.equal(analysis.attacks.density.reduce((sum, window) => sum + window.count, 0), analysis.attacks.total);
-  assert.equal(analysis.attacks.sourceKind, 'mixture');
+  assert.equal(analysis.attacks.sourceKind, values['source-kind']);
   assert.ok(!('attackCandidates' in analysis.timing));
   assert.ok(analysis.attacks.events.every(event => event.time >= 0 && event.time < analysis.source.duration));
   const withoutAttacks = structuredClone(result.value);
@@ -121,6 +122,26 @@ try {
   receipt.addedAttackWireBytes = Buffer.byteLength(JSON.stringify(result.value)) - Buffer.byteLength(JSON.stringify(withoutAttacks));
   assert.ok(receipt.addedAttackWireBytes <= 50000);
   receipt.cases.push({ name: 'Actual spectral attacks link to beats with capped detail and complete density', status: result.status, pass: true });
+  if (values['source-kind'] === 'mixture') assert.equal(analysis.pitch.status, 'unavailable');
+  else {
+    assert.equal(analysis.pitch.status, 'estimated');
+    assert.equal(analysis.pitch.sourceKind, 'isolated-vocal');
+    assert.equal(analysis.pitch.contour.total, Math.ceil(pcm.length / 2 / 441));
+    assert.equal(analysis.pitch.contour.hz.length, analysis.pitch.contour.total);
+    assert.equal(analysis.pitch.contour.midi.length, analysis.pitch.contour.total);
+    assert.equal(analysis.pitch.contour.periodicity.length, analysis.pitch.contour.total);
+    assert.ok(analysis.pitch.contour.hz.every(value => value === null || Number.isFinite(value) && value >= 70 && value <= 1000));
+    assert.equal(analysis.pitch.contour.hz[0], null); assert.equal(analysis.pitch.contour.truncated, false);
+    assert.ok(analysis.pitch.summary.estimatedFrames > 0);
+    assert.ok(analysis.pitch.summary.mostObservedNotes.length <= 12);
+  }
+  const withoutPitch = structuredClone(result.value);
+  delete withoutPitch.result.structuredContent.result.pitch;
+  const withoutPitchText = JSON.parse(withoutPitch.result.content[0].text);
+  delete withoutPitchText.pitch; withoutPitch.result.content[0].text = JSON.stringify(withoutPitchText);
+  receipt.addedPitchWireBytes = Buffer.byteLength(JSON.stringify(result.value)) - Buffer.byteLength(JSON.stringify(withoutPitch));
+  assert.ok(receipt.addedPitchWireBytes <= 80000);
+  receipt.cases.push({ name: `Actual vocal pitch source gate, complete contour and wire budget (${values['source-kind']})`, status: result.status, pass: true });
   receipt.result = analysis;
   receipt.pass = true;
 } catch (error) {

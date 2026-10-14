@@ -53,6 +53,13 @@ It retains64event details with total/truncated; density counts all candidates.
 These are not drum or rap-syllable counts, and offsets do not establish swing
 or intentional groove. See [attack/beat observations](attack-beat.md).
 
+`pitch` returns a bounded20ms periodic F0/fractional-MIDI contour and observed
+nearest-note names only for `sourceKind: "isolated-vocal"`. Mixtures return
+`status: "unavailable"` without running this tracker. Null preserves unknown
+frames and missing crop context; periodicity is not calibrated confidence.
+No new model, download or API is required. This is not note segmentation or
+source separation. See [server vocal pitch](server-vocal-pitch.md).
+
 Optional `timedVocal` accepts `{unit,source,items:[{start,end,text}]}` with
 unit `phone`, `mora`, `syllable` or `word`, at most256items. Optional `noteEvents`
 accepts `{source,mode,items:[{start,end,midi}]}`, mode `solo-vocal` or `polyphonic`,

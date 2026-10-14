@@ -6,6 +6,8 @@ import { analyzeWaveformEnvelope } from "../../analysis/waveform-envelope.mjs";
 import { waveformContext } from "../waveform-context.ts";
 import { attackContext } from "../attack-context.ts";
 import { SERVER_ONSET_OPTIONS } from "../../public/analysis/spectral-onsets.mjs";
+import { analyzeVocalPitch } from "../../analysis/vocal-pitch.mjs";
+import { vocalPitchContext } from "../vocal-pitch-context.ts";
 
 // The production MCP route calls this function. Loading the model is lazy so
 // saved-report reads do not initialize the inference runtime.
@@ -16,6 +18,7 @@ export async function analyzeMusicTiming(args: unknown) {
   try {
     const { analyzeBeatPcm } = await import("./beat-analysis.mjs");
     const { acoustics, attackCandidates, ...timing } = await analyzeBeatPcm(samples, { sampleRate: TIMING_SAMPLE_RATE });
+    const pitch = vocalPitchContext(input.sourceKind === "isolated-vocal" ? analyzeVocalPitch(samples, TIMING_SAMPLE_RATE) : undefined);
     const envelope = analyzeWaveformEnvelope(samples, TIMING_SAMPLE_RATE, { detail: input.waveformDetail });
     const context = waveformContext(envelope.activity.regions, input, timing.beats);
     return {
@@ -26,6 +29,7 @@ export async function analyzeMusicTiming(args: unknown) {
       clock: "excerpt-relative-seconds; add source.offsetSeconds for song time",
       timing: { ...timing, ...beatContext(timing.beats, timing.downbeats) },
       vocalTiming: linkVocalTiming(input, timing.beats, timing.downbeats, duration),
+      pitch,
       attacks: {
         ...attackContext(attackCandidates, timing.beats, duration),
         method: { ...SERVER_ONSET_OPTIONS,
