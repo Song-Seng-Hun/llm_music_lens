@@ -1,6 +1,6 @@
 # Local Music Lens (macOS)
 
-Version 0.2.0 combines native Whisper word times and optional voice emotion or
+Version 0.2.1 combines native Whisper word times and optional voice emotion or
 music-mood windows in one analysis. It runs per job; no daemon, automatic download,
 upload, installation or global client configuration is added. Voice models are
 unvalidated for singing; music-mood accuracy is unmeasured. Scores are model
@@ -80,6 +80,8 @@ report/analyze omit all words/full emotion windows, retaining counts and highest
 observed arousal window. timeline --layer words|emotion pages one layer overlapping
 inclusive [start,end]. Reuse same range/layer with continuation cursor. Limits:
 1–200 rows and byte cap,128KiB ordinary CLI/MCP output.
+Timeline includes layer_status, warnings and report_state: empty rows never imply
+silence or neutral emotion by themselves.
 
 export emits music-lens/1 with validated v2 localAnalysis, stable UUID, title,
 source digest/duration and explicit unvalidated provenance. Only known relative
@@ -92,10 +94,14 @@ never truncates/uploads. CLI-only; importing/sending is a separate operation.
 ASR uses fixed sys.executable -I SCRIPT _infer. Emotion uses adjacent fixed
 emotion_worker.py and startup-configured Python, never an MCP caller-selected
 executable. Stages are serial/offline; the voice worker releases the category
-predictor before loading dimensions. A shared inference deadline covers stages;
+predictor before loading dimensions. A shared wall-clock deadline covers preparation,
+hashing, metadata probes and inference stages;
 timeout/cancellation kills the current process group and reaps it. Status,
-report and cache paths do not load models. Metadata probes and hash IO have
-separate costs.
+report and cache paths do not load models. Metadata probes use DEVNULL stdin and
+at most30s or the remaining deadline. Cancellation is checked before/after a probe
+and between1MiB hash chunks; a running synchronous probe may delay cancellation
+until it exits. Full asset hashing on analyze cache hits remains a deliberate
+integrity cost; no size/mtime-only digest cache is introduced.
 
 Cache identity: source bytes, active model/config files, versions, runner/worker
 source, mode/language and window recipe. Active assets are rehashed before
@@ -103,6 +109,14 @@ publication. Atomic no-overwrite hard links and per-result owner locks protect
 results. Force-killed parents may leave a lock/temp directory; corrupt cache
 fails closed. Recovery remains operator-controlled: inspect PID/owner and preserve
 evidence before authorized cleanup. No automatic report/stale-lock deletion.
+
+Transient stage failures retain useful partial data under a unique immutable
+provenance.failure_attempt ID, leaving the deterministic cache slot free.
+Summaries expose cacheable:false/retry_recommended:true. Only a later explicit
+analyze retries; no automatic inference retry loop. A later success fills its
+deterministic cache and never overwrites the partial. Deterministic empty ASR and
+short-tail partials remain reusable. Version/runner hashes prevent0.2.0 failed
+cache entries being selected by0.2.1; old files stay readable and untouched.
 
 ## MCP and verification
 

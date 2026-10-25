@@ -248,6 +248,7 @@ class LocalTests(unittest.TestCase):
         self.assertEqual(emotion_only["asr_status"], "failed")
         self.assertEqual(emotion_only["word_count"], 0)
         self.assertEqual(self.lens.load(emotion_only["result_id"])["emotion"]["windows"], self.voice_result()["windows"])
+        self.assertTrue(self.lens.analyze("fixture.wav", "ja", emotion_mode="voice")["cache_hit"])
         self.lens.infer_emotion = lambda a, o, c, mode: o.write_bytes(b'{}')
         before = set(self.results.glob("*.json"))
         with self.assertRaises(m.Failure):
@@ -295,7 +296,7 @@ class LocalTests(unittest.TestCase):
         self.lens.infer_emotion = lambda a, o, c, mode: o.write_bytes(m.encoded(self.voice_result()))
         normal = self.lens.analyze("fixture.wav", "en")
         probe = subprocess.CompletedProcess([], 0, stdout=b'{"torch":"fake-0"}', stderr=b"")
-        with patch.object(m.subprocess, "run", return_value=probe):
+        with patch.object(m.subprocess, "run", return_value=probe) as metadata_probe:
             first = self.lens.analyze("fixture.wav", "en", emotion_mode="voice")
             cached = self.lens.analyze("fixture.wav", "en", emotion_mode="voice")
             self.assertTrue(cached["cache_hit"])
@@ -306,6 +307,7 @@ class LocalTests(unittest.TestCase):
                 return b"different worker source" if path.name == "emotion_worker.py" else old_read(path)
             with patch.object(Path, "read_bytes", changed_worker):
                 changed_code = self.lens.analyze("fixture.wav", "en", emotion_mode="voice")
+            self.assertEqual(metadata_probe.call_args.kwargs["stdin"], subprocess.DEVNULL)
         self.assertEqual(len({r["result_id"] for r in (normal, first, changed_model, changed_code)}), 4)
 
     def test_second_stage_cancel_never_publishes(self):
@@ -320,6 +322,59 @@ class LocalTests(unittest.TestCase):
             self.lens.analyze("fixture.wav", "en", cancel=cancel, emotion_mode="voice")
         self.assertEqual(caught.exception.code, "cancelled")
         self.assertEqual(list(self.results.iterdir()), [])
+
+    def test_transient_stage_failure_does_not_poison_cache(self):
+        """An emotion crash retains readable words but cannot pin later calls to that failure."""
+        self.fake_emotion_setup()
+        attempts = []
+        def fail_once(a, o, c, mode):
+            attempts.append(mode)
+            if len(attempts) == 1:
+                raise m.Failure("inference_failed", "temporary worker crash")
+            o.write_bytes(m.encoded(self.voice_result()))
+        self.lens.infer_emotion = fail_once
+        failed = self.lens.analyze("fixture.wav", "en", emotion_mode="voice")
+        original = self.lens.result_path(failed["result_id"]).read_bytes()
+        recovered = self.lens.analyze("fixture.wav", "en", emotion_mode="voice")
+        self.assertEqual(recovered["state"], "complete")
+        self.assertEqual(len(attempts), 2)
+        self.assertNotEqual(failed["result_id"], recovered["result_id"])
+        self.assertIn("failure_attempt", failed["provenance"])
+        self.assertFalse(failed["cacheable"])
+        self.assertTrue(failed["retry_recommended"])
+        self.assertEqual(self.lens.export(failed["result_id"], "Retained partial")["localAnalysis"]["provenance"]["failure_attempt"], failed["provenance"]["failure_attempt"])
+        self.assertTrue(self.lens.analyze("fixture.wav", "en", emotion_mode="voice")["cache_hit"])
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(self.lens.result_path(failed["result_id"]).read_bytes(), original)
+        self.assertEqual(self.lens.timeline(failed["result_id"], layer="emotion")["layer_status"], "failed")
+        self.assertEqual(self.lens.timeline(failed["result_id"], layer="words")["layer_status"], "complete")
+        valid_asr = self.lens.infer
+        asr_attempts = []
+        def malformed_once(a, o, c):
+            asr_attempts.append(1)
+            if len(asr_attempts) == 1:
+                o.write_bytes(m.encoded({"segments": [{"words": [{"word": "bad", "start": 0.8, "end": 0.2}]}]}))
+            else:
+                valid_asr(a, o, c)
+        self.lens.infer = malformed_once
+        malformed = self.lens.analyze("fixture.wav", "ja", emotion_mode="voice")
+        repaired = self.lens.analyze("fixture.wav", "ja", emotion_mode="voice")
+        self.assertEqual(repaired["state"], "complete")
+        self.assertEqual(len(asr_attempts), 2)
+        self.assertIn("failure_attempt", malformed["provenance"])
+
+    def test_cancel_during_provenance_cannot_return_cache(self):
+        """A cancellation raised during fingerprinting must not become a successful cache hit."""
+        self.lens.analyze("fixture.wav", "en")
+        manifest = self.lens.model_manifest()
+        cancel = threading.Event()
+        def cancelling_manifest():
+            cancel.set()
+            return manifest
+        self.lens.model_manifest = cancelling_manifest
+        with self.assertRaises(m.Failure) as caught:
+            self.lens.analyze("fixture.wav", "en", cancel=cancel)
+        self.assertEqual(caught.exception.code, "cancelled")
 
 
 if __name__ == "__main__":

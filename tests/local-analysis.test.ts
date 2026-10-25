@@ -60,6 +60,11 @@ check("independent failed layer and unrequested emotion remain explicit", () => 
   const input: any = sample(); const local = input.localAnalysis;
   local.asr_status = "failed"; local.words = []; local.word_count = 0; local.timing_notes = []; local.state = "partial"; local.warnings = ["ASR failed (empty_output)"];
   assert.equal(reportSchema.parse(input).localAnalysis!.emotion.windows.length, 2);
+  local.provenance.tool_version = "0.2.1"; local.provenance.failure_attempt = "c".repeat(32);
+  const transient = summaryOf(reportSchema.parse(input)).localAnalysis!;
+  assert.equal(transient.cacheable, false); assert.equal(transient.retry_recommended, true);
+  const invalid: any = sample(); invalid.localAnalysis.provenance.failure_attempt = "c".repeat(32);
+  assert.equal(reportSchema.safeParse(invalid).success, false, "complete result cannot claim a failed attempt");
   const none: any = sample(); none.localAnalysis.emotion = { mode: "none", status: "not_requested", warnings: [], window_seconds: 0, hop_seconds: 0, minimum_tail_seconds: 0, coverage: { covered_seconds: 0, uncovered_seconds: 4 }, windows: [], score_semantics: "native_uncalibrated", accuracy: "unmeasured", dimension_scale: "model native, approximately 1..9" };
   none.localAnalysis.provenance.emotion = { mode: "none", settings: { window_seconds: 0, hop_seconds: 0, minimum_tail_seconds: 0 } };
   assert.equal(reportSchema.parse(none).localAnalysis!.emotion.status, "not_requested");

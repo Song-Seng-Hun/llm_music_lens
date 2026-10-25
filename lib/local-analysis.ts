@@ -14,10 +14,10 @@ const emotionProvenance = z.object({
   engine_versions: z.record(z.string().regex(/^[A-Za-z0-9_.+-]{1,80}$/), z.string().regex(/^[A-Za-z0-9_.+-]{1,128}$/)).optional(),
 }).strict();
 const provenance = z.object({
-  tool_version: z.literal("0.2.0"), engine: z.literal("mlx-whisper"), engine_version: z.string().regex(/^[A-Za-z0-9_.+-]{1,128}$/),
+  tool_version: z.enum(["0.2.0", "0.2.1"]), engine: z.literal("mlx-whisper"), engine_version: z.string().regex(/^[A-Za-z0-9_.+-]{1,128}$/),
   model_files: modelFiles.min(1), source_sha256: hash,
   settings: z.object({ language: z.enum(["auto", "en", "ko", "ja"]), word_timestamps: z.literal(true), temperature: z.literal(0) }).strict(),
-  runner_sha256: hash, emotion: emotionProvenance,
+  runner_sha256: hash, emotion: emotionProvenance, failure_attempt: z.string().regex(/^[0-9a-f]{32}$/).optional(),
 }).strict();
 export const VOICE_LABELS = ["生气/angry", "厌恶/disgusted", "恐惧/fearful", "开心/happy", "中立/neutral", "其他/other", "难过/sad", "吃惊/surprised", "<unk>"] as const;
 export const MUSIC_LABELS = ["passionate, rousing, confident, boisterous, rowdy", "rollicking, cheerful, fun, sweet, amiable/good natured", "literate, poignant, wistful, bittersweet, autumnal, brooding", "humorous, silly, campy, quirky, whimsical, witty, wry", "aggressive, fiery, tense/anxious, intense, volatile, visceral"] as const;
@@ -59,6 +59,7 @@ export const localAnalysisSchema = z.object({
   const note = v.timing_notes[0];
   if (overshoots ? !note || note.word_count !== overshoots || Math.abs(note.max_overshoot_seconds - maximumOvershoot) > 1e-9 : !!note) fail("Native overshoot note disagrees with word timing.");
   const e = v.emotion, p = v.provenance.emotion;
+  if (v.provenance.failure_attempt && v.asr_status !== "failed" && e.status !== "failed") fail("Failure attempt requires an explicitly failed layer.");
   const settings = e.mode === "voice" ? [4, 2, 1] : e.mode === "music" ? [5, 2.5, 3] : [0, 0, 0];
   const keys = ["window_seconds", "hop_seconds", "minimum_tail_seconds"] as const;
   if (p.mode !== e.mode || keys.some((key, i) => e[key] !== settings[i] || p.settings[key] !== settings[i])) fail("Emotion mode/window recipe differs from provenance.");
@@ -94,6 +95,7 @@ export function localSummary(local?: LocalAnalysis) {
   let peak: EmotionWindow | null = null;
   for (const row of rows) if (!peak || row.arousal > peak.arousal) peak = row;
   return { result_id: local.result_id, state: local.state, clock: local.clock, asr_status: local.asr_status, word_count: local.word_count,
+    cacheable: !local.provenance.failure_attempt, retry_recommended: !!local.provenance.failure_attempt,
     emotion: { mode: e.mode, status: e.status, window_count: e.windows.length, coverage: e.coverage, dimension_scale: e.dimension_scale,
       highest_observed_arousal: peak ? { start: peak.start, end: peak.end, arousal: peak.arousal, label: "dominant_emotion" in peak ? peak.dominant_emotion : peak.top_mood } : null,
       warnings: e.warnings }, warnings: local.warnings, timing_notes: local.timing_notes, limits: LOCAL_LIMIT };

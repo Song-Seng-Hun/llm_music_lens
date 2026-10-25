@@ -21,7 +21,7 @@ import time
 import wave
 import uuid
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 SCHEMA_VERSION = "music-lens-local/2"
 END_TOLERANCE = 0.05
 MAX_AUDIO = 64 * 1024 * 1024
@@ -138,6 +138,8 @@ def portable_provenance(provenance):
            "source_sha256": token(provenance["source_sha256"], r"[0-9a-f]{64}"),
            "runner_sha256": token(provenance["runner_sha256"], r"[0-9a-f]{64}"),
            "settings": {"language": settings["language"], "word_timestamps": True, "temperature": 0.0}}
+    if "failure_attempt" in provenance:
+        out["failure_attempt"] = token(provenance["failure_attempt"], r"[0-9a-f]{32}")
     emotion = provenance["emotion"]
     mode = emotion["mode"]
     if mode not in EMOTION_MODES:
@@ -239,7 +241,9 @@ def normalize(raw, duration):
                 max_overshoot = max(max_overshoot, end - duration)
             last_start = start
     if not words:
-        raise Failure("empty_output", "No valid timed words; silence or unrecognized audio is not a successful transcript")
+        if omitted:
+            raise Failure("invalid_output", "All returned word/segment entries were malformed")
+        raise Failure("empty_output", "No timed words in structurally valid output; silence or unrecognized audio is not a successful transcript")
     warnings = []
     if omitted:
         warnings.append(f"Omitted {omitted} invalid words or segments without word data")
@@ -272,6 +276,7 @@ class LocalLens:
             raise Failure("configuration", "Configure both emotion Python and asset directory")
 
     def emotion_provenance(self, mode):
+        self.check_budget()
         size, hop, minimum = EMOTION_SETTINGS[mode]
         base = {"mode": mode, "settings": {"window_seconds": size, "hop_seconds": hop, "minimum_tail_seconds": minimum}}
         if mode == "none":
@@ -286,6 +291,7 @@ class LocalLens:
                     ("music-model", ("msd-musicnn-1.pb", "deam-msd-musicnn-2.pb", "moods_mirex-msd-musicnn-1.pb")),)
         for directory, filenames in required:
             for name in filenames:
+                self.check_budget()
                 path = self.emotion_assets / directory / name
                 if path.is_symlink() or not path.is_file() or (self.emotion_assets / directory).is_symlink():
                     return dict(base, availability="unavailable", reason="emotion_model_missing")
@@ -295,13 +301,19 @@ class LocalLens:
                 h = hashlib.sha256()
                 with path.open("rb") as f:
                     for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                        self.check_budget()
                         h.update(chunk)
                 manifest.append({"file": directory + "/" + name, "sha256": h.hexdigest(), "bytes": size_bytes})
         env = self.child_environment()
+        self.check_budget()
+        remaining = getattr(self, "_deadline", time.monotonic() + 30) - time.monotonic()
         try:
-            probe = subprocess.run([str(self.emotion_python), "-I", str(worker), "--versions", mode], capture_output=True, timeout=30, env=env)
+            probe = subprocess.run([str(self.emotion_python), "-I", str(worker), "--versions", mode], stdin=subprocess.DEVNULL,
+                                   capture_output=True, timeout=min(30, max(0.001, remaining)), env=env)
         except (OSError, subprocess.TimeoutExpired):
+            self.check_budget()
             return dict(base, availability="unavailable", reason="emotion_dependency_probe_failed", model_files=manifest)
+        self.check_budget()
         if probe.returncode or len(probe.stdout) > 16384:
             return dict(base, availability="unavailable", reason="emotion_dependency_probe_failed", model_files=manifest)
         try:
@@ -325,10 +337,12 @@ class LocalLens:
             raise Failure("dependency_missing", "mlx-whisper is not installed in this Python environment")
 
     def model_manifest(self):
+        self.check_budget()
         if not (self.model_dir / "config.json").is_file():
             raise Failure("configuration", "Local model needs config.json")
         manifest, total = [], 0
         for path in sorted(self.model_dir.rglob("*")):
+            self.check_budget()
             if path.is_symlink():
                 raise Failure("configuration", "Model directory must contain materialized files, not symlinks")
             if not path.is_file():
@@ -339,6 +353,7 @@ class LocalLens:
             h = hashlib.sha256()
             with path.open("rb") as f:
                 for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                    self.check_budget()
                     h.update(chunk)
             manifest.append({"file": path.relative_to(self.model_dir).as_posix(), "sha256": h.hexdigest(), "bytes": path.stat().st_size})
         if not any(x["file"].endswith((".npz", ".safetensors")) for x in manifest):
@@ -428,6 +443,10 @@ class LocalLens:
                 if asr == "failed" and emotion["status"] not in ("complete", "partial"):
                     raise ValueError()
                 complete = asr == "complete" and emotion["status"] in ("complete", "not_requested")
+                attempt = report["provenance"].get("failure_attempt")
+                if attempt is not None and (not isinstance(attempt, str) or not re.fullmatch(r"[0-9a-f]{32}", attempt)
+                                            or (asr != "failed" and emotion["status"] != "failed")):
+                    raise ValueError()
                 if (report["state"] == "complete") != complete:
                     raise ValueError()
                 if not isinstance(report["warnings"], list) or any(not isinstance(w, str) or len(w) > 1000 for w in report["warnings"]):
@@ -441,6 +460,8 @@ class LocalLens:
     @staticmethod
     def summary(report):
         value = {k: v for k, v in report.items() if k not in ("words", "emotion")}
+        value["cacheable"] = "failure_attempt" not in report["provenance"]
+        value["retry_recommended"] = not value["cacheable"]
         if "emotion" in report:
             emotion = report["emotion"]
             value["emotion"] = {k: v for k, v in emotion.items() if k != "windows"}
@@ -472,8 +493,11 @@ class LocalLens:
                 break
             page.append(word)
         next_cursor = cursor + len(page)
+        layer_status = report.get("asr_status", report["state"]) if layer == "words" else report.get("emotion", {}).get("status", "not_requested")
+        layer_warnings = report["warnings"] if layer == "words" else report.get("emotion", {}).get("warnings", [])
         return {"result_id": result_id, "clock": "seconds_from_audio_start", "range": {"start": start, "end": end},
                 "cursor": cursor, "total": len(selected), "layer": layer, "words" if layer == "words" else "windows": page,
+                "layer_status": layer_status, "warnings": layer_warnings, "report_state": report["state"],
                 "truncated": next_cursor < len(selected), "continuation": next_cursor if next_cursor < len(selected) else None}
 
     def export(self, result_id, title):
@@ -541,7 +565,29 @@ class LocalLens:
                         pass  # The child may exit between poll and kill.
                 process.wait()
 
+    def check_budget(self):
+        cancel = getattr(self, "_analysis_cancel", None)
+        if cancel is not None and cancel.is_set():
+            raise Failure("cancelled", "Analysis cancelled during preparation")
+        deadline = getattr(self, "_deadline", None)
+        if deadline is not None and time.monotonic() >= deadline:
+            raise Failure("timeout", "Analysis exceeded configured timeout")
+
     def analyze(self, audio_path, language, cancel=None, emotion_mode="none"):
+        cancel = cancel or threading.Event()
+        absent = object()
+        previous = {key: getattr(self, key, absent) for key in ("_analysis_cancel", "_deadline")}
+        self._analysis_cancel, self._deadline = cancel, time.monotonic() + self.timeout
+        try:
+            return self.analyze_once(audio_path, language, cancel, emotion_mode)
+        finally:
+            for key, value in previous.items():
+                if value is absent:
+                    delattr(self, key)
+                else:
+                    setattr(self, key, value)
+
+    def analyze_once(self, audio_path, language, cancel, emotion_mode):
         if language not in LANGUAGES:
             raise Failure("invalid_argument", "language must be explicit: auto, en, ko or ja")
         if emotion_mode not in EMOTION_MODES:
@@ -558,10 +604,13 @@ class LocalLens:
                       "model_files": self.model_manifest(), "source_sha256": audio["sha256"],
                       "settings": {"language": language, "word_timestamps": True, "temperature": 0.0},
                       "runner_sha256": digest(Path(__file__).read_bytes()), "emotion": self.emotion_provenance(emotion_mode)}
+        self.check_budget()
         result_id = digest(encoded(provenance))
         path = self.result_path(result_id)
         if path.exists():
-            return dict(self.report(result_id), cache_hit=True)
+            cached = self.report(result_id)
+            self.check_budget()
+            return dict(cached, cache_hit=True)
         lock_path = self.result_root / (result_id + ".lock")
         try:
             fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -571,7 +620,9 @@ class LocalLens:
             with os.fdopen(fd, "w") as lock:
                 json.dump({"pid": os.getpid(), "created_unix": time.time()}, lock)
             if path.exists():
-                return dict(self.report(result_id), cache_hit=True)
+                cached = self.report(result_id)
+                self.check_budget()
+                return dict(cached, cache_hit=True)
             with tempfile.TemporaryDirectory(prefix=".analysis-", dir=self.result_root) as work:
                 work = Path(work)
                 audio_file, output_file = work / "audio.wav", work / "engine.json"
@@ -580,8 +631,8 @@ class LocalLens:
                 (work / "settings.json").write_bytes(encoded(provenance["settings"]))
                 if cancel.is_set():
                     raise Failure("cancelled", "Analysis cancelled before inference")
-                self._deadline = time.monotonic() + self.timeout
                 words, warnings, detected, timing_notes = [], [], None, []
+                transient_failure = False
                 asr_status = "failed"
                 try:
                     if asr_version == "unavailable":
@@ -593,6 +644,7 @@ class LocalLens:
                 except (Failure, OSError, ValueError, TypeError) as e:
                     if isinstance(e, Failure) and e.code in ("cancelled", "timeout"):
                         raise
+                    transient_failure = not (isinstance(e, Failure) and e.code in ("empty_output", "dependency_missing"))
                     warnings.append("ASR failed (" + getattr(e, "code", "invalid_output") + ")")
                 if cancel.is_set():
                     raise Failure("cancelled", "Analysis cancelled between stages")
@@ -613,6 +665,7 @@ class LocalLens:
                             emotion = emotion_shell(emotion_mode, audio["duration_seconds"], "failed", ["Emotion failed (" + getattr(e, "code", "invalid_output") + ")"])
                     if emotion["status"] != "complete":
                         warnings.extend(emotion["warnings"])
+                    transient_failure = transient_failure or emotion["status"] == "failed"
                 if cancel.is_set():
                     raise Failure("cancelled", "Inference cancelled before publication")
                 if time.monotonic() >= self._deadline:
@@ -627,6 +680,11 @@ class LocalLens:
                     raise Failure("timeout", "Analysis exceeded configured timeout")
                 if not words and emotion["status"] not in ("complete", "partial"):
                     raise Failure("empty_output", "No requested analysis layer succeeded; no result published")
+                if transient_failure:
+                    # Preserve useful layers immutably without occupying the reusable cache slot.
+                    provenance = dict(provenance, failure_attempt=uuid.uuid4().hex)
+                    result_id = digest(encoded(provenance))
+                    path = self.result_path(result_id)
                 complete = asr_status == "complete" and emotion["status"] in ("complete", "not_requested")
                 report = {"schema_version": SCHEMA_VERSION, "result_id": result_id, "state": "complete" if complete else "partial", "audio": audio,
                           "clock": "seconds_from_audio_start", "provenance": provenance, "detected_language": detected,
