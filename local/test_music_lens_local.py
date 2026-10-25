@@ -149,7 +149,7 @@ class LocalTests(unittest.TestCase):
             result = self.lens.analyze("fixture.wav", language)
             stored = self.lens.load(result["result_id"])
             self.assertEqual(result["state"], "complete" if end == 1.05 else "partial")
-            self.assertEqual(result["schema_version"], "music-lens-local/1")
+            self.assertEqual(result["schema_version"], "music-lens-local/2")
             if end == 1.05:
                 self.assertEqual(stored["words"][1]["end"], end)
                 self.assertEqual(stored["timing_notes"][0]["word_count"], 1)
@@ -219,6 +219,107 @@ class LocalTests(unittest.TestCase):
         self.assertFalse(responses[3]["result"]["isError"])
         self.assertFalse(json.loads(responses[3]["result"]["content"][0]["text"])["automatic_downloads"])
         self.assertEqual(run.stderr, b"")
+
+    def voice_result(self):
+        result = m.emotion_shell("voice", 1, "complete")
+        result["coverage"] = {"covered_seconds": 1, "uncovered_seconds": 0}
+        result["windows"] = [{"start": 0, "end": 1, "category_labels": ["label" + str(i) for i in range(9)],
+                               "category_scores": [0.9] + [0.0125] * 8, "dominant_emotion": "label0",
+                               "arousal": 0.8, "dominance": 0.4, "valence": 0.6}]
+        return result
+
+    def fake_emotion_setup(self):
+        self.lens.emotion_provenance = lambda mode: {"mode": mode, "availability": "ready", "worker_sha256": "1" * 64,
+            "settings": {"window_seconds": 4, "hop_seconds": 2, "minimum_tail_seconds": 1}}
+        self.lens.infer_emotion = lambda a, o, c, mode: o.write_bytes(m.encoded(self.voice_result()))
+
+    def test_partial_layers_retained_all_failed_rejected(self):
+        """A failed optional stage cannot erase words, nor empty ASR erase valid emotion."""
+        first = self.lens.analyze("fixture.wav", "en", emotion_mode="voice")
+        self.assertEqual(first["state"], "partial")
+        self.assertEqual(first["asr_status"], "complete")
+        self.assertEqual(first["emotion"]["status"], "unavailable")
+        self.fake_emotion_setup()
+        combined = self.lens.analyze("fixture.wav", "en", emotion_mode="voice")
+        self.assertEqual(combined["state"], "complete")
+        self.lens.infer = lambda a, o, c: o.write_bytes(b'{"segments":[]}')
+        emotion_only = self.lens.analyze("fixture.wav", "ja", emotion_mode="voice")
+        self.assertEqual(emotion_only["state"], "partial")
+        self.assertEqual(emotion_only["asr_status"], "failed")
+        self.assertEqual(emotion_only["word_count"], 0)
+        self.assertEqual(self.lens.load(emotion_only["result_id"])["emotion"]["windows"], self.voice_result()["windows"])
+        self.lens.infer_emotion = lambda a, o, c, mode: o.write_bytes(b'{}')
+        before = set(self.results.glob("*.json"))
+        with self.assertRaises(m.Failure):
+            self.lens.analyze("fixture.wav", "ko", emotion_mode="voice")
+        self.assertEqual(set(self.results.glob("*.json")), before)
+
+    def test_emotion_validation_and_paged_portable_export(self):
+        """Reject fabricated/malformed windows; portable export and paging retain native values."""
+        self.fake_emotion_setup()
+        result = self.lens.analyze("fixture.wav", "en", emotion_mode="voice")
+        rid = result["result_id"]
+        self.assertNotIn("windows", result["emotion"])
+        self.assertEqual(result["emotion"]["window_count"], 1)
+        page = self.lens.timeline(rid, layer="emotion", limit=1)
+        self.assertEqual(page["windows"], self.voice_result()["windows"])
+        self.assertEqual(page["total"], 1)
+        exported = self.lens.export(rid, "Fixture")
+        self.assertEqual(exported["schema"], "music-lens/1")
+        self.assertEqual(exported["localAnalysis"]["emotion"]["windows"], page["windows"])
+        self.assertEqual(exported["source"]["duration"], 1)
+        self.assertNotIn(str(self.root), m.encoded(exported).decode())
+        for change in (lambda row: row.update(end=2), lambda row: row.update(start=0.1),
+                       lambda row: row.update(category_scores=[0.5]), lambda row: row.update(arousal=float("nan")),
+                       lambda row: row.update(dominant_emotion="invented")):
+            bad = json.loads(m.encoded(self.voice_result()))
+            change(bad["windows"][0])
+            with self.subTest(bad=bad), self.assertRaises(m.Failure):
+                m.checked_emotion(bad, 1)
+        stored = self.lens.load(rid)
+        stored["emotion"]["coverage"]["covered_seconds"] = 0
+        self.lens.result_path(rid).write_bytes(m.encoded(stored))
+        with self.assertRaises(m.Failure):
+            self.lens.load(rid)
+
+    def test_emotion_mode_worker_and_model_affect_cache(self):
+        """Mode plus actual local model/worker hashes distinguish emotion cache entries."""
+        assets = self.root / "emotion"
+        for directory, names in (("category", ("model.pt", "config.yaml", "tokens.txt", "configuration.json")),
+                                 ("intensity", ("model.safetensors", "config.json", "preprocessor_config.json"))):
+            (assets / directory).mkdir(parents=True)
+            for name in names:
+                (assets / directory / name).write_bytes(b"fixture asset")
+        self.lens.emotion_python = Path(sys.executable)
+        self.lens.emotion_assets = assets
+        self.lens.infer_emotion = lambda a, o, c, mode: o.write_bytes(m.encoded(self.voice_result()))
+        normal = self.lens.analyze("fixture.wav", "en")
+        probe = subprocess.CompletedProcess([], 0, stdout=b'{"torch":"fake-0"}', stderr=b"")
+        with patch.object(m.subprocess, "run", return_value=probe):
+            first = self.lens.analyze("fixture.wav", "en", emotion_mode="voice")
+            cached = self.lens.analyze("fixture.wav", "en", emotion_mode="voice")
+            self.assertTrue(cached["cache_hit"])
+            (assets / "category/model.pt").write_bytes(b"changed fixture model")
+            changed_model = self.lens.analyze("fixture.wav", "en", emotion_mode="voice")
+            old_read = Path.read_bytes
+            def changed_worker(path):
+                return b"different worker source" if path.name == "emotion_worker.py" else old_read(path)
+            with patch.object(Path, "read_bytes", changed_worker):
+                changed_code = self.lens.analyze("fixture.wav", "en", emotion_mode="voice")
+        self.assertEqual(len({r["result_id"] for r in (normal, first, changed_model, changed_code)}), 4)
+
+    def test_second_stage_cancel_never_publishes(self):
+        """Cancellation after ASR or inside emotion prevents a reusable partial report."""
+        self.fake_emotion_setup()
+        cancel = threading.Event()
+        def cancelled(a, o, c, mode):
+            c.set()
+            raise m.Failure("cancelled", "fixture cancellation")
+        self.lens.infer_emotion = cancelled
+        with self.assertRaises(m.Failure) as caught:
+            self.lens.analyze("fixture.wav", "en", cancel=cancel, emotion_mode="voice")
+        self.assertEqual(caught.exception.code, "cancelled")
+        self.assertEqual(list(self.results.iterdir()), [])
 
 
 if __name__ == "__main__":

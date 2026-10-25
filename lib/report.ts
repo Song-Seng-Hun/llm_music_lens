@@ -2,6 +2,7 @@ import { z } from "zod";
 import { detailSchema } from "./detail.ts";
 import { wordContexts } from "./alignment.ts";
 import { contourInterval, contourSummary } from "./pitch-contour.ts";
+import { localAnalysisSchema, localSummary, localTimeline, LOCAL_LIMIT } from "./local-analysis.ts";
 
 export const SCHEMA_VERSION = "music-lens/1" as const;
 export const MAX_DURATION = 600;
@@ -59,11 +60,12 @@ export const sourceSchema = z.object({
 export const reportSchema = z.object({
   schema: z.literal(SCHEMA_VERSION),
   id: z.string().uuid(),
-  createdAt: z.string().datetime(),
+  createdAt: z.string().datetime({ offset: true }),
   source: sourceSchema,
   signal: signalSchema.nullable(),
   interpretation: musicalAnalysisSchema.nullable(),
   detail: detailSchema.optional(),
+  localAnalysis: localAnalysisSchema.optional(),
   provenance: z.object({
     mode: z.enum(["local-signal", "model-estimate", "combined", "imported"]),
     model: z.string().max(100).optional(),
@@ -73,6 +75,12 @@ export const reportSchema = z.object({
     totalTokens: z.number().int().nonnegative().optional(),
     accuracy: z.literal("unvalidated"),
   }),
+}).superRefine((report, ctx) => {
+  const local = report.localAnalysis;
+  if (local && (report.source.kind !== "file" || report.source.sha256 !== local.audio.sha256 || report.source.duration !== local.audio.duration_seconds)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Local analysis must match the exported file hash and duration." });
+  }
+  if (new TextEncoder().encode(JSON.stringify(report)).byteLength > MAX_REPORT_BYTES) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Report exceeds the 1.9 MB storage limit." });
 });
 export type MusicReport = z.infer<typeof reportSchema>;
 
@@ -84,9 +92,10 @@ export function summaryOf(report: MusicReport) {
   return { id: report.id, title: report.source.title, source: report.source, createdAt: report.createdAt,
     bpm: report.detail ? report.detail.rhythm.bpm : report.signal ? report.signal.tempo.bpm : report.interpretation?.bpm.value ?? null,
     key: keyOf(report),
-    summary: report.interpretation?.summary ?? (report.detail ? "브라우저 모델의 음표·가사와 리듬·화음 추정입니다. 음악적 정확도와 스타일 해석은 미검증입니다." : "로컬 신호 추정만 포함합니다. 스타일·가사·랩·화음 해석은 미확인입니다."),
+    summary: report.interpretation?.summary ?? (report.localAnalysis ? "로컬 Whisper 단어 타이밍과 선택한 감정·분위기 모델의 추정입니다. 부분 실패·빈 구간과 모델 한계를 함께 확인하세요." : report.detail ? "브라우저 모델의 음표·가사와 리듬·화음 추정입니다. 음악적 정확도와 스타일 해석은 미검증입니다." : "로컬 신호 추정만 포함합니다. 스타일·가사·랩·화음 해석은 미확인입니다."),
     styles: report.interpretation?.styleTags ?? [], provenance: report.provenance,
-    available: { signal: Boolean(report.signal), interpretation: Boolean(report.interpretation), detail: Boolean(report.detail), notes: report.detail?.notes.status ?? "unavailable", lyrics: report.detail?.lyrics.status ?? "unavailable" } };
+    localAnalysis: localSummary(report.localAnalysis),
+    available: { signal: Boolean(report.signal), interpretation: Boolean(report.interpretation), detail: Boolean(report.detail), notes: report.detail?.notes.status ?? "unavailable", lyrics: report.detail?.lyrics.status ?? "unavailable", localWords: report.localAnalysis?.asr_status ?? "unavailable", localEmotion: report.localAnalysis?.emotion.status ?? "unavailable" } };
 }
 
 // A new analysis's explicit unknown is not replaced with an older interpretation.
@@ -100,6 +109,7 @@ export function timelineOf(report: MusicReport, start: number, end: number) {
   const overlap = (v: { start: number; end: number }) => v.start < end && v.end > start;
   const limited = <T>(v: T[]) => ({ items: v.slice(0, 200), total: v.length, truncated: v.length > 200 });
   return { id: report.id, start, end, provenance: report.provenance,
+    ...localTimeline(report.localAnalysis, start, end),
     sections: limited(report.interpretation?.sections.filter(overlap) ?? []),
     moments: limited(report.interpretation?.moments.filter(overlap) ?? []),
     vocals: limited(report.interpretation?.vocals.filter(overlap) ?? []),
@@ -148,6 +158,14 @@ export function asMarkdown(report: MusicReport): string {
       ...h.chords.slice(0, 24).map(c => `- ${c.start.toFixed(2)}–${c.end.toFixed(2)}s | ${c.label} | ${c.source}; observed pitch classes: ${c.pitchClasses.join(", ") || "unavailable"}`),
       ...h.warnings.map(w => `- ${w}`));
   }
+  if (report.localAnalysis) {
+    const local = report.localAnalysis, e = local.emotion, summary = localSummary(local)!;
+    lines.push("", "## Local word and emotion estimates", `Result: ${local.result_id}; state ${local.state}; ASR ${local.asr_status}; ${local.word_count} retained native words.`,
+      `Emotion: ${e.mode}; ${e.status}; ${e.windows.length} retained windows; ${e.dimension_scale}; ${e.coverage.uncovered_seconds.toFixed(3)}s uncovered.`,
+      `Highest observed arousal window: ${summary.emotion.highest_observed_arousal ? JSON.stringify(summary.emotion.highest_observed_arousal) : "unavailable"}.`,
+      LOCAL_LIMIT, ...local.warnings.map(w => `- ${w}`));
+  }
   lines.push(``, `## Limits`, ...(report.signal?.warnings ?? []).map(x => `- ${x}`), ...(a?.limitations ?? []).map(x => `- ${x}`), `- Musical accuracy has not been independently validated.`);
   return lines.join("\n");
 }
+

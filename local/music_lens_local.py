@@ -2,6 +2,7 @@
 """Bounded local ASR CLI and newline-delimited JSON-RPC/MCP server."""
 import argparse
 import contextlib
+from datetime import datetime, timezone
 import hashlib
 import importlib.metadata
 import io
@@ -18,15 +19,144 @@ import tempfile
 import threading
 import time
 import wave
+import uuid
 
-VERSION = "0.1.1"
-SCHEMA_VERSION = "music-lens-local/1"
+VERSION = "0.2.0"
+SCHEMA_VERSION = "music-lens-local/2"
 END_TOLERANCE = 0.05
 MAX_AUDIO = 64 * 1024 * 1024
 MAX_REPORT = 4 * 1024 * 1024
 MAX_WIRE = 128 * 1024
 MAX_WORDS = 40000
 LANGUAGES = ("auto", "en", "ko", "ja")
+EMOTION_MODES = ("none", "voice", "music")
+PORTABLE_CAP = 1900000
+EMOTION_LIMIT = 600
+EMOTION_SETTINGS = {"none": (0, 0, 0), "voice": (4, 2, 1), "music": (5, 2.5, 3)}
+
+
+def emotion_shell(mode, duration, status="not_requested", warnings=None):
+    size, hop, minimum = EMOTION_SETTINGS[mode]
+    return {"mode": mode, "status": status, "warnings": warnings or [], "window_seconds": size,
+            "hop_seconds": hop, "minimum_tail_seconds": minimum,
+            "coverage": {"covered_seconds": 0, "uncovered_seconds": duration}, "windows": [],
+            "score_semantics": "native_uncalibrated", "accuracy": "unvalidated_for_singing" if mode == "voice" else "unmeasured",
+            "dimension_scale": "model native, approximately 0..1" if mode == "voice" else "model native, approximately 1..9"}
+
+
+def checked_emotion(value, duration):
+    """Validate stored/native windows without filling gaps or changing scores."""
+    if not isinstance(value, dict) or value.get("mode") not in EMOTION_MODES:
+        raise Failure("invalid_output", "Invalid emotion mode")
+    mode = value["mode"]
+    expected = emotion_shell(mode, duration)
+    if set(value) != set(expected):
+        raise Failure("invalid_output", "Unexpected emotion fields")
+    status = value.get("status")
+    if status not in ("complete", "partial", "failed", "unavailable", "not_requested"):
+        raise Failure("invalid_output", "Invalid emotion status")
+    if any(value.get(key) != expected[key] for key in ("window_seconds", "hop_seconds", "minimum_tail_seconds", "score_semantics", "accuracy", "dimension_scale")):
+        raise Failure("invalid_output", "Emotion recipe/semantics mismatch")
+    warnings, rows = value.get("warnings"), value.get("windows")
+    if not isinstance(warnings, list) or any(not isinstance(w, str) or len(w) > 1000 for w in warnings) or len(warnings) > 100:
+        raise Failure("invalid_output", "Invalid emotion warnings")
+    if not isinstance(rows, list) or len(rows) > EMOTION_LIMIT:
+        raise Failure("invalid_output", "Invalid emotion window count")
+    if (mode == "none") != (status == "not_requested") or (status in ("failed", "unavailable", "not_requested") and rows) or (status in ("complete", "partial") and not rows):
+        raise Failure("invalid_output", "Emotion state/windows mismatch")
+    covered, right, last_start = 0.0, 0.0, -1.0
+    for row in rows:
+        if not isinstance(row, dict):
+            raise Failure("invalid_output", "Invalid emotion row")
+        start = number(row.get("start"), "emotion.start", 0, duration)
+        end = number(row.get("end"), "emotion.end", 0, duration)
+        if start <= last_start or end <= start or end - start < expected["minimum_tail_seconds"] - 1e-8 or end - start > expected["window_seconds"] + 1e-8:
+            raise Failure("invalid_output", "Invalid emotion interval")
+        # Every row follows the frozen window grid; omitted rows remain visible gaps.
+        grid = start / expected["hop_seconds"]
+        if abs(grid - round(grid)) > 1e-7 or abs(end - min(start + expected["window_seconds"], duration)) > 1e-7:
+            raise Failure("invalid_output", "Emotion interval differs from recipe")
+        prefix, top, count = ("category", "dominant_emotion", 9) if mode == "voice" else ("mood", "top_mood", 5)
+        allowed = {"start", "end", prefix + "_labels", prefix + "_scores", top, "arousal", "valence"}
+        if mode == "voice":
+            allowed.add("dominance")
+        if set(row) != allowed:
+            raise Failure("invalid_output", "Unexpected emotion row fields")
+        labels, scores = row.get(prefix + "_labels"), row.get(prefix + "_scores")
+        if not isinstance(labels, list) or len(labels) != count or any(not isinstance(s, str) or not s or len(s) > 512 for s in labels) or len(set(labels)) != count:
+            raise Failure("invalid_output", "Invalid emotion labels")
+        if not isinstance(scores, list) or len(scores) != count:
+            raise Failure("invalid_output", "Emotion label/score shape mismatch")
+        for score in scores:
+            number(score, "emotion score", 0, 1)
+        if row.get(top) != labels[max(range(count), key=scores.__getitem__)]:
+            raise Failure("invalid_output", "Dominant emotion disagrees with native scores")
+        for name in (("arousal", "dominance", "valence") if mode == "voice" else ("arousal", "valence")):
+            number(row.get(name), name, -100, 100)  # Native regression values are not clamped.
+        covered += max(0.0, end - max(start, right))
+        right = max(right, end)
+        last_start = start
+    wanted = {"covered_seconds": covered, "uncovered_seconds": max(0.0, duration - covered)}
+    coverage = value.get("coverage")
+    if not isinstance(coverage, dict) or set(coverage) != set(wanted) or any(abs(number(coverage[k], k, 0, duration) - wanted[k]) > 1e-7 for k in wanted):
+        raise Failure("invalid_output", "Emotion coverage mismatch")
+    if status == "complete" and (warnings or wanted["uncovered_seconds"] > 1e-7):
+        raise Failure("invalid_output", "Incomplete emotion coverage marked complete")
+    if status == "complete":
+        expected_starts = [i * expected["hop_seconds"] for i in range(EMOTION_LIMIT)
+                           if duration - i * expected["hop_seconds"] >= expected["minimum_tail_seconds"] - 1e-8]
+        if len(rows) != len(expected_starts) or any(abs(row["start"] - start) > 1e-7 for row, start in zip(rows, expected_starts)):
+            raise Failure("invalid_output", "Missing emotion recipe windows marked complete")
+    if status in ("partial", "failed", "unavailable") and not warnings:
+        raise Failure("invalid_output", "Incomplete emotion requires an explicit warning")
+    return value
+
+
+def portable_provenance(provenance):
+    """Export only known provenance fields, rejecting absolute/path-like injected metadata."""
+    def token(value, pattern=r"[A-Za-z0-9_.+!:-]{1,128}"):
+        if not isinstance(value, str) or not re.fullmatch(pattern, value):
+            raise Failure("invalid_result", "Nonportable provenance string")
+        return value
+
+    def manifest(rows):
+        if not isinstance(rows, list) or len(rows) > 4096:
+            raise Failure("invalid_result", "Invalid portable manifest")
+        out = []
+        for row in rows:
+            name = row["file"]
+            if not isinstance(name, str) or len(name) > 1024 or name.startswith("/") or "\\" in name or ":" in name or any(part in ("", ".", "..") for part in name.split("/")):
+                raise Failure("invalid_result", "Manifest contains a nonportable path")
+            out.append({"file": name, "sha256": token(row["sha256"], r"[0-9a-f]{64}"), "bytes": integer(row["bytes"], "model bytes", 0, 16 * 1024**3)})
+        return out
+
+    settings = provenance["settings"]
+    if settings.get("language") not in LANGUAGES or settings.get("word_timestamps") is not True or settings.get("temperature") != 0.0:
+        raise Failure("invalid_result", "Unsupported portable ASR settings")
+    out = {"tool_version": token(provenance["tool_version"]), "engine": token(provenance["engine"]),
+           "engine_version": token(provenance["engine_version"]), "model_files": manifest(provenance["model_files"]),
+           "source_sha256": token(provenance["source_sha256"], r"[0-9a-f]{64}"),
+           "runner_sha256": token(provenance["runner_sha256"], r"[0-9a-f]{64}"),
+           "settings": {"language": settings["language"], "word_timestamps": True, "temperature": 0.0}}
+    emotion = provenance["emotion"]
+    mode = emotion["mode"]
+    if mode not in EMOTION_MODES:
+        raise Failure("invalid_result", "Invalid portable emotion mode")
+    size, hop, minimum = EMOTION_SETTINGS[mode]
+    expected = {"window_seconds": size, "hop_seconds": hop, "minimum_tail_seconds": minimum}
+    if emotion.get("settings") != expected:
+        raise Failure("invalid_result", "Invalid portable emotion settings")
+    out["emotion"] = {"mode": mode, "settings": expected}
+    if mode != "none":
+        out["emotion"]["worker_sha256"] = token(emotion["worker_sha256"], r"[0-9a-f]{64}")
+        out["emotion"]["availability"] = token(emotion["availability"])
+        if "reason" in emotion:
+            out["emotion"]["reason"] = token(emotion["reason"])
+        if "model_files" in emotion:
+            out["emotion"]["model_files"] = manifest(emotion["model_files"])
+        if "engine_versions" in emotion:
+            out["emotion"]["engine_versions"] = {token(k, r"[A-Za-z0-9_.-]{1,128}"): token(v) for k, v in emotion["engine_versions"].items()}
+    return out
 
 
 class Failure(Exception):
@@ -126,7 +256,7 @@ def normalize(raw, duration):
 
 
 class LocalLens:
-    def __init__(self, audio_root, result_root, model_dir, timeout=300):
+    def __init__(self, audio_root, result_root, model_dir, timeout=300, emotion_python=None, emotion_assets=None):
         self.audio_root = Path(audio_root).resolve(strict=True)
         self.model_dir = Path(model_dir).resolve(strict=True)
         self.result_root = Path(result_root).absolute()
@@ -135,6 +265,58 @@ class LocalLens:
         if not all(p.is_dir() for p in (self.audio_root, self.model_dir, self.result_root)):
             raise Failure("configuration", "Configured roots must be directories")
         self.timeout = number(timeout, "timeout", 1, 1800)
+        # Keep the venv spelling: resolving its Python symlink selects the base runtime.
+        self.emotion_python = Path(emotion_python).absolute() if emotion_python else None
+        self.emotion_assets = Path(emotion_assets).resolve(strict=True) if emotion_assets else None
+        if bool(self.emotion_python) != bool(self.emotion_assets) or (self.emotion_python and (not self.emotion_python.is_file() or not self.emotion_assets.is_dir())):
+            raise Failure("configuration", "Configure both emotion Python and asset directory")
+
+    def emotion_provenance(self, mode):
+        size, hop, minimum = EMOTION_SETTINGS[mode]
+        base = {"mode": mode, "settings": {"window_seconds": size, "hop_seconds": hop, "minimum_tail_seconds": minimum}}
+        if mode == "none":
+            return base
+        worker = Path(__file__).with_name("emotion_worker.py")
+        base["worker_sha256"] = digest(worker.read_bytes())
+        if not self.emotion_python:
+            return dict(base, availability="unavailable", reason="emotion_not_configured")
+        manifest = []
+        required = (("category", ("model.pt", "config.yaml", "tokens.txt", "configuration.json")),
+                    ("intensity", ("model.safetensors", "config.json", "preprocessor_config.json"))) if mode == "voice" else (
+                    ("music-model", ("msd-musicnn-1.pb", "deam-msd-musicnn-2.pb", "moods_mirex-msd-musicnn-1.pb")),)
+        for directory, filenames in required:
+            for name in filenames:
+                path = self.emotion_assets / directory / name
+                if path.is_symlink() or not path.is_file() or (self.emotion_assets / directory).is_symlink():
+                    return dict(base, availability="unavailable", reason="emotion_model_missing")
+                size_bytes = path.stat().st_size
+                if size_bytes > 4 * 1024**3:
+                    raise Failure("configuration", "Emotion model file exceeds size limit")
+                h = hashlib.sha256()
+                with path.open("rb") as f:
+                    for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                        h.update(chunk)
+                manifest.append({"file": directory + "/" + name, "sha256": h.hexdigest(), "bytes": size_bytes})
+        env = self.child_environment()
+        try:
+            probe = subprocess.run([str(self.emotion_python), "-I", str(worker), "--versions", mode], capture_output=True, timeout=30, env=env)
+        except (OSError, subprocess.TimeoutExpired):
+            return dict(base, availability="unavailable", reason="emotion_dependency_probe_failed", model_files=manifest)
+        if probe.returncode or len(probe.stdout) > 16384:
+            return dict(base, availability="unavailable", reason="emotion_dependency_probe_failed", model_files=manifest)
+        try:
+            versions = json.loads(probe.stdout)
+            if not isinstance(versions, dict) or any(not isinstance(k, str) or not isinstance(v, str) or len(v) > 128 for k, v in versions.items()):
+                raise ValueError()
+        except (ValueError, TypeError):
+            return dict(base, availability="unavailable", reason="emotion_dependency_probe_failed", model_files=manifest)
+        return dict(base, availability="ready", model_files=manifest, engine_versions=versions)
+
+    @staticmethod
+    def child_environment():
+        return dict(os.environ, HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", MODELSCOPE_OFFLINE="1",
+                    HF_HUB_DISABLE_TELEMETRY="1", DO_NOT_TRACK="1", OMP_NUM_THREADS="4",
+                    TF_NUM_INTRAOP_THREADS="4", TF_NUM_INTEROP_THREADS="1")
 
     def engine_version(self):
         try:
@@ -170,7 +352,8 @@ class LocalLens:
             version, error = None, {"code": e.code, "message": str(e)}
         return {"tool_version": VERSION, "engine": "mlx-whisper", "engine_version": version,
                 "dependency_error": error, "platform": sys.platform, "max_audio_seconds": 600,
-                "inference_timeout_seconds": self.timeout, "automatic_downloads": False}
+                "inference_timeout_seconds": self.timeout, "automatic_downloads": False,
+                "emotion_configured": bool(self.emotion_python), "emotion_modes": list(EMOTION_MODES)}
 
     def read_audio(self, audio_path):
         if not isinstance(audio_path, str) or not audio_path or len(audio_path) > 4096 or ".." in Path(audio_path).parts:
@@ -221,28 +404,55 @@ class LocalLens:
             raise Failure("invalid_result", "Stored result exceeds size limit")
         try:
             report = json.loads(data)
-            if report["schema_version"] != SCHEMA_VERSION or report["result_id"] != result_id or report["state"] not in ("complete", "partial") or digest(encoded(report["provenance"])) != result_id:
+            schema = report["schema_version"]
+            if schema not in ("music-lens-local/1", SCHEMA_VERSION) or report["result_id"] != result_id or report["state"] not in ("complete", "partial") or digest(encoded(report["provenance"])) != result_id:
                 raise ValueError()
             words = report["words"]
-            if not isinstance(words, list) or not words or len(words) > MAX_WORDS or report["word_count"] != len(words):
+            if not isinstance(words, list) or len(words) > MAX_WORDS or report["word_count"] != len(words) or (schema == "music-lens-local/1" and not words):
                 raise ValueError()
             duration = number(report["audio"]["duration_seconds"], "stored duration", 0, 600)
             native = [{**w, "word": w["text"]} for w in words]
-            checked, warnings, _, timing_notes = normalize({"segments": [{"words": native}]}, duration)
-            if warnings or checked != words or report["timing_notes"] != timing_notes:
+            if words:
+                checked, warnings, _, timing_notes = normalize({"segments": [{"words": native}]}, duration)
+                if warnings or checked != words or report["timing_notes"] != timing_notes:
+                    raise ValueError()
+            elif report["timing_notes"]:
                 raise ValueError()
+            if schema == SCHEMA_VERSION:
+                emotion = checked_emotion(report["emotion"], duration)
+                asr = report["asr_status"]
+                if asr not in ("complete", "partial", "failed") or (asr == "failed") != (not words):
+                    raise ValueError()
+                if report["provenance"]["emotion"]["mode"] != emotion["mode"]:
+                    raise ValueError()
+                if asr == "failed" and emotion["status"] not in ("complete", "partial"):
+                    raise ValueError()
+                complete = asr == "complete" and emotion["status"] in ("complete", "not_requested")
+                if (report["state"] == "complete") != complete:
+                    raise ValueError()
+                if not isinstance(report["warnings"], list) or any(not isinstance(w, str) or len(w) > 1000 for w in report["warnings"]):
+                    raise ValueError()
+                if complete and report["warnings"]:
+                    raise ValueError()
         except (ValueError, KeyError, TypeError, Failure) as e:
             raise Failure("invalid_result", "Invalid stored result") from e
         return report
 
     @staticmethod
     def summary(report):
-        return {k: v for k, v in report.items() if k != "words"}
+        value = {k: v for k, v in report.items() if k not in ("words", "emotion")}
+        if "emotion" in report:
+            emotion = report["emotion"]
+            value["emotion"] = {k: v for k, v in emotion.items() if k != "windows"}
+            rows = emotion["windows"]
+            value["emotion"]["window_count"] = len(rows)
+            value["emotion"]["highest_observed_arousal"] = max(rows, key=lambda x: x["arousal"]) if rows else None
+        return value
 
     def report(self, result_id):
         return self.summary(self.load(result_id))
 
-    def timeline(self, result_id, start=0, end=600, cursor=0, limit=100):
+    def timeline(self, result_id, start=0, end=600, cursor=0, limit=100, layer="words"):
         number(start, "start")
         number(end, "end")
         if end < start:
@@ -250,7 +460,10 @@ class LocalLens:
         integer(cursor, "cursor", 0, MAX_WORDS)
         integer(limit, "limit", 1, 200)
         report = self.load(result_id)
-        selected = [w for w in report["words"] if w["end"] >= start and w["start"] <= end]
+        if layer not in ("words", "emotion"):
+            raise Failure("invalid_argument", "layer must be words or emotion")
+        rows = report["words"] if layer == "words" else report.get("emotion", {}).get("windows", [])
+        selected = [w for w in rows if w["end"] >= start and w["start"] <= end]
         if cursor > len(selected):
             raise Failure("invalid_argument", "cursor exceeds matching word count")
         page = []
@@ -260,20 +473,54 @@ class LocalLens:
             page.append(word)
         next_cursor = cursor + len(page)
         return {"result_id": result_id, "clock": "seconds_from_audio_start", "range": {"start": start, "end": end},
-                "cursor": cursor, "total": len(selected), "words": page,
+                "cursor": cursor, "total": len(selected), "layer": layer, "words" if layer == "words" else "windows": page,
                 "truncated": next_cursor < len(selected), "continuation": next_cursor if next_cursor < len(selected) else None}
+
+    def export(self, result_id, title):
+        if not isinstance(title, str) or not title.strip() or len(title) > 300 or any(ord(c) < 32 for c in title):
+            raise Failure("invalid_argument", "title must be 1..300 printable characters")
+        report = self.load(result_id)
+        if report["schema_version"] != SCHEMA_VERSION:
+            raise Failure("invalid_result", "Portable export requires a v2 analysis")
+        # Do not export unrecognized stored fields or local/host metadata.
+        portable = {k: report[k] for k in ("schema_version", "result_id", "state", "audio", "clock", "detected_language", "word_count",
+                    "warnings", "timing_notes", "probability_semantics", "created_unix", "words", "asr_status", "emotion")}
+        portable["provenance"] = portable_provenance(report["provenance"])
+        portable["audio"] = {k: report["audio"][k] for k in ("duration_seconds", "sample_rate_hz", "channels", "sample_format", "frames", "sha256")}
+        if portable["provenance"] != report["provenance"]:
+            # The immutable content ID is tied to its full provenance; never silently rewrite it.
+            raise Failure("invalid_result", "Report provenance has fields outside the portable whitelist")
+        envelope = {"schema": "music-lens/1", "id": str(uuid.uuid5(uuid.NAMESPACE_URL, "music-lens-local:" + result_id)),
+                    "createdAt": datetime.fromtimestamp(report["created_unix"], timezone.utc).isoformat(),
+                    "source": {"kind": "file", "title": title, "sha256": report["audio"]["sha256"], "duration": report["audio"]["duration_seconds"]},
+                    "signal": None, "interpretation": None,
+                    "provenance": {"mode": "imported", "inputStatus": "local model estimates; not independently validated", "accuracy": "unvalidated"},
+                    "localAnalysis": portable}
+        if len(encoded(envelope)) > PORTABLE_CAP:
+            raise Failure("output_limit", "Portable report exceeds 1900000 UTF-8 bytes; nothing truncated")
+        return envelope
 
     def infer(self, audio_file, output_file, cancel):
         """Only this fixed child can import MLX. No caller-controlled executable."""
         request = encoded({"audio": str(audio_file), "output": str(output_file), "model": str(self.model_dir)})
-        env = dict(os.environ, HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", HF_HUB_DISABLE_TELEMETRY="1")
+        self.run_child([sys.executable, "-I", str(Path(__file__).resolve()), "_infer"], request, cancel)
+
+    def infer_emotion(self, audio_file, output_file, cancel, mode):
+        request = encoded({"audio": str(audio_file), "output": str(output_file), "assets": str(self.emotion_assets), "mode": mode})
+        self.run_child([str(self.emotion_python), "-I", str(Path(__file__).with_name("emotion_worker.py"))], request, cancel)
+
+    def run_child(self, command, request, cancel):
+        if cancel.is_set():
+            raise Failure("cancelled", "Analysis cancelled before child start")
+        deadline = getattr(self, "_deadline", time.monotonic() + self.timeout)
+        if hasattr(self, "_deadline") and time.monotonic() >= deadline:
+            raise Failure("timeout", "Analysis exceeded configured timeout")
         with tempfile.TemporaryFile() as log:
-            process = subprocess.Popen([sys.executable, "-I", str(Path(__file__).resolve()), "_infer"], stdin=subprocess.PIPE,
-                                       stdout=log, stderr=log, env=env, start_new_session=True)
+            process = subprocess.Popen(command, stdin=subprocess.PIPE,
+                                       stdout=log, stderr=log, env=self.child_environment(), start_new_session=True)
             try:
                 process.stdin.write(request)
                 process.stdin.close()
-                deadline = time.monotonic() + self.timeout
                 while process.poll() is None:
                     if cancel.wait(0.05):
                         raise Failure("cancelled", "Inference cancelled")
@@ -294,17 +541,23 @@ class LocalLens:
                         pass  # The child may exit between poll and kill.
                 process.wait()
 
-    def analyze(self, audio_path, language, cancel=None):
+    def analyze(self, audio_path, language, cancel=None, emotion_mode="none"):
         if language not in LANGUAGES:
             raise Failure("invalid_argument", "language must be explicit: auto, en, ko or ja")
+        if emotion_mode not in EMOTION_MODES:
+            raise Failure("invalid_argument", "emotion_mode must be none, voice or music")
         cancel = cancel or threading.Event()
         if cancel.is_set():
             raise Failure("cancelled", "Analysis cancelled")
         data, audio = self.read_audio(audio_path)
-        provenance = {"tool_version": VERSION, "engine": "mlx-whisper", "engine_version": self.engine_version(),
+        try:
+            asr_version = self.engine_version()
+        except Failure:
+            asr_version = "unavailable"
+        provenance = {"tool_version": VERSION, "engine": "mlx-whisper", "engine_version": asr_version,
                       "model_files": self.model_manifest(), "source_sha256": audio["sha256"],
                       "settings": {"language": language, "word_timestamps": True, "temperature": 0.0},
-                      "runner_sha256": digest(Path(__file__).read_bytes())}
+                      "runner_sha256": digest(Path(__file__).read_bytes()), "emotion": self.emotion_provenance(emotion_mode)}
         result_id = digest(encoded(provenance))
         path = self.result_path(result_id)
         if path.exists():
@@ -327,24 +580,58 @@ class LocalLens:
                 (work / "settings.json").write_bytes(encoded(provenance["settings"]))
                 if cancel.is_set():
                     raise Failure("cancelled", "Analysis cancelled before inference")
-                self.infer(audio_file, output_file, cancel)
+                self._deadline = time.monotonic() + self.timeout
+                words, warnings, detected, timing_notes = [], [], None, []
+                asr_status = "failed"
+                try:
+                    if asr_version == "unavailable":
+                        raise Failure("dependency_missing", "ASR dependency unavailable")
+                    self.infer(audio_file, output_file, cancel)
+                    raw = self.read_child_output(output_file)
+                    words, warnings, detected, timing_notes = normalize(raw, audio["duration_seconds"])
+                    asr_status = "partial" if warnings else "complete"
+                except (Failure, OSError, ValueError, TypeError) as e:
+                    if isinstance(e, Failure) and e.code in ("cancelled", "timeout"):
+                        raise
+                    warnings.append("ASR failed (" + getattr(e, "code", "invalid_output") + ")")
+                if cancel.is_set():
+                    raise Failure("cancelled", "Analysis cancelled between stages")
+                if time.monotonic() >= self._deadline:
+                    raise Failure("timeout", "Analysis exceeded configured timeout")
+                emotion = emotion_shell(emotion_mode, audio["duration_seconds"])
+                if emotion_mode != "none":
+                    if provenance["emotion"].get("availability") != "ready":
+                        emotion = emotion_shell(emotion_mode, audio["duration_seconds"], "unavailable", [provenance["emotion"].get("reason", "emotion_unavailable")])
+                    else:
+                        try:
+                            emotion_output = work / "emotion.json"
+                            self.infer_emotion(audio_file, emotion_output, cancel, emotion_mode)
+                            emotion = checked_emotion(self.read_child_output(emotion_output), audio["duration_seconds"])
+                        except (Failure, OSError, ValueError, TypeError) as e:
+                            if isinstance(e, Failure) and e.code in ("cancelled", "timeout"):
+                                raise
+                            emotion = emotion_shell(emotion_mode, audio["duration_seconds"], "failed", ["Emotion failed (" + getattr(e, "code", "invalid_output") + ")"])
+                    if emotion["status"] != "complete":
+                        warnings.extend(emotion["warnings"])
                 if cancel.is_set():
                     raise Failure("cancelled", "Inference cancelled before publication")
+                if time.monotonic() >= self._deadline:
+                    raise Failure("timeout", "Analysis exceeded configured timeout")
                 if self.model_manifest() != provenance["model_files"]:
                     raise Failure("model_changed", "Model assets changed during inference")
-                with output_file.open("rb") as f:
-                    payload = f.read(MAX_REPORT + 1)
-                if len(payload) > MAX_REPORT:
-                    raise Failure("invalid_output", "Engine result exceeds 4 MiB")
-                try:
-                    raw = json.loads(payload)
-                except ValueError as e:
-                    raise Failure("invalid_output", "Engine returned invalid JSON") from e
-                words, warnings, detected, timing_notes = normalize(raw, audio["duration_seconds"])
-                report = {"schema_version": SCHEMA_VERSION, "result_id": result_id, "state": "partial" if warnings else "complete", "audio": audio,
+                if self.emotion_provenance(emotion_mode) != provenance["emotion"]:
+                    raise Failure("model_changed", "Emotion assets/runtime changed during inference")
+                if cancel.is_set():
+                    raise Failure("cancelled", "Analysis cancelled before publication")
+                if time.monotonic() >= self._deadline:
+                    raise Failure("timeout", "Analysis exceeded configured timeout")
+                if not words and emotion["status"] not in ("complete", "partial"):
+                    raise Failure("empty_output", "No requested analysis layer succeeded; no result published")
+                complete = asr_status == "complete" and emotion["status"] in ("complete", "not_requested")
+                report = {"schema_version": SCHEMA_VERSION, "result_id": result_id, "state": "complete" if complete else "partial", "audio": audio,
                           "clock": "seconds_from_audio_start", "provenance": provenance, "detected_language": detected,
                           "word_count": len(words), "warnings": warnings, "timing_notes": timing_notes, "probability_semantics": "native_uncalibrated",
-                          "created_unix": time.time(), "words": words}
+                          "created_unix": time.time(), "words": words, "asr_status": asr_status, "emotion": emotion}
                 payload = encoded(report)
                 if len(payload) > MAX_REPORT:
                     raise Failure("invalid_output", "Final report exceeds 4 MiB")
@@ -358,6 +645,17 @@ class LocalLens:
             return dict(self.summary(report), cache_hit=False)
         finally:
             lock_path.unlink()
+
+    @staticmethod
+    def read_child_output(path):
+        with path.open("rb") as f:
+            payload = f.read(MAX_REPORT + 1)
+        if len(payload) > MAX_REPORT:
+            raise Failure("invalid_output", "Engine result exceeds 4 MiB")
+        try:
+            return json.loads(payload)
+        except ValueError as e:
+            raise Failure("invalid_output", "Engine returned invalid JSON") from e
 
 
 def child_infer():
@@ -382,12 +680,12 @@ def child_infer():
 
 TOOLS = [
     {"name": "status", "description": "Local dependency/status summary; never loads MLX.", "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
-    {"name": "analyze", "description": "Transcribe a confined mono16k signed16 PCM WAV; explicit language required. Heavy child exits after inference.",
-     "inputSchema": {"type": "object", "properties": {"audio_path": {"type": "string", "maxLength": 4096}, "language": {"type": "string", "enum": list(LANGUAGES)}}, "required": ["audio_path", "language"], "additionalProperties": False}},
+    {"name": "analyze", "description": "Analyze a confined mono16k signed16 WAV. Optional explicit voice emotion or music mood; native scores, not verified emotion. Children exit per job. Inspect per-layer state.",
+     "inputSchema": {"type": "object", "properties": {"audio_path": {"type": "string", "maxLength": 4096}, "language": {"type": "string", "enum": list(LANGUAGES)}, "emotion_mode": {"type": "string", "enum": list(EMOTION_MODES)}}, "required": ["audio_path", "language"], "additionalProperties": False}},
     {"name": "report", "description": "Read provenance and summary by result ID; excludes transcript. Full report remains local.",
      "inputSchema": {"type": "object", "properties": {"result_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}, "required": ["result_id"], "additionalProperties": False}},
-    {"name": "timeline", "description": "Read native words overlapping an inclusive time range. Continue with the same range and returned cursor.",
-     "inputSchema": {"type": "object", "properties": {"result_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "start": {"type": "number", "minimum": 0, "maximum": 600}, "end": {"type": "number", "minimum": 0, "maximum": 600}, "cursor": {"type": "integer", "minimum": 0, "maximum": MAX_WORDS}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}}, "required": ["result_id"], "additionalProperties": False}}
+    {"name": "timeline", "description": "Read words or emotion windows on the audio clock. Continue with the same range/layer and returned cursor. Scores and peak windows are unvalidated estimates.",
+     "inputSchema": {"type": "object", "properties": {"result_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "start": {"type": "number", "minimum": 0, "maximum": 600}, "end": {"type": "number", "minimum": 0, "maximum": 600}, "cursor": {"type": "integer", "minimum": 0, "maximum": MAX_WORDS}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}, "layer": {"type": "string", "enum": ["words", "emotion"]}}, "required": ["result_id"], "additionalProperties": False}}
 ]
 
 
@@ -507,11 +805,14 @@ def main():
     parser.add_argument("--result-root", required=True)
     parser.add_argument("--model-dir", required=True)
     parser.add_argument("--timeout", type=float, default=300)
+    parser.add_argument("--emotion-python")
+    parser.add_argument("--emotion-assets")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("status")
     analyze = commands.add_parser("analyze")
     analyze.add_argument("audio_path")
     analyze.add_argument("--language", choices=LANGUAGES, required=True)
+    analyze.add_argument("--emotion-mode", choices=EMOTION_MODES, default="none")
     report = commands.add_parser("report")
     report.add_argument("result_id")
     timeline = commands.add_parser("timeline")
@@ -520,17 +821,22 @@ def main():
     timeline.add_argument("--end", type=float, default=600)
     timeline.add_argument("--cursor", type=int, default=0)
     timeline.add_argument("--limit", type=int, default=100)
+    timeline.add_argument("--layer", choices=("words", "emotion"), default="words")
+    export = commands.add_parser("export")
+    export.add_argument("result_id")
+    export.add_argument("--title", required=True)
     commands.add_parser("serve")
     args = vars(parser.parse_args())
     command = args.pop("command")
     try:
-        lens = LocalLens(*(args.pop(k) for k in ("audio_root", "result_root", "model_dir")), timeout=args.pop("timeout"))
+        lens = LocalLens(*(args.pop(k) for k in ("audio_root", "result_root", "model_dir")), timeout=args.pop("timeout"),
+                         emotion_python=args.pop("emotion_python"), emotion_assets=args.pop("emotion_assets"))
         if command == "serve":
             serve(lens)
         else:
             value = getattr(lens, command)(**args)
             payload = encoded(value)
-            if len(payload) > MAX_WIRE:
+            if len(payload) > (PORTABLE_CAP if command == "export" else MAX_WIRE):
                 raise Failure("output_limit", "Response exceeds wire cap; full report remains local")
             sys.stdout.buffer.write(payload + b"\n")
         return 0

@@ -1,111 +1,125 @@
-# Local Music Lens (macOS MLX)
+# Local Music Lens (macOS)
 
-Task MUSIC-LENS-LOCAL-001 r2, tool 0.1.1: one-shot local ASR with retained native word timings.
-Scope: this directory; no Sites integration, automatic downloads or singing-quality claim.
-
-Implementation checklist (T2 CLI/API; path/process negatives required):
-- [complete] Implement confined inputs, reproducible cache and bounded result reads.
-- [complete] Implement fixed child inference lifecycle and stdio MCP entrypoint.
-- [complete] Verify fake orchestration, rejection/publication/paging and actual wire entrypoint.
-- [waiting] Root/Claude real inference and independent review (outside worker acceptance).
-
-Tests use isolated fake inference only. They do not establish MLX compatibility or ASR quality.
+Version 0.2.0 combines native Whisper word times and optional voice emotion or
+music-mood windows in one analysis. It runs per job; no daemon, automatic download,
+upload, installation or global client configuration is added. Voice models are
+unvalidated for singing; music-mood accuracy is unmeasured. Scores are model
+estimates, not proven emotions, precise boundaries or highlight quality.
+This module does not run in a Sites Worker. Its portable JSON supports a separately
+implemented Sites import path; export alone does not deploy that path.
 
 ## Run
 
-Use an isolated Python 3.12 environment with `mlx-whisper` and its dependencies
-installed by the operator from the binary/hash-locked `requirements-macos.lock`
-supplied by root integration. This worker does not create that lock. Dependency
-and model installation remain operator-controlled; this runner does not install
-packages or download models. Supply a
-predownloaded MLX Whisper directory with `config.json` and `.npz` or `.safetensors`
-weights. Materialize Hugging Face snapshot symlinks first: model symlinks are rejected.
-Model files are hashed before cache lookup and again after inference; this adds disk
-I/O but does not load MLX or model tensors into the parent.
-
-From this directory (replace the three absolute example paths):
+Use the existing isolated Python3.12 MLX environment and materialized Whisper
+model. requirements-macos.lock records that environment. Emotion inference uses
+a separate existing Python environment with Torch/FunASR/Transformers and/or
+Essentia, recorded byte-for-byte in requirements-emotion-macos.lock from the
+existing pilot environment. Preserve the venv Python path instead of resolving
+its interpreter symlink. The runner never installs dependencies or downloads models.
+All startup flags precede the command:
 
 ```sh
-python3 music_lens_local.py --audio-root /absolute/audio --result-root /absolute/results --model-dir /absolute/model status
-python3 music_lens_local.py --audio-root /absolute/audio --result-root /absolute/results --model-dir /absolute/model --timeout 300 analyze fixture.wav --language en
-python3 music_lens_local.py --audio-root /absolute/audio --result-root /absolute/results --model-dir /absolute/model report RESULT_ID
-python3 music_lens_local.py --audio-root /absolute/audio --result-root /absolute/results --model-dir /absolute/model timeline RESULT_ID --start 0 --end 30 --limit 100 --cursor 0
-python3 music_lens_local.py --audio-root /absolute/audio --result-root /absolute/results --model-dir /absolute/model serve
+python3 -I music_lens_local.py --audio-root /absolute/audio --result-root /absolute/results --model-dir /absolute/whisper-model status
+python3 -I music_lens_local.py --audio-root /absolute/audio --result-root /absolute/results --model-dir /absolute/whisper-model --emotion-python /absolute/emotion-runtime/bin/python --emotion-assets /absolute/emotion-assets --timeout 600 analyze fixture.wav --language en --emotion-mode voice
+python3 -I music_lens_local.py --audio-root /absolute/audio --result-root /absolute/results --model-dir /absolute/whisper-model report RESULT_ID
+python3 -I music_lens_local.py --audio-root /absolute/audio --result-root /absolute/results --model-dir /absolute/whisper-model timeline RESULT_ID --layer emotion --start 0 --end 30 --limit 100 --cursor 0
+python3 -I music_lens_local.py --audio-root /absolute/audio --result-root /absolute/results --model-dir /absolute/whisper-model export RESULT_ID --title "Local analysis"
 ```
 
-All startup flags precede the subcommand. `analyze` requires `en`, `ko`, `ja` or
-`auto`; `auto` allows Whisper language detection. Inputs must already be mono
-16000 Hz signed16 PCM WAV, nonempty, at most 600 seconds and 64 MiB. There is no
-transcoding or arbitrary shell invocation. Relative paths resolve inside the audio
-root; absolute paths must also stay inside that root. Traversal and escaping
-symlinks are rejected. Use private roots writable only by the intended local user;
-this process is not a multi-user security sandbox.
+`--emotion-mode none` is the default for old callers. `voice` runs emotion2vec+
+base plus audEERING arousal/dominance/valence; `music` runs MSD-MusiCNN DEAM/MIREX
+music mood. Choose explicitly: music mood is not the singer's emotion.
+Voice windows are4s/hop2s/minimum tail1s; music windows5s/hop2.5s/minimum tail3s.
+Unsupported tails remain uncovered. No VAD, vocal separation or language-quality
+claim is implied.
 
-Each success returns a 64-character lowercase hex `result_id`. The immutable full
-local report is `RESULT_ROOT/RESULT_ID.json`; `report` and `analyze` return only its
-summary/provenance, excluding all words. `timeline` returns words overlapping the
-inclusive `[start,end]` range, native unrounded seconds, and native uncalibrated
-probability when present. Use its `continuation` as the next `cursor` with the same
-range. `total` counts all matching words; `truncated` means more remain. Limits are
-1–200 words/page with an additional byte cap; JSON wire output is capped at 128 KiB.
+Expected assets below --emotion-assets:
+- category/{model.pt,config.yaml,tokens.txt,configuration.json}: emotion2vec/
+  emotion2vec_plus_base revision b318240bfe67db81a8c572ecb37ce9c3759b81c9.
+- intensity/{model.safetensors,config.json,preprocessor_config.json}:
+  audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim revision
+  6eba34a2485ea31cb03600241787c3a5edab8626.
+- music-model/{msd-musicnn-1.pb,deam-msd-musicnn-2.pb,moods_mirex-msd-musicnn-1.pb}:
+  official versioned Essentia models; preserve source/license records. Pilot local
+  hashes are provenance, not independently published upstream hashes.
 
-The native local report format is explicitly `schema_version: music-lens-local/1`;
-missing/unknown schema versions are rejected on load without modifying the file.
-Native zero-length DTW words are retained. Native end times up to 0.05 seconds
-beyond audio duration are retained unchanged and counted in the separate top-level
-`timing_notes` list, including maximum overshoot. These small native overshoots
-alone do not make a report partial. Ends beyond this tolerance are omitted.
-Report loading revalidates the same timing bounds and notes; no timestamp is clamped.
+Preserve license notices and existing personal/noncommercial usage restrictions.
+Model/config hashes, engine versions and worker source are part of cache identity.
+Category loading checks audited FunASR source hashes and only permits the exact ten
+unused training-decoder omissions; missing inference state fails. Weights-only
+loading and dimensional safetensors with strict loading checks are mandatory.
 
-Invalid intervals/text/probabilities are omitted with explicit warnings and
-`state: partial`. No valid words is an error, including silence/unrecognized audio;
-the runner does not invent a transcript. CLI analysis exits 0 for both complete
-and partial reports; MCP returns `isError: false` for both. Consumers must inspect
-`state` and `warnings` before treating a result as complete, and may also inspect
-`timing_notes`. This applies to cached results too. Cache identity includes source WAV digest,
-model file names/hashes, installed engine version, requested language/settings,
-runner digest and tool version. Failed/cancelled/timed-out inference does not
-publish a success. Publication uses an atomic no-overwrite hard link in the same
-result filesystem. The named per-result `.lock` yields `busy` under contention.
-An abnormal parent termination may leave a lock. Stale-lock or corrupt-result
-recovery requires operator inspection and authorization before moving/removing
-anything: inspect the lock PID/owner or affected report and preserve needed evidence.
-The tool never deletes reports or stale locks automatically.
+## Input, result and partial states
 
-Only the fixed `sys.executable -I SCRIPT _infer` child imports NumPy/MLX; isolated
-Python mode ignores Python environment/path injection. It receives a validated WAV
-snapshot in a private temporary directory and offline Hugging Face environment
-flags. The child exits after each job; timeout/cancellation kills its process group
-and reaps it. Read/status/cache paths never import MLX. Do not expose the private
-`_infer` entrypoint as an agent tool. Model/hash reads occur before the child and
-are not governed by its inference timeout. The parent may persist for stdio MCP.
+Input is nonempty mono16000Hz signed16 PCM WAV, at most600s/64MiB. Language is
+explicit en/ko/ja/auto. No transcoding or shell execution. Paths must stay inside
+the audio root; descriptor-relative O_NOFOLLOW opens reject escaping swaps and
+symlinks. Use private roots; this is not a multi-user security sandbox.
 
-## MCP
+Full immutable reports: RESULT_ROOT/RESULT_ID.json. New schema is
+music-lens-local/2; v1 reports remain explicitly read-only loadable without
+migration. Unknown schemas and invalid stored values fail.
 
-`serve` uses one JSON-RPC message per line on stdin/stdout. It supports initialize,
-ping, tools/list, tools/call, notifications/initialized and
-notifications/cancelled. Exposed tools are `status`, `analyze`, `report`, `timeline`;
-schemas are returned by tools/list. Only one tool call runs at a time; ping and
-cancel notifications remain readable during inference. Cancellation identifies
-the active JSON-RPC request ID. EOF cancels active inference and waits for the
-worker. Notifications produce no reply. Logs/errors use stderr; stdout contains
-only JSON-RPC. No network listener, shell, install, upload or delete tool exists.
-No global client configuration is changed by these files.
+V2 retains words, native uncalibrated probability, provenance, warnings, timing
+notes and audio clock. Added: asr_status, and emotion mode/status/warnings,
+recipe, coverage and windows. Complete requires all requested layers. Ordinary
+stage failure retains successful independent layers as partial; empty ASR never
+invents words or discards valid emotion. No successful requested layer means
+error and no publication. Cancellation/timeout aborts without publishing.
+CLI exit0 and MCP isError:false can include partial results: inspect state,
+asr_status, emotion.status and warnings. Failed emotion is not neutral; missing
+is not silence. Voice dimensions use native approximate0–1 scale; music uses
+native approximate1–9. Never clamp or mix them. Highest observed arousal is a
+window candidate, not an exact instant or validated clip recommendation.
 
-## Verification and remaining limits
+Zero-length Whisper words remain. Native ends up to50ms beyond duration remain
+unchanged with timing_notes; larger invalid intervals are omitted with warnings.
+No timestamp is silently clamped.
+
+report/analyze omit all words/full emotion windows, retaining counts and highest
+observed arousal window. timeline --layer words|emotion pages one layer overlapping
+inclusive [start,end]. Reuse same range/layer with continuation cursor. Limits:
+1–200 rows and byte cap,128KiB ordinary CLI/MCP output.
+
+export emits music-lens/1 with validated v2 localAnalysis, stable UUID, title,
+source digest/duration and explicit unvalidated provenance. Only known relative
+model/config/hash/version/settings metadata is portable; no absolute execution
+paths or host identifiers. Complete UTF-8 JSON cap1,900,000 bytes; excess fails,
+never truncates/uploads. CLI-only; importing/sending is a separate operation.
+
+## Process, cache and recovery
+
+ASR uses fixed sys.executable -I SCRIPT _infer. Emotion uses adjacent fixed
+emotion_worker.py and startup-configured Python, never an MCP caller-selected
+executable. Stages are serial/offline; the voice worker releases the category
+predictor before loading dimensions. A shared inference deadline covers stages;
+timeout/cancellation kills the current process group and reaps it. Status,
+report and cache paths do not load models. Metadata probes and hash IO have
+separate costs.
+
+Cache identity: source bytes, active model/config files, versions, runner/worker
+source, mode/language and window recipe. Active assets are rehashed before
+publication. Atomic no-overwrite hard links and per-result owner locks protect
+results. Force-killed parents may leave a lock/temp directory; corrupt cache
+fails closed. Recovery remains operator-controlled: inspect PID/owner and preserve
+evidence before authorized cleanup. No automatic report/stale-lock deletion.
+
+## MCP and verification
+
+serve exposes status/analyze/report/timeline as newline JSON-RPC on stdin/stdout.
+Same startup flags. One active tool; ping/cancel remain readable. EOF cancels active
+work and waits. Notifications get no reply; diagnostics use stderr. No network
+listener or settings writes.
 
 ```sh
 python3 -m unittest -v test_music_lens_local.py
 ```
 
-Seven checks cover input/result confinement, configuration-sensitive immutable
-cache reuse and schema rejection, failed/empty/malformed output and lock publication,
-invalid native timings plus zero-length/end-tolerance retention and reload,
-bounded paging, isolated-child timeout/reaping using fake Popen, and a real CLI `serve`
-process handling MCP initialize/list/status/ping/notifications. The fake timeout
-check proves orchestration calls; real MLX subprocess lifecycle, quality, memory,
-runtime dependency compatibility and independent client use remain untested here.
-Tests contain no inference or network requests. No mutation tool was installed.
-The stdlib suite passed after implementation; root/Claude own real fixture evidence
-and independent path/process review. Windows and singing accuracy are unsupported
-claims in this slice. No Sites import/schema compatibility is claimed.
+Eleven focused stdlib checks retain seven previous regressions and add layer
+failure retention, emotion validation/export/paging, mode/model/worker cache
+identity and second-stage cancellation. Fake inference is orchestration evidence;
+only stdio negotiation/status uses a real CLI child. The schema assertion changes
+because this change explicitly versions reports; no quality threshold or old
+failed result is changed. Root owns actual inference, independent client checks
+and Sites integration/deployment evidence. Windows, sung timing/emotion quality
+and real GPU cancellation remain unverified by these tests.
