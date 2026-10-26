@@ -33,7 +33,7 @@ $c = 'E:\tools\music-lens-client\music-lens-client.mjs'
 - One heavy analyze at a time across the whole team (Mac AIs included). Read commands need no lock.
 
 ## Output and exit codes
-stdout is one JSON line: success `{http_status, request_id, response}`; error `{error:{code,message}, request_id, next?}`.
+stdout is one JSON line: any HTTP response `{http_status, request_id, response}` (an error body sits in `response.error`); usage/config error `{error:{code,message}, usage?}` (no request_id); transport/runtime error `{error:{code,message}, request_id, resolve_error?, next?}`.
 | Exit | Meaning | Do |
 |---|---|---|
 | 0 | 2xx, including state partial | read the result (below) |
