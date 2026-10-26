@@ -39,6 +39,13 @@ The canonical string is the UTF-8 bytes of 8 fields joined by LF, with no traili
 **32 raw bytes** decoded from the 64-hex key file. Percent-encode labels as `encodeURIComponent` does (a space becomes
 `%20`, and `+` is a literal plus sign).
 
+## Windows client note (name resolution)
+
+On Windows, Node 22 `getaddrinfo` may return `ENOTFOUND` for `songseunghun-ui-MacStudio.local`. The client may then
+resolve the name through the Windows DnsClient (`Resolve-DnsName -Type A`) or an optional configured address list.
+It keeps only A records inside the `allow` /24, connects by IP with TLS `servername` set to the `.local` name, and
+keeps the CA, the hostname check and the certificate pin unchanged.
+
 ## User-only install steps (not done; commands written, never run)
 
 Do these only after approving an always-on listener (RunAtLoad + KeepAlive, en0/en1, port 8765, 172.30.1.0/24).
@@ -140,3 +147,9 @@ are logged (`receipt_unknown`, `reason: stop`) and kept, as after a crash. The L
    `request_id` ("may have run ... do not retry"), and the receipt reads `unknown` (`error_code`
    `outcome_unknown`). The client treats it like a lost response: exit 4, poll `/receipt` later, never retry the
    POST. `storage_error` ("nothing launched") is used only when nothing was launched.
+11. A RIFF/WAVE upload that fails the strict check (for example 22.05 or 44.1 kHz, stereo, 24-bit, float, an 18-byte
+   `fmt ` chunk with `cbSize`, or extra chunks) is converted like MP3/M4A: `limit_exec.py` + `afconvert -f WAVE -d
+   LEI16@16000 -c 1` (same rlimits, 120 s wall timeout) into `uploads/<op>/converted.wav`, then the same strict
+   check (including 0 < duration <= 600 s) and no-overwrite hard link. A canonical WAV (PCM mono 16 kHz s16) skips
+   afconvert. A conversion failure gives 400 `invalid_audio`; size limits, magic-byte detection and framing are
+   unchanged.

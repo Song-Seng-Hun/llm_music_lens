@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import resource
 import signal
@@ -184,7 +185,7 @@ class AnalyzeTest(Base):
         self.assertEqual(b["name"], "$(touch pwned); `id` | x")
 
     def test_invalid_audio_never_reaches_ml(self):
-        for body in (b"\x00" * 100, wav_with(fmt=(1, 2, 16000, 64000, 4, 16)), b"OggS" + b"\x00" * 100):
+        for body in (b"\x00" * 100, b"OggS" + b"\x00" * 100):
             h = self.c.signed("POST", A, body)
             st, b = self.c.json("POST", A, body, headers=h)
             self.assertEqual((st, b["error"]["code"]), (400, "invalid_audio"))
@@ -288,6 +289,87 @@ class AnalyzeTest(Base):
         self.assertEqual(ev[-1]["rc"], 0)
         self.assertEqual(self.env.uploads_entries(), [])
         self.assertEqual(os.listdir(self.env.inbox), [])
+
+
+def wav18(rate, channels, bits, seconds, extra=b""):
+    """PCM WAV with an 18-byte fmt chunk (WAVEFORMATEX, cbSize 0), as SAPI TTS writes it."""
+    width = bits // 8
+    n = int(seconds * rate)
+    frames = bytearray()
+    for i in range(n):
+        v = int(8000 * math.sin(2 * math.pi * 440.0 * i / rate))
+        frames += (struct.pack("<h", v) if width == 2 else struct.pack("<i", v << 8)[:3]) * channels
+    fb = struct.pack("<HHIIHHH", 1, channels, rate, rate * channels * width, channels * width, bits, 0)
+    body = (b"WAVE" + b"fmt " + struct.pack("<I", len(fb)) + fb + extra + b"data" + struct.pack("<I", len(frames))
+            + bytes(frames))
+    return b"RIFF" + struct.pack("<I", len(body)) + body
+
+
+class WavConvertTest(Base):
+    def convert_events(self):
+        return [e for e in self.env.log_events() if e.get("event") == "convert_exit"]
+
+    def post(self, body):
+        h = self.c.signed("POST", A, body)
+        st, b = self.c.json("POST", A, body, headers=h)
+        return st, b, h["X-ML-Nonce"]
+
+    def assert_clean(self):
+        self.assertEqual(self.env.uploads_entries(), [])
+        self.assertEqual(os.listdir(self.env.inbox), [])
+
+    @unittest.skipUnless(os.path.exists(AFCONVERT), "afconvert missing")
+    def test_sapi_22050_mono_fmt18_converts(self):
+        body = wav18(22050, 1, 16, 1.0)
+        self.assertFalse(StrictWavTest().check(body))
+        st, b, rid = self.post(body)
+        self.assertEqual(st, 200, b)
+        self.assertEqual(b["upload_sha256"], sha(body))
+        self.assertEqual(self.convert_events()[-1]["rc"], 0)
+        seen = self.env.seen_log()[-1]
+        self.assertEqual(seen["head"], "RIFF")
+        self.assertNotEqual(seen["size"], len(body))  # ml saw the converted file, not the upload
+        r = self.c.json("GET", "/receipt/" + rid)[1]
+        self.assertEqual((r["state"], r["error_code"], r["upload_sha256"]), ("done", None, sha(body)))
+        self.assert_clean()
+
+    @unittest.skipUnless(os.path.exists(AFCONVERT), "afconvert missing")
+    def test_stereo_44k_converts(self):
+        body = make_wav_bytes(1.0, rate=44100, channels=2)
+        st, b, _ = self.post(body)
+        self.assertEqual(st, 200, b)
+        self.assertEqual(self.convert_events()[-1]["rc"], 0)
+        self.assert_clean()
+
+    def test_canonical_wav_skips_afconvert(self):
+        for body in (WAV, wav18(16000, 1, 16, 0.5)):
+            st, b, _ = self.post(body)
+            self.assertEqual(st, 200, b)
+            self.assertEqual(self.env.seen_log()[-1]["size"], len(body))  # the upload itself was linked
+        self.assertEqual(self.convert_events(), [])
+        self.assert_clean()
+
+    @unittest.skipUnless(os.path.exists(AFCONVERT), "afconvert missing")
+    def test_corrupt_riff_invalid_audio_and_cleanup(self):
+        junk = b"WAVE" + b"\x01\x02garbage!" * 64
+        body = b"RIFF" + struct.pack("<I", len(junk)) + junk
+        st, b, rid = self.post(body)
+        self.assertEqual((st, b["error"]["code"]), (400, "invalid_audio"))
+        self.assertNotEqual(self.convert_events()[-1]["rc"], 0)
+        r = self.c.json("GET", "/receipt/" + rid)[1]
+        self.assertEqual((r["state"], r["error_code"]), ("failed", "invalid_audio"))
+        self.assertEqual(self.env.argv_log(), [])
+        self.assert_clean()
+
+    @unittest.skipUnless(os.path.exists(AFCONVERT), "afconvert missing")
+    def test_converted_over_600s_rejected(self):
+        body = silent_wav_bytes(610.0, rate=8000)  # 8 kHz upload, ~19.5 MB at 16 kHz: under FSIZE, over 600 s
+        st, b, rid = self.post(body)
+        self.assertEqual((st, b["error"]["code"]), (400, "invalid_audio"))
+        self.assertEqual(self.convert_events()[-1]["rc"], 0)  # conversion ran; the duration check rejected it
+        self.assertEqual(self.env.argv_log(), [])
+        self.assertEqual(self.c.json("GET", "/receipt/" + rid)[1]["error_code"], "invalid_audio")
+        self.assert_clean()
 
 
 class ConvertTimeoutTest(Base):

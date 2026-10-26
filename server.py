@@ -989,7 +989,9 @@ class App:
             st, b = error_body(code, request_id=job.rid)
             return st, b, None, {"state": "failed", "http_status": st, "error_code": code}
         wav = job.src
-        if job.kind in ("mp3", "m4a"):
+        # MP3/M4A always convert; a RIFF/WAVE upload converts only when it is not already canonical
+        # (e.g. 22.05/44.1 kHz, stereo, 24-bit, float). Canonical WAV keeps the fast path (no afconvert).
+        if job.kind in ("mp3", "m4a") or (job.kind == "wav" and not strict_wav_check(job.src)):
             wav = self.uploads + "/" + job.op + "/converted.wav"
             rc = self.convert(job.src, wav)
             self.log.event("convert_exit", id=job.rid, rc=rc)
