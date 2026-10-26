@@ -445,6 +445,27 @@ class RhythmCacheIdentityTest(RhythmBase):
             self.assertTrue(self.c.json("POST", AR, WAV)[1]["rhythm"]["cache_hit"])  # now reused
             self.assertEqual(len(self.fw.calls()), n + 1)
 
+    def test_recoverable_tempo_cnn_outcome_recomputed(self):
+        cases = ({"status": "unavailable", "reason": "model_missing"},
+                 {"status": "failed", "code": "inference_error"},
+                 {"status": "failed", "code": "dependency_missing"})
+        for tc in cases:
+            self.write_stored(dict(RHYTHM_OUT_V2, tempo_cnn=tc, worker_sha256=self.worker_sha()))
+            n = len(self.fw.calls())
+            r = self.c.json("POST", AR, WAV)[1]["rhythm"]
+            self.assertEqual((r["status"], r["cache_hit"]), ("done", False), tc)
+            self.assertEqual(len(self.fw.calls()), n + 1)
+            self.assertNotIn("tempo_cnn", self.stored())  # replaced by the fresh run (fake worker emits none)
+
+    def test_deterministic_tempo_cnn_failure_reused(self):
+        for code in ("too_short", "non_finite", "inconsistent_output"):
+            self.write_stored(dict(RHYTHM_OUT_V2, tempo_cnn={"status": "failed", "code": code},
+                                   worker_sha256=self.worker_sha()))
+            n = len(self.fw.calls())
+            r = self.c.json("POST", AR, WAV)[1]["rhythm"]
+            self.assertEqual((r["status"], r["cache_hit"]), ("done", True), code)
+            self.assertEqual(len(self.fw.calls()), n)
+
     def test_failed_recompute_keeps_old_file(self):
         self.write_stored(RHYTHM_OUT_V2)
         self.fw.write(exit=1, stdout="", stderr_lines=['{"error":{"code":"analysis_failed","message":"x"}}'])

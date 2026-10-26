@@ -131,7 +131,11 @@ API:
   hit, same audio and settings) reuses the stored file (`cache_hit: true`, nothing runs) only when its
   `worker_sha256` equals the current one. Otherwise (another worker version, or a file from before this field, i.e.
   every 0.1.0/0.2.0 file) the worker runs again and the file is replaced atomically on success; a busy, timeout or
-  failed re-run leaves the old file in place. Only the worker file is tracked: a changed Essentia python with the same
+  failed re-run leaves the old file in place. A stored file with the current worker is also recomputed when its
+  optional `tempo_cnn` is `unavailable` (any reason, e.g. model restored later) or `failed` with `inference_error` /
+  `dependency_missing`, since those causes can change without a worker change; deterministic `too_short`,
+  `non_finite` and `inconsistent_output` stay cached. While the model stays missing, every rhythm request therefore
+  reruns the worker (about 15 s for a 4 min song). Only the worker file is tracked: a changed Essentia python with the same
   worker file is not detected (restart is needed after editing the worker in place). If the worker file cannot be
   read at start, its hash is null and nothing is reused (every rhythm request recomputes); that alone does not make
   the run fail, the run then succeeds or fails on its own (a worker that is really missing fails at spawn). `/report` and `/timeline` read whatever

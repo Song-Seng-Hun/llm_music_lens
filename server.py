@@ -1027,6 +1027,19 @@ def confidence_band(c):
     return "good" if c <= 3.5 else "excellent"
 
 
+# tempo_cnn outcomes whose cause can change without a worker change (model file restored, transient TF error);
+# deterministic ones (too_short, non_finite, inconsistent_output) stay cached
+TEMPO_CNN_RETRY_CODES = frozenset(("inference_error", "dependency_missing"))
+
+
+def _tempo_cnn_retry(v):
+    """True when a stored file with the current worker must still be recomputed for its optional tempo_cnn field."""
+    t = v.get("tempo_cnn")
+    if not isinstance(t, dict):
+        return False
+    return t.get("status") == "unavailable" or (t.get("status") == "failed" and t.get("code") in TEMPO_CNN_RETRY_CODES)
+
+
 def rhythm_summary(v):
     """Compact view for analyze and /report; beats and chord rows stay in the stored file (/timeline).
     Fields from worker 0.2.0 (bpm_alternatives[_note], key_sections, key_change_count, chords_grid) and 0.2.1
@@ -1195,7 +1208,7 @@ class App:
             return {"status": "failed", "code": "no_result_id"}
         state, stored = self.load_rhythm(result_id)
         cur = self.rhythm_worker_sha256
-        if state == "ok" and cur is not None and stored.get("worker_sha256") == cur:
+        if state == "ok" and cur is not None and stored.get("worker_sha256") == cur and not _tempo_cnn_retry(stored):
             return dict(rhythm_summary(stored), cache_hit=True, stored=True)
         # absent (worker 0.1.0/0.2.0 files), different or unverifiable worker identity: recompute; the stored file
         # is replaced only after a successful run, so /report and /timeline keep the old one until then
