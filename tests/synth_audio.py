@@ -2,7 +2,9 @@
 
 Usage: synth_audio.py KIND SECONDS OUT.wav
 KIND: click (120 BPM click track), chords (C - Am - F - G, 2 s each, with a soft 120 BPM pulse), mix (same as chords),
-      modulation (C major I-IV-V-I for the first half, then D major I-IV-V-I; 2 s chords, soft 120 BPM pulse)
+      modulation (C major I-IV-V-I for the first half, then D major I-IV-V-I; 2 s chords, soft 120 BPM pulse),
+      kick100 (synthetic kick on every beat at 100 BPM only), kick100mid (the same kicks plus equally strong kicks
+      exactly halfway between them: an effective 200 BPM pulse)
 """
 import sys
 import wave
@@ -22,6 +24,25 @@ def clicks(n, bpm=120.0, gain=0.6):
     for start in range(0, n, period):
         seg = burst[:max(0, min(len(burst), n - start))]
         out[start:start + len(seg)] += seg
+    return out
+
+
+def kicks(n, bpm=100.0, gain=0.8, offset=0.0):
+    """Kick: 150 -> 50 Hz exponential pitch drop, 120 ms, exponential decay; first hit at `offset` s."""
+    out = np.zeros(n, dtype=np.float64)
+    k = np.arange(int(0.12 * RATE))
+    t = k / RATE
+    f = 50.0 + 100.0 * np.exp(-t / 0.02)
+    burst = gain * np.sin(2 * np.pi * np.cumsum(f) / RATE) * np.exp(-t / 0.04)
+    period = RATE * 60.0 / bpm
+    j = 0
+    while True:
+        start = int(round(offset * RATE + j * period))
+        if start >= n:
+            break
+        seg = burst[:n - start]
+        out[start:start + len(seg)] += seg
+        j += 1
     return out
 
 
@@ -64,6 +85,10 @@ def main(kind, seconds, path):
         half = n // 2
         y = np.concatenate([chords(half, progression=C_MAJOR), chords(n - half, progression=D_MAJOR)])
         y += clicks(n, gain=0.25)
+    elif kind == "kick100":
+        y = kicks(n)
+    elif kind == "kick100mid":
+        y = kicks(n) + kicks(n, offset=0.3)  # 0.6 s period at 100 BPM: halfway = 0.3 s
     else:
         raise SystemExit("unknown kind")
     y = np.clip(y, -0.99, 0.99)

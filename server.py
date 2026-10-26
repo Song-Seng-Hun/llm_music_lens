@@ -889,7 +889,7 @@ def check_rhythm(v):
         for e in est:
             if not isinstance(e, dict) or not _num(e.get("bpm"), 0, 1000) or not _num(e.get("share"), 0, 1):
                 return None
-        if not _rhythm_v2_ok(v, dur):
+        if not _rhythm_v2_ok(v, dur) or not _rhythm_v21_ok(v):
             return None
     except (TypeError, KeyError, OverflowError):
         return None
@@ -933,6 +933,38 @@ def _rhythm_v2_ok(v, dur):
     return True
 
 
+DTE_KEYS = {"method", "window_ms", "beat_onset_median", "mid_onset_median", "mid_to_beat_ratio",
+            "mid_strong_fraction", "mid_strong_threshold", "pairs"}
+DTE_WARNING = "double_tempo_evidence_unavailable:"
+
+
+def _opt_num(v, lo, hi):
+    return v is None or _num(v, lo, hi)
+
+
+def _rhythm_v21_ok(v):
+    """Fields added by worker 0.2.1 (double_tempo_evidence[_note]); absent in older files, valid when present.
+    A null ratio (or fraction) is allowed only together with a double_tempo_evidence_unavailable warning."""
+    if "double_tempo_evidence_note" in v and not _short_str(v["double_tempo_evidence_note"], 200):
+        return False
+    if "double_tempo_evidence" not in v:
+        return True
+    d = v["double_tempo_evidence"]
+    if not isinstance(d, dict) or set(d) != DTE_KEYS:
+        return False
+    n = d["pairs"]
+    if not (_short_str(d["method"], 64) and _num(d["window_ms"], 1, 200) and _num(d["mid_strong_threshold"], 0, 1)
+            and isinstance(n, int) and not isinstance(n, bool) and 0 <= n <= RHYTHM_MAX_BEATS
+            and _opt_num(d["beat_onset_median"], 0, 1) and _opt_num(d["mid_onset_median"], 0, 1)
+            and _opt_num(d["mid_to_beat_ratio"], 0, 1000) and _opt_num(d["mid_strong_fraction"], 0, 1)):
+        return False
+    if (d["mid_to_beat_ratio"] is None) != (d["mid_strong_fraction"] is None):
+        return False
+    if d["mid_to_beat_ratio"] is None:
+        return any(w.startswith(DTE_WARNING) for w in v["warnings"])
+    return n > 0 and d["beat_onset_median"] is not None and d["mid_onset_median"] is not None
+
+
 def confidence_band(c):
     """Bands documented by Essentia BeatTrackerMultiFeature: [0,1) very low, [1,1.5] low, (1.5,3.5] good, >3.5."""
     if c < 1:
@@ -944,12 +976,14 @@ def confidence_band(c):
 
 def rhythm_summary(v):
     """Compact view for analyze and /report; beats and chord rows stay in the stored file (/timeline).
-    Fields from worker 0.2.0 (bpm_alternatives[_note], key_sections, key_change_count, chords_grid) are null when the
-    stored file predates them."""
+    Fields from worker 0.2.0 (bpm_alternatives[_note], key_sections, key_change_count, chords_grid) and 0.2.1
+    (double_tempo_evidence[_note]) are null when the stored file predates them."""
     return {"status": "done", "bpm": v["bpm"], "bpm_confidence": v["bpm_confidence"],
             "bpm_confidence_band": confidence_band(v["bpm_confidence"]),
             "bpm_confidence_scale": v.get("bpm_confidence_scale"), "bpm_estimates": v.get("bpm_estimates", []),
             "bpm_alternatives": v.get("bpm_alternatives"), "bpm_alternatives_note": v.get("bpm_alternatives_note"),
+            "double_tempo_evidence": v.get("double_tempo_evidence"),
+            "double_tempo_evidence_note": v.get("double_tempo_evidence_note"),
             "key": v["key"], "key_sections": v.get("key_sections"), "key_change_count": v.get("key_change_count"),
             "beat_count": len(v["beats"]), "chord_segment_count": len(v["chords"]),
             "chords_grid": v.get("chords_grid"), "chords_reliability": v.get("chords_reliability"),

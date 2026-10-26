@@ -90,6 +90,36 @@ def bad_v2():
     return out
 
 
+DTE = {"method": "spectral_flux_l1_halfrect_hann1024_hop512_maxnorm", "window_ms": 30.0, "beat_onset_median": 0.82,
+       "mid_onset_median": 0.83, "mid_to_beat_ratio": 1.011, "mid_strong_fraction": 1.0, "mid_strong_threshold": 0.5,
+       "pairs": 48}
+DTE_NULL = dict(DTE, beat_onset_median=None, mid_onset_median=None, mid_to_beat_ratio=None, mid_strong_fraction=None,
+                pairs=2)
+DTE_WARN = "double_tempo_evidence_unavailable: fewer than 7 usable beat pairs"
+RHYTHM_OUT_V21 = dict(RHYTHM_OUT_V2, double_tempo_evidence=DTE, double_tempo_evidence_note="diagnostic only")
+V21_SUMMARY_KEYS = ("double_tempo_evidence", "double_tempo_evidence_note")
+
+
+def bad_v21():
+    """Worker-0.2.1 outputs that must be refused."""
+    out = []
+    for over in ({"mid_to_beat_ratio": float("nan")}, {"mid_to_beat_ratio": 1001}, {"mid_to_beat_ratio": -0.1},
+                 {"mid_to_beat_ratio": "1"}, {"mid_strong_fraction": 1.5}, {"beat_onset_median": 2},
+                 {"mid_onset_median": float("inf")}, {"pairs": -1}, {"pairs": 1.0}, {"pairs": True},
+                 {"pairs": 10 ** 6}, {"window_ms": 0}, {"method": ""}, {"method": "x" * 65}, {"method": "a\nb"},
+                 {"mid_strong_threshold": 2}, {"extra": 1}, {"mid_strong_fraction": None},
+                 {"mid_to_beat_ratio": None, "mid_strong_fraction": None}, {"beat_onset_median": None}):
+        out.append(json.dumps(dict(RHYTHM_OUT_V21, double_tempo_evidence=dict(DTE, **over))))
+    d = dict(DTE)
+    del d["pairs"]
+    out.append(json.dumps(dict(RHYTHM_OUT_V21, double_tempo_evidence=d)))
+    for over in ({"double_tempo_evidence": [1]}, {"double_tempo_evidence": None},
+                 {"double_tempo_evidence_note": ""}, {"double_tempo_evidence_note": "x" * 201},
+                 {"double_tempo_evidence": DTE_NULL}):  # null ratio without the warning
+        out.append(json.dumps(dict(RHYTHM_OUT_V21, **over)))
+    return out
+
+
 class FakeWorker:
     def __init__(self, env):
         self.dir = os.path.join(env.dir, "fakerhythm")
@@ -168,7 +198,7 @@ class RhythmAnalyzeTest(RhythmBase):
         self.assertEqual((r["bpm_confidence_band"], r["bpm_estimates"]), ("excellent", RHYTHM_OUT["bpm_estimates"]))
         self.assertNotIn("beats", r)  # rows only via /timeline
         self.assertNotIn("chords", r)
-        for k in V2_SUMMARY_KEYS:  # the default fake output has the worker-0.1.0 shape
+        for k in V2_SUMMARY_KEYS + V21_SUMMARY_KEYS:  # the default fake output has the worker-0.1.0 shape
             self.assertIsNone(r[k], k)
         calls = self.fw.calls()
         self.assertEqual(len(calls), 1)
@@ -244,6 +274,34 @@ class RhythmAnalyzeTest(RhythmBase):
         for out in bad_v2():
             self.fw.write(stdout=out)
             self.assert_rhythm_failed("failed", "invalid_output")
+
+    def test_v21_fields_in_summary(self):
+        self.fw.write(stdout=json.dumps(RHYTHM_OUT_V21))
+        r = self.c.json("POST", AR, WAV)[1]["rhythm"]
+        self.assertEqual(r["status"], "done", r)
+        for k in V2_SUMMARY_KEYS + V21_SUMMARY_KEYS:
+            self.assertEqual(r[k], RHYTHM_OUT_V21[k], k)
+        self.assertEqual((r["bpm"], r["bpm_alternatives"]), (120.0, [60.0, 240.0]))  # no tempo decision
+        r = self.c.json("GET", "/report/" + RID64)[1]["rhythm"]
+        self.assertEqual(r["double_tempo_evidence"], DTE)
+
+    def test_v21_invalid_output(self):
+        for out in bad_v21():
+            self.fw.write(stdout=out)
+            self.assert_rhythm_failed("failed", "invalid_output")
+
+    def test_v21_null_ratio_needs_warning(self):
+        v = json.loads(json.dumps(dict(RHYTHM_OUT_V21, double_tempo_evidence=DTE_NULL, warnings=[DTE_WARN])))
+        self.assertIs(server.check_rhythm(v), v)
+        v = json.loads(json.dumps(dict(v, double_tempo_evidence=dict(DTE_NULL, pairs=0))))
+        self.assertIs(server.check_rhythm(v), v)
+        v = json.loads(json.dumps(dict(RHYTHM_OUT_V21, double_tempo_evidence=dict(DTE, mid_to_beat_ratio=0))))
+        self.assertIs(server.check_rhythm(v), v)
+        v = json.loads(json.dumps(dict(RHYTHM_OUT_V21, double_tempo_evidence=dict(DTE, pairs=0))))
+        self.assertIsNone(server.check_rhythm(v))  # a ratio needs pairs
+        for old in (RHYTHM_OUT, RHYTHM_OUT_V2):  # 0.1.0 / 0.2.0 shapes stay valid
+            v = json.loads(json.dumps(old))
+            self.assertIs(server.check_rhythm(v), v)
 
     def test_v2_single_section_and_empty_alternatives_valid(self):
         v = json.loads(json.dumps(dict(RHYTHM_OUT_V2, bpm_alternatives=[], key_change_count=0, chords_grid="frame",
@@ -378,7 +436,12 @@ class RhythmReadTest(RhythmBase):
             f.write(json.dumps(RHYTHM_OUT_V2))
         r = self.c.json("GET", "/report/" + RID64)[1]["rhythm"]
         self.assertEqual((r["chords_grid"], r["bpm_alternatives"]), ("beat", [60.0, 240.0]))
-        for bad in bad_v2():
+        self.assertEqual([r[k] for k in V21_SUMMARY_KEYS], [None, None])  # 0.2.0 file: no evidence field
+        with open(self.rhythm_file(), "w") as f:
+            f.write(json.dumps(RHYTHM_OUT_V21))
+        r = self.c.json("GET", "/report/" + RID64)[1]["rhythm"]
+        self.assertEqual(r["double_tempo_evidence"]["mid_to_beat_ratio"], 1.011)
+        for bad in bad_v2() + bad_v21():
             with open(self.rhythm_file(), "w") as f:
                 f.write(bad)
             st, b = self.c.json("GET", "/report/" + RID64)
@@ -498,6 +561,46 @@ class WorkerLogicTest(unittest.TestCase):
             {"start": 40.0, "end": 80.0, "tonic": "F", "scale": "major", "strength": None},
             {"start": 80.0, "end": 90.0, "tonic": "E", "scale": "major", "strength": 0.9}])
 
+    def test_double_tempo_evidence(self):
+        hop = 0.01
+        env = [0.0] * 1000  # 10 s
+        beats = [0.5 * k + 0.5 for k in range(18)]  # 0.5 .. 9.0
+        for b in beats:
+            env[int(round(b / hop)) + 2] = 1.0  # peak 20 ms late: inside the +-30 ms pool
+        d, w = rw.double_tempo_evidence(env, hop, beats)
+        self.assertIsNone(w)
+        self.assertEqual((d["pairs"], d["beat_onset_median"], d["mid_onset_median"]), (17, 1.0, 0.0))
+        self.assertEqual((d["mid_to_beat_ratio"], d["mid_strong_fraction"], d["window_ms"]), (0.0, 0.0, 30.0))
+        for b1, b2 in zip(beats, beats[1:]):
+            env[int(round((b1 + b2) / 2 / hop))] = 0.6
+        d, _ = rw.double_tempo_evidence(env, hop, beats)
+        self.assertEqual((d["mid_onset_median"], d["mid_to_beat_ratio"], d["mid_strong_fraction"]), (0.6, 0.6, 1.0))
+        env[int(round(0.75 / hop))] = 0.4  # one midpoint below 0.5 x its beats' mean
+        d, _ = rw.double_tempo_evidence(env, hop, beats)
+        self.assertEqual(d["mid_strong_fraction"], round(16 / 17.0, 3))
+        # a peak 40 ms away from a midpoint falls outside the pool
+        env2 = [0.0] * 1000
+        for b in beats:
+            env2[int(round(b / hop))] = 1.0
+        env2[int(round(0.75 / hop)) + 4] = 1.0
+        self.assertEqual(rw.double_tempo_evidence(env2, hop, beats)[0]["mid_strong_fraction"], 0.0)
+        # too few pairs; gaps outside 0.12..1.5 s are skipped
+        d, w = rw.double_tempo_evidence(env, hop, beats[:7])
+        self.assertEqual((d["pairs"], d["mid_to_beat_ratio"], d["mid_strong_fraction"]), (6, None, None))
+        self.assertTrue(w.startswith("double_tempo_evidence_unavailable:"))
+        d, w = rw.double_tempo_evidence(env, hop, [0.5, 0.55, 3.0, 5.0])
+        self.assertEqual((d["pairs"], d["beat_onset_median"]), (0, None))
+        self.assertTrue(w)
+        d, w = rw.double_tempo_evidence(env, hop, [])
+        self.assertEqual((d["pairs"], d["mid_to_beat_ratio"]), (0, None))
+        # silence at beats: null ratio, onset medians reported
+        d, w = rw.double_tempo_evidence([0.0] * 1000, hop, beats)
+        self.assertEqual((d["beat_onset_median"], d["mid_to_beat_ratio"]), (0.0, None))
+        self.assertIn("~0", w)
+        # pool clamps at the envelope edges
+        self.assertEqual(rw._pool([0.3, 0.1], hop, -0.02, 0.03), 0.3)
+        self.assertEqual(rw._pool([0.3, 0.1], hop, 5.0, 0.03), 0.0)
+
     def test_beat_chords_vote_and_merge(self):
         step = 0.05
         # frame labels flip every 0.15 s (C C C G G G ...) with C stronger: frame merge gives many tiny segments
@@ -548,7 +651,8 @@ class RealWorkerTest(unittest.TestCase):
     def setUpClass(cls):
         cls.dir = tempfile.mkdtemp(prefix="mlrhythm-")
         cls.out = {}
-        for kind, secs in (("click", "30"), ("chords", "30"), ("modulation", "60")):
+        for kind, secs in (("click", "30"), ("chords", "30"), ("modulation", "60"), ("kick100", "30"),
+                           ("kick100mid", "30")):
             wav = os.path.join(cls.dir, kind + ".wav")
             subprocess.run([ESSENTIA_PY, "-I", SYNTH, kind, secs, wav], check=True, timeout=120)
             assert server.strict_wav_check(wav)
@@ -569,7 +673,9 @@ class RealWorkerTest(unittest.TestCase):
             self.assertEqual((v["sample_rate"], v["chords_reliability"]), (44100, "low_reference"))
             self.assertIn(v["duration"], (30.0, 60.0))
             self.assertEqual(v["tool"]["essentia_version"], "2.1-beta6-dev")
-            self.assertEqual(v["tool"]["version"], "0.2.0")
+            self.assertEqual(v["tool"]["version"], "0.2.1")
+            self.assertIsNotNone(v["double_tempo_evidence"]["mid_to_beat_ratio"])
+            self.assertTrue(v["double_tempo_evidence_note"])
             self.assertEqual(v["key"]["profile"], "bgate")
             self.assertEqual(v["key_change_count"], len(v["key_sections"]) - 1)
             self.assertEqual((v["key_sections"][0]["start"], v["key_sections"][-1]["end"]), (0.0, v["duration"]))
@@ -583,6 +689,16 @@ class RealWorkerTest(unittest.TestCase):
         gaps = [b - a for a, b in zip(v["beats"], v["beats"][1:])]
         self.assertAlmostEqual(sorted(gaps)[len(gaps) // 2], 0.5, delta=0.02)
         self.assertEqual(v["bpm_alternatives"], [60.0, 240.0])
+
+    def test_double_tempo_evidence_midpoint_hits(self):
+        a, b = self.out["kick100"], self.out["kick100mid"]
+        da, db = a["double_tempo_evidence"], b["double_tempo_evidence"]
+        # measured (worker 0.2.1): a 0.0 / b 1.011, fraction 0.0 / 1.0; the tracker said 100.04 BPM for both.
+        # Only the direction is asserted, not the tracker's tempo for b (100 or 200 would both be legitimate).
+        self.assertGreater(db["mid_to_beat_ratio"], da["mid_to_beat_ratio"] + 0.5)
+        self.assertGreater(db["mid_strong_fraction"], da["mid_strong_fraction"] + 0.5)
+        self.assertLess(self.out["click"]["double_tempo_evidence"]["mid_to_beat_ratio"], 0.2)
+        self.assertGreater(min(da["pairs"], db["pairs"]), 30)
 
     def test_beat_grid_chords(self):
         for v in self.out.values():

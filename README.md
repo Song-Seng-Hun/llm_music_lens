@@ -130,11 +130,13 @@ API:
   hit, same audio and settings) reuses it (`cache_hit: true`) and runs nothing. A store failure still returns the
   data with `stored: false`. The files are not pruned automatically (about 30 KB per 10 minutes of audio).
 - `GET /report/<id>` adds a `rhythm` summary (`status`, `bpm`, `bpm_confidence`, `bpm_confidence_band`,
-  `bpm_estimates`, `bpm_alternatives`, `bpm_alternatives_note`, `key`, `key_sections`, `key_change_count`,
+  `bpm_estimates`, `bpm_alternatives`, `bpm_alternatives_note`, `double_tempo_evidence`,
+  `double_tempo_evidence_note`, `key`, `key_sections`, `key_change_count`,
   `beat_count`, `chord_segment_count`, `chords_grid`, `downbeats`, `duration`, `tool`, `warnings`) when a stored file
   exists, re-serializing the native JSON (number formatting may change). Files stored by worker 0.1.0 lack the
   0.2.0 fields and still load; the summary then has `bpm_alternatives`, `bpm_alternatives_note`, `key_sections`,
-  `key_change_count` and `chords_grid` set to `null` (they are not recomputed; old chord rows stay frame-level). A damaged file gives `rhythm: {"status":"failed","code":"invalid_result"}`.
+  `key_change_count` and `chords_grid` set to `null` (they are not recomputed; old chord rows stay frame-level).
+  Files from 0.1.0 and 0.2.0 likewise give `double_tempo_evidence` and `double_tempo_evidence_note` as `null`. A damaged file gives `rhythm: {"status":"failed","code":"invalid_result"}`.
   No file: native bytes unchanged.
 - `GET /timeline/<id>?layer=beats|chords` is served by the server from the stored file with the native rules:
   `start`/`end` 0..600 (default 0 and 600, `end >= start`), rows overlapping the range, `limit` 1..200 (default 100),
@@ -148,16 +150,18 @@ API:
 `very_low` [0, 1), `low` [1, 1.5], `good` (1.5, 3.5] (Essentia: about 80% AMLt), `excellent` above 3.5. It is
 Essentia's guide, not a calibration on the team's music.
 
-Worker output (worker 0.2.0): `bpm`, `bpm_confidence` (RhythmExtractor2013 multifeature, native 0..~5.32,
+Worker output (worker 0.2.1): `bpm`, `bpm_confidence` (RhythmExtractor2013 multifeature, native 0..~5.32,
 uncalibrated), `bpm_estimates` (top 5 shares), `bpm_alternatives` (`[bpm/2, bpm*2]`, 2 decimals, only values within
-40..300; empty when bpm is 0) with `bpm_alternatives_note`, `beats` (s, ms rounding),
+40..300; empty when bpm is 0) with `bpm_alternatives_note`, `double_tempo_evidence` with
+`double_tempo_evidence_note` (diagnostic, see below), `beats` (s, ms rounding),
 `downbeats: {"status":"not_provided"}`, `key` (`tonic`, `scale`, `strength`, `profile: "bgate"`), `key_sections`
 (rows `{start, end, tonic, scale, strength}`, see below), `key_change_count` (sections - 1), `key_section_window`
 (20), `chords` (see below), `chords_grid` (`beat` or `frame`), `chord_frame_segment_count` (frame-level segment
 count before the beat vote, stored file only), `chords_reliability: "low_reference"`, `sample_rate` 44100 (input
 resampled from 16 kHz because RhythmExtractor2013 assumes 44.1 kHz), `duration`, `tool` (name, version,
 `essentia_version`), `warnings` (`short_audio` < 10 s, `near_silent`, `no_beats`, `low_bpm_confidence` < 1.5,
-`low_key_strength` < 0.5, `key_changes` when there is more than one key section, `no_chords`). Audio under 1 s is
+`low_key_strength` < 0.5, `key_changes` when there is more than one key section, `no_chords`,
+`double_tempo_evidence_unavailable`). Audio under 1 s is
 refused (`too_short`).
 
 - Key sections: the same KeyExtractor (`bgate`, frame 4096, hop 2048) on fixed, non-overlapping 20 s windows (a last
@@ -180,13 +184,35 @@ Accuracy (honest notes): every value is a DSP estimate. On synthetic tests a 120
 (confidence ~3.9) and a C-Am-F-G triad loop gives C major with the four chords at the right 2 s boundaries; real
 music has not been measured. Confidence and strengths are native and uncalibrated. Chords are major/minor triads
 only, a low-reliability reference, not a transcription. There are no downbeats, bars or time signature. A 600 s
-synthetic file took about 6.3 s and ~0.97 GB peak RSS on this Mac (worker 0.2.0).
+synthetic file (C-Am-F-G loop) took about 6.8 s and ~0.97-0.99 GB peak RSS on this Mac (worker 0.2.1; 0.2.0 on
+the same file: 6.3 s, 0.99 GB).
 
 - Tempo octave: the metrical level is ambiguous. On one real song (216 s, published tempo 220) the tracker said
   109.94 BPM and every `bpm_estimates` entry was ~110, so 220 never appeared there. `bpm_alternatives` lists half and
   double without choosing; compare them with a published tempo or with your own listening. No heuristic warns.
   Team check with worker 0.1.0 (8 songs, references from published charts): 87, 102, 145, 164 and 170 BPM came out
   right; 185, 200 and 220 came out at exactly half. The confidence band did not flag the halved ones.
+- `double_tempo_evidence` (worker 0.2.1) is a diagnostic for the halving above, uncalibrated and untested on real
+  songs. It makes no decision and changes neither `bpm` nor `bpm_alternatives`; do not pick a tempo from it alone.
+  Idea: if the true tempo is double the tracked one, strong onsets also fall at the midpoints between tracked beats.
+  Method: an onset-strength envelope (L1 half-rectified spectral flux, Essentia `Flux`, Hann 1024-sample frames,
+  hop 512 = 11.6 ms at 44.1 kHz, divided by its maximum so values are 0..1) is max-pooled over +-30 ms (`window_ms`)
+  at every tracked beat and at the midpoint of every consecutive beat pair whose gap is 0.12..1.5 s (`pairs`).
+  +-30 ms absorbs tracker jitter and the one-frame flux lag and stays far below the shortest half-beat (144 ms at
+  208 BPM), so the windows never overlap. Flux was chosen over HFC because it reacts to low-frequency attacks (kicks)
+  as well as bright ones, and needs no phase. Fields: `beat_onset_median` (median over both flanking beats of every
+  pair), `mid_onset_median`, `mid_to_beat_ratio` (mid median / beat median, 0..1000), `mid_strong_fraction` (share
+  of pairs whose midpoint onset is >= `mid_strong_threshold` 0.5 x the mean onset of its two flanking beats, and
+  > 0), `method`. Ratio and fraction are `null` with warning `double_tempo_evidence_unavailable` when there are fewer
+  than 7 usable pairs (~8 beats) or the beat median is under 0.001.
+  Synthetic numbers (30 s each): kicks on every beat at 100 BPM only gave ratio 0.0 / fraction 0.0; the same kicks
+  plus equally strong kicks exactly halfway (an effective 200 BPM pulse) gave 1.011 / 1.0, and the tracker still said
+  100.04 BPM for both. The 120 BPM click track gave 0.0 / 0.0; the C-Am-F-G loop with a soft click gave 0.383 / 0.276
+  (60 s modulation track 0.37 / 0.169, 600 s loop 0.357 / 0.242): sustained partials leave a steady flux floor of
+  about 0.2-0.3 of the maximum between onsets, so the baseline on real music will not be 0. The team will evaluate it
+  on the same 8 songs (87-220 BPM, published charts): run them with `--rhythm` and compare the values for the five
+  right ones (87-170) with the three halved ones (185, 200, 220). Only a clear, consistent separation there would
+  justify proposing a threshold, in a later version.
 - Key sections are a DSP estimate on nominal 20 s windows (a final tail under 10 s is merged, so the last window can
   approach 30 s). Window resolution is not a measured error bound: a boundary lands on a window edge, and a window
   straddling a change can report a blended or third key. Synthetic test: C major 0-30 s then

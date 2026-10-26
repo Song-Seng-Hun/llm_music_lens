@@ -23,16 +23,24 @@ Choices:
   merge, so every segment spans >= one beat except head/tail ("chords_grid": "beat"). Without beats, consecutive
   identical frame labels merge ("frame"). Major/minor triads only; reliability "low_reference".
 - downbeats: Essentia has no native downbeat tracker; reported as {"status":"not_provided"}.
+- double_tempo_evidence (diagnostic, uncalibrated; no decision, bpm untouched): onset-strength envelope = L1
+  half-rectified spectral flux (Essentia Flux) of Hann-windowed 1024-sample frames, hop 512 (11.6 ms), frames centred
+  on i*hop, divided by its maximum (0..1). Flux reacts to any broadband or low-frequency attack (a kick), unlike HFC,
+  and needs no phase. It is max-pooled over +-30 ms at each tracked beat and at the midpoint of each consecutive
+  beat pair (gap 0.12..1.5 s): 30 ms absorbs tracker jitter plus the one-frame flux lag, and stays far below the
+  shortest half-beat (144 ms at 208 BPM), so beat and midpoint windows never overlap. If the true tempo is double,
+  strong onsets should fall at the midpoints too.
 """
 import json
 import math
 import os
 import resource
 import signal
+import statistics
 import sys
 import wave
 
-TOOL = {"name": "music-lens-rhythm-worker", "version": "0.2.0"}
+TOOL = {"name": "music-lens-rhythm-worker", "version": "0.2.1"}
 SRC_RATE = 16000
 RATE = 44100
 MAX_SECONDS = 600.0
@@ -51,6 +59,14 @@ ALT_MIN_BPM, ALT_MAX_BPM = 40.0, 300.0
 ALT_NOTE = "metrical level is ambiguous; half or double tempo may match a published tempo"
 KEY_WINDOW = 20.0
 KEY_MIN_TAIL = 10.0  # a last window shorter than this joins the previous one
+ONSET_FRAME, ONSET_HOP = 1024, 512
+ONSET_METHOD = "spectral_flux_l1_halfrect_hann1024_hop512_maxnorm"
+DTE_WINDOW = 0.030  # max-pool half-width, s
+DTE_STRONG = 0.5  # a midpoint is "strong" when its onset >= this x the mean onset of its two flanking beats
+DTE_MIN_PAIRS = 7  # ~8 beats
+DTE_MIN_BEAT_MEDIAN = 1e-3  # of the envelope maximum; below this the ratio is null (ratio therefore <= 1000)
+DTE_GAP = (0.12, 1.5)  # beat pairs outside this gap (s) are skipped (tracker range 40..208 BPM is 0.29..1.5 s)
+DTE_NOTE = "diagnostic only, uncalibrated, untested on real songs; do not pick a tempo from it alone"
 
 
 class Fail(Exception):
@@ -181,6 +197,59 @@ def beat_chords(frames, beats, duration):
     return _finish(segs)
 
 
+def _pool(env, hop_s, t, half):
+    """Max of env over frames whose centre lies within t +- half (frame i centred at i*hop_s); 0.0 when none."""
+    a = max(0, int(math.ceil((t - half) / hop_s - 1e-9)))
+    b = min(len(env) - 1, int(math.floor((t + half) / hop_s + 1e-9)))
+    return max(env[a:b + 1]) if b >= a else 0.0
+
+
+def double_tempo_evidence(env, hop_s, beats, half=DTE_WINDOW):
+    """env: onset strength per frame (0..1, frame i centred at i*hop_s). Returns (evidence dict, warning|None).
+    pairs = consecutive beat pairs with gap in DTE_GAP. mid_to_beat_ratio = median(midpoint onset) / median(beat
+    onset over both flanking beats of every pair); mid_strong_fraction = share of pairs whose midpoint onset is
+    >= DTE_STRONG x the mean of its two flanking beat onsets (and > 0). Null ratio/fraction (+ warning) when pairs <
+    DTE_MIN_PAIRS or the beat median < DTE_MIN_BEAT_MEDIAN."""
+    beat_v, mid_v, strong = [], [], 0
+    for b1, b2 in zip(beats, beats[1:]):
+        if not DTE_GAP[0] <= b2 - b1 <= DTE_GAP[1]:
+            continue
+        o1, o2 = _pool(env, hop_s, b1, half), _pool(env, hop_s, b2, half)
+        om = _pool(env, hop_s, (b1 + b2) / 2.0, half)
+        beat_v += [o1, o2]
+        mid_v.append(om)
+        if om > 0 and om >= DTE_STRONG * (o1 + o2) / 2.0:
+            strong += 1
+    pairs = len(mid_v)
+    bmed = statistics.median(beat_v) if beat_v else None
+    mmed = statistics.median(mid_v) if mid_v else None
+    ratio = frac = warn = None
+    if pairs < DTE_MIN_PAIRS:
+        warn = "double_tempo_evidence_unavailable: fewer than %d usable beat pairs" % DTE_MIN_PAIRS
+    elif bmed < DTE_MIN_BEAT_MEDIAN:
+        warn = "double_tempo_evidence_unavailable: onset strength at beats is ~0"
+    else:
+        ratio, frac = round(mmed / bmed, 3), round(strong / float(pairs), 3)
+    rnd = lambda x: None if x is None else round(min(1.0, max(0.0, x)), 4)
+    return ({"method": ONSET_METHOD, "window_ms": round(half * 1000.0, 1), "beat_onset_median": rnd(bmed),
+             "mid_onset_median": rnd(mmed), "mid_to_beat_ratio": ratio, "mid_strong_fraction": frac,
+             "mid_strong_threshold": DTE_STRONG, "pairs": pairs}, warn)
+
+
+def onset_envelope(audio):
+    """Normalized (0..1) half-rectified L1 spectral flux per ONSET_HOP frame; frame i centred at i*ONSET_HOP."""
+    import essentia.standard as es
+    window, spectrum = es.Windowing(type="hann"), es.Spectrum()
+    flux = es.Flux(norm="L1", halfRectify=True)
+    env = [float(flux(spectrum(window(f))))
+           for f in es.FrameGenerator(audio, frameSize=ONSET_FRAME, hopSize=ONSET_HOP, startFromZero=False)]
+    if env:
+        env[0] = 0.0  # first frame is a difference against nothing
+    env = [x if math.isfinite(x) and x > 0 else 0.0 for x in env]
+    top = max(env) if env else 0.0
+    return [x / top for x in env] if top > 0 else env
+
+
 def read_wav(path):
     import numpy as np
     try:
@@ -229,6 +298,10 @@ def analyze(path):
         warnings.append("no_beats: no beat was detected")
     if conf < LOW_BPM_CONFIDENCE:
         warnings.append("low_bpm_confidence: below 1.5 on the native 0..5.32 scale")
+
+    dte, dte_warn = double_tempo_evidence(onset_envelope(audio), ONSET_HOP / float(RATE), beats)
+    if dte_warn:
+        warnings.append(dte_warn)
 
     tonic, scale, kstrength = es.KeyExtractor(profileType=KEY_PROFILE, sampleRate=RATE, frameSize=FRAME,
                                               hopSize=HOP)(audio)
@@ -286,6 +359,8 @@ def analyze(path):
         "bpm_alternatives": bpm_alternatives(round(bpm, 2)),
         "bpm_alternatives_note": ALT_NOTE,
         "beats": beats,
+        "double_tempo_evidence": dte,
+        "double_tempo_evidence_note": DTE_NOTE,
         "downbeats": {"status": "not_provided", "reason": "Essentia has no native downbeat tracker"},
         "key": {"tonic": str(tonic), "scale": str(scale), "strength": round(kstrength, 3), "profile": KEY_PROFILE},
         "key_sections": key_sections,
