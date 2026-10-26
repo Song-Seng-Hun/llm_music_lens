@@ -812,7 +812,36 @@ def last_stderr_code(f, max_line):
 # ---------------------------------------------------------------- rhythm layer (optional)
 
 def _num(v, lo, hi):
-    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and lo <= v <= hi
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and _finite(v) and lo <= v <= hi
+
+
+def _finite(v):
+    """Finite float, or int small enough that math.isfinite cannot overflow (JSON allows 10**400)."""
+    if isinstance(v, int):
+        return abs(v) <= 2 ** 53
+    return math.isfinite(v)
+
+
+def _reject_constant(name):
+    raise ValueError("non-finite JSON constant " + name)
+
+
+def loads_rhythm(data):
+    """Strict JSON for rhythm output and stored files: NaN/Infinity literals refused (ValueError)."""
+    return json.loads(data.decode("utf-8"), parse_constant=_reject_constant)
+
+
+def _tree_ok(v, depth=0):
+    """Every number anywhere is finite and bounded; containers nest at most 6 deep."""
+    if depth > 6:
+        return False
+    if isinstance(v, dict):
+        return all(isinstance(k, str) and _tree_ok(x, depth + 1) for k, x in v.items())
+    if isinstance(v, list):
+        return all(_tree_ok(x, depth + 1) for x in v)
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return _finite(v)
+    return v is None or isinstance(v, (str, bool))
 
 
 def _short_str(v, n=64):
@@ -822,7 +851,7 @@ def _short_str(v, n=64):
 def check_rhythm(v):
     """Shape check for worker output and stored rhythm files. Returns the dict or None."""
     try:
-        if not isinstance(v, dict) or not _num(v.get("duration"), 0, 600.5):
+        if not isinstance(v, dict) or not _tree_ok(v) or not _num(v.get("duration"), 0, 600.5):
             return None
         dur = v["duration"] + 0.5
         if not (_num(v.get("bpm"), 0, 1000) and _num(v.get("bpm_confidence"), 0, 100)
@@ -838,21 +867,27 @@ def check_rhythm(v):
             return None
         for c in chords:
             if (not isinstance(c, dict) or not _num(c.get("start"), 0, dur) or not _num(c.get("end"), 0, dur)
-                    or c["end"] < c["start"] or not _short_str(c.get("label"), 16) or not _num(c.get("strength"), -1e6, 1e6)):
+                    or c["end"] < c["start"] or not _short_str(c.get("label"), 16)
+                    or not (c.get("strength") is None or _num(c.get("strength"), -1e6, 1e6))):
                 return None
         key = v.get("key")
         if not (isinstance(key, dict) and _short_str(key.get("tonic"), 8) and _short_str(key.get("scale"), 16)
                 and _num(key.get("strength"), -1e6, 1e6)):
             return None
-        if not isinstance(v.get("downbeats"), dict) or not isinstance(v.get("tool"), dict):
-            return None
+        for k in ("downbeats", "tool"):
+            d = v.get(k)
+            if not isinstance(d, dict) or len(d) > 8 or not all(_short_str(x, 200) for x in d.values()):
+                return None
         w = v.get("warnings")
         if not isinstance(w, list) or len(w) > 32 or not all(_short_str(x, 200) for x in w):
             return None
         est = v.get("bpm_estimates", [])
         if not isinstance(est, list) or len(est) > 16:
             return None
-    except (TypeError, KeyError):
+        for e in est:
+            if not isinstance(e, dict) or not _num(e.get("bpm"), 0, 1000) or not _num(e.get("share"), 0, 1):
+                return None
+    except (TypeError, KeyError, OverflowError):
         return None
     return v
 
@@ -975,7 +1010,7 @@ class App:
         if len(data) > self.limits["rhythm_output"]:
             return "invalid", None
         try:
-            v = check_rhythm(json.loads(data.decode("utf-8")))
+            v = check_rhythm(loads_rhythm(data))
         except ValueError:
             v = None
         return ("ok", v) if v is not None else ("invalid", None)
@@ -1074,7 +1109,7 @@ class App:
                 return {"status": "failed", "code": "invalid_output"}
             out.seek(0)
             try:
-                v = check_rhythm(json.loads(out.read().decode("utf-8")))
+                v = check_rhythm(loads_rhythm(out.read()))
             except ValueError:
                 v = None
             if v is None:

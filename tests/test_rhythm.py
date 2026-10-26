@@ -178,9 +178,24 @@ class RhythmAnalyzeTest(RhythmBase):
 
     def test_worker_invalid_output(self):
         for out in ("not json", json.dumps(dict(RHYTHM_OUT, beats=[3.0, 1.0])), json.dumps([1]),
-                    json.dumps(dict(RHYTHM_OUT, bpm=float("nan")))):
+                    json.dumps(dict(RHYTHM_OUT, bpm=float("nan"))),
+                    json.dumps(dict(RHYTHM_OUT, bpm_estimates=[{"bpm": float("nan"), "share": 1}])),
+                    json.dumps(dict(RHYTHM_OUT, bpm_estimates=[{"bpm": 120, "share": float("inf")}])),
+                    json.dumps(dict(RHYTHM_OUT, bpm_estimates=[5])),
+                    json.dumps(dict(RHYTHM_OUT, tool={"name": {"x": float("nan")}})),
+                    json.dumps(dict(RHYTHM_OUT, extra=[float("-inf")])),
+                    json.dumps(dict(RHYTHM_OUT, extra=1e400)),
+                    json.dumps(RHYTHM_OUT).replace('"duration": 6.0', '"duration": 1' + "0" * 400),
+                    json.dumps(RHYTHM_OUT).replace('"sample_rate": 44100', '"sample_rate": 1' + "0" * 400)):
             self.fw.write(stdout=out)
             self.assert_rhythm_failed("failed", "invalid_output")
+
+    def test_null_chord_strength_accepted(self):
+        v = json.loads(json.dumps(RHYTHM_OUT))
+        v["chords"][0]["strength"] = None
+        v["warnings"] = ["chord_strength_unavailable: non-finite native strength; segment strength is null"]
+        self.assertIs(server.check_rhythm(v), v)
+        self.assertIsNone(server.check_rhythm(dict(v, chords=[dict(v["chords"][0], strength="x")])))
 
     def test_busy_when_team_lock_held(self):
         fd = os.open(os.path.join(self.env.root, ".analyze.lock"), os.O_CREAT | os.O_RDWR, 0o600)
@@ -273,6 +288,14 @@ class RhythmReadTest(RhythmBase):
         self.assertEqual(self.c.json("GET", "/report/" + RID64)[1]["rhythm"],
                          {"status": "failed", "code": "invalid_result"})
         self.assertEqual(self.tl("layer=beats")[1]["error"]["code"], "invalid_result")
+        # valid JSON that is not a valid rhythm result: ASR report stays 200, rhythm marked invalid
+        for bad in (json.dumps(RHYTHM_OUT).replace('"duration": 6.0', '"duration": 1' + "0" * 400),
+                    json.dumps(dict(RHYTHM_OUT, bpm_estimates=[{"bpm": float("nan"), "share": 1}]))):
+            with open(self.rhythm_file(), "w") as f:
+                f.write(bad)
+            st, b = self.c.json("GET", "/report/" + RID64)
+            self.assertEqual((st, b["x"], b["rhythm"]), (200, 1.5, {"status": "failed", "code": "invalid_result"}))
+            self.assertEqual(self.tl("layer=chords")[1]["error"]["code"], "invalid_result")
 
     def test_status_reports_availability(self):
         st, b = self.c.json("GET", "/status")

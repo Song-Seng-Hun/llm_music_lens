@@ -10,8 +10,7 @@ Choices:
   carries nothing above 8 kHz; that does not matter for beats, key or chroma below 5 kHz.
 - bpm / beats / bpm_confidence: RhythmExtractor2013 method "multifeature". Its confidence is native,
   uncalibrated, on a 0..~5.32 scale (Essentia: >3.5 means very likely correct, <1.5 low).
-- key: KeyExtractor profile "bgate" (Essentia's default; profiles derived from annotated pop/rock
-  recordings, the closest fit to the team's pop/K-pop material among the built-in profiles).
+- key: KeyExtractor profile "bgate" (Essentia's default; fit to real music not measured here).
 - chords: HPCP (12 bins) + ChordsDetection (hop 2048, window 2 s), consecutive identical labels merged.
   Major/minor triads only; reliability "low_reference".
 - downbeats: Essentia has no native downbeat tracker; reported as {"status":"not_provided"}.
@@ -138,12 +137,18 @@ def analyze(path):
             essentia.array(np.array(pcps, dtype=np.float32)))
         step = HOP / float(RATE)
         cur = None
+        bad_strength = False
         for i, (lab, s) in enumerate(zip(labels, strengths)):
             t = min(i * step, duration)
             s = float(s)
-            s = s if math.isfinite(s) else 0.0
+            if not math.isfinite(s):
+                s = None
+                bad_strength = True
             if cur is not None and cur["label"] == lab:
-                cur["_s"] += s
+                if s is None or cur["_s"] is None:
+                    cur["_s"] = None
+                else:
+                    cur["_s"] += s
                 cur["_n"] += 1
                 continue
             if cur is not None:
@@ -153,7 +158,10 @@ def analyze(path):
         if cur is not None:
             chords.append(cur)
         chords = [{"start": r3(c["start"]), "end": r3(c["end"]), "label": c["label"],
-                   "strength": round(c["_s"] / c["_n"], 3)} for c in chords if c["end"] > c["start"]]
+                   "strength": None if c["_s"] is None else round(c["_s"] / c["_n"], 3)}
+                  for c in chords if c["end"] > c["start"]]
+        if bad_strength:
+            warnings.append("chord_strength_unavailable: non-finite native strength; segment strength is null")
     if not chords:
         warnings.append("no_chords: no chord segment was produced")
 

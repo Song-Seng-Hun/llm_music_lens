@@ -146,8 +146,9 @@ Worker output: `bpm`, `bpm_confidence` (RhythmExtractor2013 multifeature, native
 identical neighbours merged), `chords_reliability: "low_reference"`, `sample_rate` 44100 (input resampled from 16 kHz
 because RhythmExtractor2013 assumes 44.1 kHz), `duration`, `tool` (name, version, `essentia_version`), `warnings`
 (`short_audio` < 10 s, `near_silent`, `no_beats`, `low_bpm_confidence` < 1.5, `low_key_strength` < 0.5,
-`no_chords`). Audio under 1 s is refused (`too_short`). Key profile `bgate` is Essentia's default; its profiles were
-derived from annotated pop/rock recordings, the closest built-in fit for pop/K-pop.
+`no_chords`). Audio under 1 s is refused (`too_short`). Key profile `bgate` is Essentia's default; how well it fits the team's
+material is not measured. A non-finite native chord strength becomes `strength: null` plus warning
+`chord_strength_unavailable`. Worker output and stored files are refused if any number is non-finite or too large.
 
 Accuracy (honest notes): every value is a DSP estimate. On synthetic tests a 120 BPM click track gives 120.0 BPM
 (confidence ~3.9) and a C-Am-F-G triad loop gives C major with the four chords at the right 2 s boundaries; real
