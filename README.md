@@ -117,10 +117,13 @@ running after that is not killed: its receipt becomes `unknown` with `error_code
 are logged (`receipt_unknown`, `reason: stop`) and kept, as after a crash. The LaunchAgent template sets
 `ExitTimeOut` 660, but on this Mac (macOS 27, 2026-10-26) `launchctl print` shows `exit timeout = 60` for the
 installed agent, while values under 60 in Apple's own jobs are kept: launchd appears to cap it at 60 s (inferred,
-not proven). So under launchd a job still running 60 s after SIGTERM is SIGKILLed with the server, not drained.
-That stays fail-closed: at the next start every receipt still `running` becomes `unknown` (no retry), and the
-`ml` team-job lock is an flock that the OS releases when the process dies. Restart only when no analyze is
-running if its result matters (check `receipts.log` or the `api.log` `analyze_exit` events).
+not proven). Treat the reported 60 s as a possible launchd stop budget; a 630 s drain is not guaranteed. Kill
+timing and descendant termination have not been tested. The API may exit while `ml` or its inference children
+remain. Retained `running` receipts become `unknown` on restart and never authorize an automatic retry. The flock
+releases when its holding process exits; server exit or lock release alone does not prove all analysis processes
+ended. Before cleanup, follow the existing owner-verification rule for the job and its descendants. Restart only
+when no analyze is running if its result matters (`analyze_exit` in `api.log` precedes the final receipt and
+cleanup, so it alone does not prove the pipeline is idle).
 
 ## Interpretations and deviations from v0.6 (safer reading)
 
