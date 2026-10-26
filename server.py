@@ -908,7 +908,7 @@ def check_rhythm(v):
         for e in est:
             if not isinstance(e, dict) or not _num(e.get("bpm"), 0, 1000) or not _num(e.get("share"), 0, 1):
                 return None
-        if not _rhythm_v2_ok(v, dur) or not _rhythm_v21_ok(v):
+        if not _rhythm_v2_ok(v, dur) or not _rhythm_v21_ok(v) or not _rhythm_v22_ok(v):
             return None
         if "worker_sha256" in v and not (isinstance(v["worker_sha256"], str) and RE_HEX64.match(v["worker_sha256"])):
             return None
@@ -986,6 +986,35 @@ def _rhythm_v21_ok(v):
     return n > 0 and d["beat_onset_median"] is not None and d["mid_onset_median"] is not None
 
 
+TC_KEYS = {"done": {"status", "model", "model_sha256", "bpm", "local_bpm_median", "local_bpm_min", "local_bpm_max",
+                    "local_count", "top", "note"},
+           "unavailable": {"status", "reason"}, "failed": {"status", "code"}}
+TC_BPM = (30, 300)
+TC_MAX_LOCAL = 10000  # worker 0.2.2: one patch per ~5.9 s, ~100 for 600 s
+RE_CODE = re.compile(r"\A[a-z][a-z0-9_]{0,63}\Z")  # e.g. sha256_mismatch
+
+
+def _rhythm_v22_ok(v):
+    """tempo_cnn (worker 0.2.2); absent in older files, valid when present. Exact key set per status."""
+    if "tempo_cnn" not in v:
+        return True
+    d = v["tempo_cnn"]
+    if not isinstance(d, dict) or d.get("status") not in TC_KEYS or set(d) != TC_KEYS[d["status"]]:
+        return False
+    if d["status"] != "done":
+        c = d["reason" if d["status"] == "unavailable" else "code"]
+        return isinstance(c, str) and bool(RE_CODE.match(c))
+    n, top = d["local_count"], d["top"]
+    if not (_short_str(d["model"], 64) and isinstance(d["model_sha256"], str) and RE_HEX64.match(d["model_sha256"])
+            and _short_str(d["note"], 200) and isinstance(n, int) and not isinstance(n, bool)
+            and 1 <= n <= TC_MAX_LOCAL and isinstance(top, list) and 1 <= len(top) <= 3
+            and all(_num(d[k], *TC_BPM) for k in ("bpm", "local_bpm_median", "local_bpm_min", "local_bpm_max"))
+            and d["local_bpm_min"] <= d["local_bpm_median"] <= d["local_bpm_max"]):
+        return False
+    return all(isinstance(t, dict) and set(t) == {"bpm", "prob"} and _num(t["bpm"], *TC_BPM)
+               and _num(t["prob"], 0, 1) for t in top)
+
+
 def confidence_band(c):
     """Bands documented by Essentia BeatTrackerMultiFeature: [0,1) very low, [1,1.5] low, (1.5,3.5] good, >3.5."""
     if c < 1:
@@ -998,13 +1027,13 @@ def confidence_band(c):
 def rhythm_summary(v):
     """Compact view for analyze and /report; beats and chord rows stay in the stored file (/timeline).
     Fields from worker 0.2.0 (bpm_alternatives[_note], key_sections, key_change_count, chords_grid) and 0.2.1
-    (double_tempo_evidence[_note]) are null when the stored file predates them."""
+    (double_tempo_evidence[_note]) and 0.2.2 (tempo_cnn) are null when the stored file predates them."""
     return {"status": "done", "bpm": v["bpm"], "bpm_confidence": v["bpm_confidence"],
             "bpm_confidence_band": confidence_band(v["bpm_confidence"]),
             "bpm_confidence_scale": v.get("bpm_confidence_scale"), "bpm_estimates": v.get("bpm_estimates", []),
             "bpm_alternatives": v.get("bpm_alternatives"), "bpm_alternatives_note": v.get("bpm_alternatives_note"),
             "double_tempo_evidence": v.get("double_tempo_evidence"),
-            "double_tempo_evidence_note": v.get("double_tempo_evidence_note"),
+            "double_tempo_evidence_note": v.get("double_tempo_evidence_note"), "tempo_cnn": v.get("tempo_cnn"),
             "key": v["key"], "key_sections": v.get("key_sections"), "key_change_count": v.get("key_change_count"),
             "beat_count": len(v["beats"]), "chord_segment_count": len(v["chords"]),
             "chords_grid": v.get("chords_grid"), "chords_reliability": v.get("chords_reliability"),

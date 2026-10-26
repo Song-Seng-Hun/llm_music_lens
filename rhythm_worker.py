@@ -1,6 +1,10 @@
-"""Music Lens LAN API optional rhythm layer worker (pure DSP, Essentia 2.1-beta6-dev, no models, no network).
+"""Music Lens LAN API optional rhythm layer worker (Essentia 2.1-beta6-dev DSP plus one pinned local TempoCNN model,
+no network).
 
 Usage: <essentia python> -I rhythm_worker.py WAV
+       <essentia python> -I rhythm_worker.py --tempo-cnn-model /abs/model.pb WAV   (tests and measurement only; the
+       server always passes WAV alone. The SHA-256 pin is not overridable, so the option can only select a
+       byte-identical copy or make tempo_cnn unavailable.)
 WAV is the server's already-validated canonical file (PCM mono 16 kHz s16, 0 < duration <= 600 s).
 stdout: one JSON object. Error: exit 1, one JSON line {"error":{"code","message"}} on stderr.
 
@@ -30,17 +34,31 @@ Choices:
   beat pair (gap 0.12..1.5 s): 30 ms absorbs tracker jitter plus the one-frame flux lag, and stays far below the
   shortest half-beat (144 ms at 208 BPM), so beat and midpoint windows never overlap. If the true tempo is double,
   strong onsets should fall at the midpoints too.
+- tempo_cnn (learned estimate, uncalibrated; bpm untouched): the pinned deeptemp-k16-3 TempoCNN model, loaded only
+  after the file is verified (regular file opened with O_NOFOLLOW, <= 64 MiB, SHA-256 equal to the pin); otherwise
+  {"status":"unavailable","reason"} and the rest runs as before. Input: the 16 kHz source resampled to 11025 Hz
+  (Essentia Resample, the model's inference rate). TempoCNN (aggregation "majority") gives the global BPM and one
+  BPM per ~11.9 s patch (hop ~5.9 s; audio under ~12 s gives no patch); TensorflowPredictTempoCNN on the same
+  audio and model gives each patch's 256-class softmax. Verified on synthetic audio (2026-10-26): predictions have
+  shape (patches, 256), rows sum to 1, and 30 + argmax(row) equals TempoCNN's local BPM for every patch, i.e.
+  class i = 30 + i BPM (30..285; the model json says "last ... 286"), while TempoCNN's localTempoProbabilities is
+  only the per-patch maximum (shape (patches,)), so `top` comes from the mean of the softmax rows. The worker
+  re-checks that argmax relation on every run. Any exception -> {"status":"failed","code"}; never fails the worker.
+  Residual: the file could change between hashing and the Essentia load (same trust as the worker file itself).
 """
+import errno
+import hashlib
 import json
 import math
 import os
 import resource
 import signal
+import stat
 import statistics
 import sys
 import wave
 
-TOOL = {"name": "music-lens-rhythm-worker", "version": "0.2.1"}
+TOOL = {"name": "music-lens-rhythm-worker", "version": "0.2.2"}
 SRC_RATE = 16000
 RATE = 44100
 MAX_SECONDS = 600.0
@@ -67,6 +85,15 @@ DTE_MIN_PAIRS = 7  # ~8 beats
 DTE_MIN_BEAT_MEDIAN = 1e-3  # of the envelope maximum; below this the ratio is null (ratio therefore <= 1000)
 DTE_GAP = (0.12, 1.5)  # beat pairs outside this gap (s) are skipped (tracker range 40..208 BPM is 0.29..1.5 s)
 DTE_NOTE = "diagnostic only, uncalibrated, untested on real songs; do not pick a tempo from it alone"
+TEMPO_CNN_MODEL = "/Users/songseunghun/tools/music-lens/models/tempocnn/deeptemp-k16-3.pb"
+TEMPO_CNN_SHA256 = "21c328332a221695dd6e8572728c617373064df882e8f81da6d88dc3a821e3b3"
+TEMPO_CNN_NAME = "deeptemp-k16-3"
+TEMPO_CNN_RATE = 11025
+TEMPO_CNN_CLASSES = 256
+TEMPO_CNN_MIN_BPM = 30  # class i = 30 + i BPM
+TEMPO_CNN_MAX_BYTES = 64 * 1024 * 1024
+TEMPO_CNN_TOP = 3
+TEMPO_CNN_NOTE = "learned estimate, uncalibrated on team songs; compare with bpm and bpm_alternatives"
 
 
 class Fail(Exception):
@@ -236,6 +263,82 @@ def double_tempo_evidence(env, hop_s, beats, half=DTE_WINDOW):
              "mid_strong_threshold": DTE_STRONG, "pairs": pairs}, warn)
 
 
+def verify_model(path, expected=TEMPO_CNN_SHA256, cap=TEMPO_CNN_MAX_BYTES):
+    """None when path is a regular file (not a symlink, not a FIFO), <= cap bytes, whose SHA-256 is `expected`;
+    otherwise a short reason code."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except (FileNotFoundError, NotADirectoryError):
+        return "model_missing"
+    except OSError as e:
+        return "not_regular_file" if e.errno in (errno.ELOOP, errno.EISDIR) else "model_unreadable"
+    h = hashlib.sha256()
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            os.close(fd)
+            return "not_regular_file"
+        with os.fdopen(fd, "rb") as f:
+            if st.st_size > cap:
+                return "model_too_large"
+            n = 0
+            for chunk in iter(lambda: f.read(65536), b""):
+                n += len(chunk)
+                if n > cap:
+                    return "model_too_large"
+                h.update(chunk)
+    except OSError:
+        return "model_unreadable"
+    return None if h.hexdigest() == expected else "sha256_mismatch"
+
+
+def tempo_cnn_summary(global_bpm, local_bpms, preds, sha256=TEMPO_CNN_SHA256):
+    """global_bpm: TempoCNN global BPM; local_bpms: its per-patch BPMs; preds: TensorflowPredictTempoCNN softmax rows
+    (lists of TEMPO_CNN_CLASSES floats) for the same audio. Plain lists in, the tempo_cnn dict out."""
+    n = len(local_bpms)
+    if n == 0:
+        return {"status": "failed", "code": "too_short"}
+    nums = [global_bpm] + list(local_bpms) + [p for row in preds for p in row]
+    if not all(math.isfinite(float(x)) for x in nums):
+        return {"status": "failed", "code": "non_finite"}
+    if len(preds) != n or any(len(row) != TEMPO_CNN_CLASSES for row in preds):
+        return {"status": "failed", "code": "inconsistent_output"}
+    hi = TEMPO_CNN_MIN_BPM + TEMPO_CNN_CLASSES - 1
+    for b, row in zip(local_bpms, preds):
+        if abs(float(b) - (TEMPO_CNN_MIN_BPM + max(range(len(row)), key=row.__getitem__))) > 0.5:
+            return {"status": "failed", "code": "inconsistent_output"}
+    if not TEMPO_CNN_MIN_BPM <= global_bpm <= hi:
+        return {"status": "failed", "code": "inconsistent_output"}
+    mean = [sum(col) / float(n) for col in zip(*preds)]
+    top = sorted(range(len(mean)), key=lambda i: (-mean[i], i))[:TEMPO_CNN_TOP]
+    loc = [float(b) for b in local_bpms]
+    return {"status": "done", "model": TEMPO_CNN_NAME, "model_sha256": sha256, "bpm": round(float(global_bpm), 2),
+            "local_bpm_median": round(statistics.median(loc), 2), "local_bpm_min": round(min(loc), 2),
+            "local_bpm_max": round(max(loc), 2), "local_count": n,
+            "top": [{"bpm": float(TEMPO_CNN_MIN_BPM + i), "prob": round(min(1.0, max(0.0, mean[i])), 3)}
+                    for i in top],
+            "note": TEMPO_CNN_NOTE}
+
+
+def tempo_cnn(x16, model):
+    """tempo_cnn dict for the 16 kHz source; never raises."""
+    reason = verify_model(model)
+    if reason:
+        return {"status": "unavailable", "reason": reason}
+    try:
+        import essentia.standard as es
+        import numpy as np
+        a = es.Resample(inputSampleRate=SRC_RATE, outputSampleRate=TEMPO_CNN_RATE, quality=1)(x16)
+        a = np.ascontiguousarray(a, dtype=np.float32)
+        g, local, _ = es.TempoCNN(graphFilename=model, aggregationMethod="majority")(a)
+        preds = np.asarray(es.TensorflowPredictTempoCNN(graphFilename=model)(a), dtype=np.float64)
+        rows = preds.tolist() if preds.size else []
+        return tempo_cnn_summary(float(g), [float(b) for b in local], rows)
+    except Exception as e:  # missing TensorFlow algorithms, graph load or inference error
+        return {"status": "failed", "code": "dependency_missing" if isinstance(e, (ImportError, AttributeError))
+                else "inference_error"}
+
+
 def onset_envelope(audio):
     """Normalized (0..1) half-rectified L1 spectral flux per ONSET_HOP frame; frame i centred at i*ONSET_HOP."""
     import essentia.standard as es
@@ -266,7 +369,7 @@ def read_wav(path):
     return x, len(x) / float(SRC_RATE)
 
 
-def analyze(path):
+def analyze(path, model=TEMPO_CNN_MODEL):
     import essentia
     import essentia.standard as es
     import numpy as np
@@ -302,6 +405,7 @@ def analyze(path):
     dte, dte_warn = double_tempo_evidence(onset_envelope(audio), ONSET_HOP / float(RATE), beats)
     if dte_warn:
         warnings.append(dte_warn)
+    tc = tempo_cnn(x16, model)
 
     tonic, scale, kstrength = es.KeyExtractor(profileType=KEY_PROFILE, sampleRate=RATE, frameSize=FRAME,
                                               hopSize=HOP)(audio)
@@ -361,6 +465,7 @@ def analyze(path):
         "beats": beats,
         "double_tempo_evidence": dte,
         "double_tempo_evidence_note": DTE_NOTE,
+        "tempo_cnn": tc,
         "downbeats": {"status": "not_provided", "reason": "Essentia has no native downbeat tracker"},
         "key": {"tonic": str(tonic), "scale": str(scale), "strength": round(kstrength, 3), "profile": KEY_PROFILE},
         "key_sections": key_sections,
@@ -381,8 +486,11 @@ def analyze(path):
 
 
 def main(argv):
+    model = TEMPO_CNN_MODEL
+    if len(argv) == 4 and argv[1] == "--tempo-cnn-model" and os.path.isabs(argv[2]):
+        model, argv = argv[2], [argv[0], argv[3]]
     if len(argv) != 2 or not os.path.isabs(argv[1]):
-        fail_out("invalid_argument", "usage: rhythm_worker.py /absolute/path.wav")
+        fail_out("invalid_argument", "usage: rhythm_worker.py [--tempo-cnn-model /abs/model.pb] /absolute/path.wav")
     signal.signal(signal.SIGALRM, on_alarm)
     signal.alarm(WALL_SECONDS)
     try:
@@ -390,7 +498,7 @@ def main(argv):
     except (ValueError, OSError):
         pass
     try:
-        out = analyze(argv[1])
+        out = analyze(argv[1], model)
     except Fail as e:
         fail_out(e.code, e.message)
     except ImportError as e:

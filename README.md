@@ -13,7 +13,7 @@ Nothing here is installed. No LaunchAgent, firewall rule, certificate or key is 
 | File | Purpose |
 | --- | --- |
 | `server.py` | The server: config, en0/en1 address discovery, TLS 1.2+, strict framing, HMAC auth, durable nonce and receipt logs, pipeline gate, staging, afconvert, strict WAV check, hard-link promotion, `ml` calls by argv, error mapping, cleanup, logs |
-| `rhythm_worker.py` | Optional rhythm layer worker (Essentia DSP, no models): BPM (+ half/double), beats, key (+ 20 s sections), beat-grid chords. Runs under the Essentia python, never in the listener |
+| `rhythm_worker.py` | Optional rhythm layer worker (Essentia DSP plus one pinned local TempoCNN model): BPM (+ half/double, + learned TempoCNN estimate), beats, key (+ 20 s sections), beat-grid chords. Runs under the Essentia python, never in the listener |
 | `limit_exec.py` | Sets RLIMIT_CPU 60 s / FSIZE 24 MiB / NOFILE 32, then `execv /usr/bin/afconvert -f WAVE -d LEI16@16000 -c 1 src dst` |
 | `sign.py` | Shared canonical-string and HMAC helper (server, tests, Python clients) |
 | `sign_vector.mjs` | Reference Node signer; prints or checks the fixed vector (`tests/vectors.json`) |
@@ -138,12 +138,13 @@ API:
   data with `stored: false`. The files are not pruned automatically (about 30 KB per 10 minutes of audio).
 - `GET /report/<id>` adds a `rhythm` summary (`status`, `bpm`, `bpm_confidence`, `bpm_confidence_band`,
   `bpm_estimates`, `bpm_alternatives`, `bpm_alternatives_note`, `double_tempo_evidence`,
-  `double_tempo_evidence_note`, `key`, `key_sections`, `key_change_count`,
+  `double_tempo_evidence_note`, `tempo_cnn`, `key`, `key_sections`, `key_change_count`,
   `beat_count`, `chord_segment_count`, `chords_grid`, `downbeats`, `duration`, `tool`, `warnings`) when a stored file
   exists, re-serializing the native JSON (number formatting may change). Files stored by worker 0.1.0 lack the
   0.2.0 fields and still load; the summary then has `bpm_alternatives`, `bpm_alternatives_note`, `key_sections`,
   `key_change_count` and `chords_grid` set to `null` (they are not recomputed; old chord rows stay frame-level).
-  Files from 0.1.0 and 0.2.0 likewise give `double_tempo_evidence` and `double_tempo_evidence_note` as `null`. A damaged file gives `rhythm: {"status":"failed","code":"invalid_result"}`.
+  Files from 0.1.0 and 0.2.0 likewise give `double_tempo_evidence` and `double_tempo_evidence_note` as `null`, and
+  files from before 0.2.2 give `tempo_cnn: null`. A damaged file gives `rhythm: {"status":"failed","code":"invalid_result"}`.
   No file: native bytes unchanged.
 - `GET /timeline/<id>?layer=beats|chords` is served by the server from the stored file with the native rules:
   `start`/`end` 0..600 (default 0 and 600, `end >= start`), rows overlapping the range, `limit` 1..200 (default 100),
@@ -157,10 +158,10 @@ API:
 `very_low` [0, 1), `low` [1, 1.5], `good` (1.5, 3.5] (Essentia: about 80% AMLt), `excellent` above 3.5. It is
 Essentia's guide, not a calibration on the team's music.
 
-Worker output (worker 0.2.1): `bpm`, `bpm_confidence` (RhythmExtractor2013 multifeature, native 0..~5.32,
+Worker output (worker 0.2.2): `bpm`, `bpm_confidence` (RhythmExtractor2013 multifeature, native 0..~5.32,
 uncalibrated), `bpm_estimates` (top 5 shares), `bpm_alternatives` (`[bpm/2, bpm*2]`, 2 decimals, only values within
 40..300; empty when bpm is 0) with `bpm_alternatives_note`, `double_tempo_evidence` with
-`double_tempo_evidence_note` (diagnostic, see below), `beats` (s, ms rounding),
+`double_tempo_evidence_note` (diagnostic, see below), `tempo_cnn` (learned estimate, see below), `beats` (s, ms rounding),
 `downbeats: {"status":"not_provided"}`, `key` (`tonic`, `scale`, `strength`, `profile: "bgate"`), `key_sections`
 (rows `{start, end, tonic, scale, strength}`, see below), `key_change_count` (sections - 1), `key_section_window`
 (20), `chords` (see below), `chords_grid` (`beat` or `frame`), `chord_frame_segment_count` (frame-level segment
@@ -191,7 +192,9 @@ Accuracy (honest notes): every value is a DSP estimate. On synthetic tests a 120
 (confidence ~3.9) and a C-Am-F-G triad loop gives C major with the four chords at the right 2 s boundaries; real
 music has not been measured. Confidence and strengths are native and uncalibrated. Chords are major/minor triads
 only, a low-reliability reference, not a transcription. There are no downbeats, bars or time signature. A 600 s
-synthetic file (C-Am-F-G loop) took about 6.8 s and ~0.97-0.99 GB peak RSS on this Mac (worker 0.2.1; 0.2.0 on
+synthetic file (C-Am-F-G loop) took about 7.65 s and ~1.10 GB peak RSS on this Mac with worker 0.2.2 and the
+model present (3 runs; the same worker with the model unavailable: 6.8 s, 0.97-0.99 GB, equal to worker 0.2.1, so
+TempoCNN adds about +0.85 s wall / +1.45 s CPU and +0.12 GB peak RSS). Earlier: worker 0.2.1 6.8 s; 0.2.0 on
 the same file: 6.3 s, 0.99 GB).
 
 - Tempo octave: the metrical level is ambiguous. On one real song (216 s, published tempo 220) the tracker said
@@ -220,6 +223,35 @@ the same file: 6.3 s, 0.99 GB).
   on the same 8 songs (87-220 BPM, published charts): run them with `--rhythm` and compare the values for the five
   right ones (87-170) with the three halved ones (185, 200, 220). Only a clear, consistent separation there would
   justify proposing a threshold, in a later version.
+- `tempo_cnn` (worker 0.2.2) is a second, learned tempo estimate next to the DSP one; it changes neither `bpm` nor
+  `bpm_alternatives`, and the rhythm `status` does not depend on it. Never pick a tempo from one source alone.
+  Model: TempoCNN `deeptemp-k16-3` (Schreiber & Mueller, SMC 2019; Essentia model by Pablo Alonso, version 1,
+  2020-08-04), source https://essentia.upf.edu/models/tempo/tempocnn/deeptemp-k16-3.pb, SHA-256
+  `21c328332a221695dd6e8572728c617373064df882e8f81da6d88dc3a821e3b3`, expected at
+  `/Users/songseunghun/tools/music-lens/models/tempocnn/deeptemp-k16-3.pb` (path and hash are constants in the
+  worker; the model json sits beside it). Training data per the model json: Extended Ballroom, LMDTempo and
+  MTGTempo (3826 30 s, 3611 30 s and 1158 2 min excerpts). License: the json has no license field; Essentia models
+  are published under their own terms, so check them before any non-team use (no specific license is verified here).
+  Before loading, the worker opens the file with O_NOFOLLOW (a symlink, directory or FIFO is refused), caps it at
+  64 MiB and compares its SHA-256 with the pin; otherwise `{"status":"unavailable","reason":...}` (`model_missing`,
+  `not_regular_file`, `model_unreadable`, `model_too_large`, `sha256_mismatch`) and everything else is computed as
+  before. A load or inference error gives `{"status":"failed","code":...}` (`inference_error`,
+  `dependency_missing`, `non_finite`, `inconsistent_output`, or `too_short` for audio under ~12 s, which holds no
+  model patch); the worker never fails because of it. The file could still change between hashing and loading (the
+  same trust as the worker file). Input: the 16 kHz source resampled to 11025 Hz (Essentia `Resample`). TempoCNN
+  (`majority` aggregation) gives `bpm` and one BPM per ~11.9 s patch (hop ~5.9 s): `local_bpm_median`, `_min`,
+  `_max`, `local_count`; `top` holds up to 3 `{bpm, prob}` classes of the mean softmax over all patches, from
+  `TensorflowPredictTempoCNN` on the same audio and model. Verified here: the softmax has shape (patches, 256), rows
+  sum to 1, and 30 + argmax equals TempoCNN's local BPM in every patch, so class i = 30 + i BPM (30..285; the json
+  text says "the last one ... 286", which is one off for 256 classes); TempoCNN's own `localTempoProbabilities` is
+  only each patch's maximum, not the distribution. The worker re-checks the argmax relation on every run
+  (`inconsistent_output`). Plus `model`, `model_sha256`, `note` ("learned estimate, uncalibrated on team songs;
+  compare with bpm and bpm_alternatives"). Synthetic numbers (worker 0.2.2; `bpm` / `tempo_cnn.bpm` / top 3): click
+  120 30 s 120.0 / 120 / 120 .817, 121 .171, 161 .003; C-Am-F-G loop 30 s 120.0 / 120 / 120 .742, 121 .244, 60 .003;
+  modulation 60 s 120.02 / 120 / 120 .786, 121 .2, 116 .003; kick100 100.04 / 100 / 100 .813, 150 .125, 149 .018;
+  kick100mid (effective 200 BPM pulse) 100.04 / 100 / 100 .863, 101 .025, 99 .014; 600 s loop 120.0 / 120 (local
+  120-121, 99 patches). So on the midpoint-kick track the model also chose 100, not 200: it is not a fix for the
+  halving above by itself. Real songs: not measured; the team will compare it on the same 8 songs.
 - Key sections are a DSP estimate on nominal 20 s windows (a final tail under 10 s is merged, so the last window can
   approach 30 s). Window resolution is not a measured error bound: a boundary lands on a window edge, and a window
   straddling a change can report a blended or third key. Synthetic test: C major 0-30 s then

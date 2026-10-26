@@ -120,6 +120,42 @@ def bad_v21():
     return out
 
 
+TC_DONE = {"status": "done", "model": "deeptemp-k16-3", "model_sha256": rw.TEMPO_CNN_SHA256, "bpm": 120.0,
+           "local_bpm_median": 120.0, "local_bpm_min": 118.0, "local_bpm_max": 121.0, "local_count": 4,
+           "top": [{"bpm": 120.0, "prob": 0.817}, {"bpm": 121.0, "prob": 0.171}, {"bpm": 161.0, "prob": 0.003}],
+           "note": "learned estimate, uncalibrated"}
+TC_UNAVAILABLE = {"status": "unavailable", "reason": "model_missing"}
+TC_FAILED = {"status": "failed", "code": "inference_error"}
+RHYTHM_OUT_V22 = dict(RHYTHM_OUT_V21, tempo_cnn=TC_DONE)
+V22_SUMMARY_KEYS = ("tempo_cnn",)
+
+
+def bad_v22():
+    """Worker-0.2.2 tempo_cnn values that must be refused."""
+    out = []
+    top = TC_DONE["top"]
+    for over in ({"bpm": float("nan")}, {"bpm": 29.9}, {"bpm": 301}, {"bpm": "120"}, {"bpm": None},
+                 {"local_bpm_median": 1e9}, {"local_bpm_min": 125.0}, {"local_bpm_max": 119.0},
+                 {"local_count": 0}, {"local_count": 1.0}, {"local_count": True}, {"local_count": 10 ** 6},
+                 {"top": []}, {"top": top + [top[0]]}, {"top": [dict(top[0], prob=1.01)]},
+                 {"top": [dict(top[0], prob=-0.1)]}, {"top": [dict(top[0], bpm=20.0)]},
+                 {"top": [dict(top[0], extra=1)]}, {"top": [{"bpm": 120.0}]}, {"top": [120.0]}, {"top": {"bpm": 1}},
+                 {"model_sha256": "AB" * 32}, {"model_sha256": "ab" * 31}, {"model_sha256": None},
+                 {"model": ""}, {"model": "x" * 65}, {"note": "a\nb"}, {"note": "x" * 201}, {"status": "Done"},
+                 {"extra": 1}):
+        out.append(json.dumps(dict(RHYTHM_OUT_V22, tempo_cnn=dict(TC_DONE, **over))))
+    d = dict(TC_DONE)
+    del d["top"]
+    out.append(json.dumps(dict(RHYTHM_OUT_V22, tempo_cnn=d)))
+    for tc in (None, [1], "done", {}, {"status": "unavailable"}, dict(TC_UNAVAILABLE, code="x"),
+               {"status": "unavailable", "reason": "Model missing"}, {"status": "unavailable", "reason": ""},
+               {"status": "unavailable", "reason": "x" * 65},
+               {"status": "unavailable", "reason": "9lives"}, {"status": "unavailable", "reason": "a-b"}, {"status": "failed", "reason": "inference_error"},
+               {"status": "failed", "code": 5}, dict(TC_FAILED, bpm=120.0), {"status": "running"}):
+        out.append(json.dumps(dict(RHYTHM_OUT_V22, tempo_cnn=tc)))
+    return out
+
+
 class FakeWorker:
     def __init__(self, env):
         self.dir = os.path.join(env.dir, "fakerhythm")
@@ -202,7 +238,7 @@ class RhythmAnalyzeTest(RhythmBase):
         self.assertEqual((r["bpm_confidence_band"], r["bpm_estimates"]), ("excellent", RHYTHM_OUT["bpm_estimates"]))
         self.assertNotIn("beats", r)  # rows only via /timeline
         self.assertNotIn("chords", r)
-        for k in V2_SUMMARY_KEYS + V21_SUMMARY_KEYS:  # the default fake output has the worker-0.1.0 shape
+        for k in V2_SUMMARY_KEYS + V21_SUMMARY_KEYS + V22_SUMMARY_KEYS:  # default fake output: worker-0.1.0 shape
             self.assertIsNone(r[k], k)
         calls = self.fw.calls()
         self.assertEqual(len(calls), 1)
@@ -294,6 +330,27 @@ class RhythmAnalyzeTest(RhythmBase):
             self.fw.write(stdout=out)
             self.assert_rhythm_failed("failed", "invalid_output")
 
+    def test_v22_tempo_cnn_in_summary(self):
+        for tc in (TC_DONE, TC_UNAVAILABLE, TC_FAILED):
+            self.fw.write(stdout=json.dumps(dict(RHYTHM_OUT_V22, tempo_cnn=tc)))
+            r = self.c.json("POST", AR, WAV)[1]["rhythm"]
+            self.assertEqual((r["status"], r["cache_hit"]), ("done", False), r)
+            self.assertEqual(r["tempo_cnn"], tc)
+            self.assertEqual((r["bpm"], r["bpm_alternatives"]), (120.0, [60.0, 240.0]))  # no tempo decision
+            self.assertEqual(r["double_tempo_evidence"], DTE)
+            self.assertEqual(self.c.json("GET", "/report/" + RID64)[1]["rhythm"]["tempo_cnn"], tc)
+            os.unlink(self.rhythm_file())  # next round recomputes
+        # the tempo_cnn status never changes the rhythm status
+        v = json.loads(json.dumps(dict(RHYTHM_OUT_V22, tempo_cnn=dict(TC_DONE, top=[TC_DONE["top"][0]], local_count=1,
+                                                                   bpm=30, local_bpm_min=30, local_bpm_median=30,
+                                                                   local_bpm_max=300))))
+        self.assertIs(server.check_rhythm(v), v)  # bounds inclusive, one top row allowed
+
+    def test_v22_invalid_output(self):
+        for out in bad_v22():
+            self.fw.write(stdout=out)
+            self.assert_rhythm_failed("failed", "invalid_output")
+
     def test_v21_null_ratio_needs_warning(self):
         v = json.loads(json.dumps(dict(RHYTHM_OUT_V21, double_tempo_evidence=DTE_NULL, warnings=[DTE_WARN])))
         self.assertIs(server.check_rhythm(v), v)
@@ -303,7 +360,7 @@ class RhythmAnalyzeTest(RhythmBase):
         self.assertIs(server.check_rhythm(v), v)
         v = json.loads(json.dumps(dict(RHYTHM_OUT_V21, double_tempo_evidence=dict(DTE, pairs=0))))
         self.assertIsNone(server.check_rhythm(v))  # a ratio needs pairs
-        for old in (RHYTHM_OUT, RHYTHM_OUT_V2):  # 0.1.0 / 0.2.0 shapes stay valid
+        for old in (RHYTHM_OUT, RHYTHM_OUT_V2, RHYTHM_OUT_V21):  # 0.1.0 / 0.2.0 / 0.2.1 shapes stay valid
             v = json.loads(json.dumps(old))
             self.assertIs(server.check_rhythm(v), v)
 
@@ -524,7 +581,11 @@ class RhythmReadTest(RhythmBase):
             f.write(json.dumps(RHYTHM_OUT_V21))
         r = self.c.json("GET", "/report/" + RID64)[1]["rhythm"]
         self.assertEqual(r["double_tempo_evidence"]["mid_to_beat_ratio"], 1.011)
-        for bad in bad_v2() + bad_v21():
+        self.assertIsNone(r["tempo_cnn"])  # 0.2.1 file: no tempo_cnn
+        with open(self.rhythm_file(), "w") as f:
+            f.write(json.dumps(RHYTHM_OUT_V22))
+        self.assertEqual(self.c.json("GET", "/report/" + RID64)[1]["rhythm"]["tempo_cnn"], TC_DONE)
+        for bad in bad_v2() + bad_v21() + bad_v22():
             with open(self.rhythm_file(), "w") as f:
                 f.write(bad)
             st, b = self.c.json("GET", "/report/" + RID64)
@@ -685,6 +746,69 @@ class WorkerLogicTest(unittest.TestCase):
         self.assertEqual(rw._pool([0.3, 0.1], hop, -0.02, 0.03), 0.3)
         self.assertEqual(rw._pool([0.3, 0.1], hop, 5.0, 0.03), 0.0)
 
+    def test_verify_model(self):
+        d = tempfile.mkdtemp(prefix="mltc-")
+        try:
+            good = os.path.join(d, "m.pb")
+            with open(good, "wb") as f:
+                f.write(b"model bytes")
+            h = sha(b"model bytes")
+            self.assertIsNone(rw.verify_model(good, h))
+            self.assertEqual(rw.verify_model(good), "sha256_mismatch")  # the real pin
+            self.assertEqual(rw.verify_model(good, "00" * 32), "sha256_mismatch")
+            self.assertEqual(rw.verify_model(good, h, cap=5), "model_too_large")
+            self.assertEqual(rw.verify_model(os.path.join(d, "nope.pb"), h), "model_missing")
+            self.assertEqual(rw.verify_model(os.path.join(good, "x"), h), "model_missing")  # parent not a dir
+            self.assertEqual(rw.verify_model(d, h), "not_regular_file")
+            link = os.path.join(d, "link.pb")
+            os.symlink(good, link)
+            self.assertEqual(rw.verify_model(link, h), "not_regular_file")  # O_NOFOLLOW
+            fifo = os.path.join(d, "fifo.pb")
+            os.mkfifo(fifo)
+            self.assertEqual(rw.verify_model(fifo, h), "not_regular_file")  # O_NONBLOCK: no hang
+            os.chmod(good, 0)
+            if os.geteuid() != 0:
+                self.assertEqual(rw.verify_model(good, h), "model_unreadable")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_tempo_cnn_summary(self):
+        def row(i, p=0.8, rest=None):
+            r = [0.0] * rw.TEMPO_CNN_CLASSES
+            r[i] = p
+            if rest is not None:
+                r[rest] = 1.0 - p
+            return r
+        preds = [row(90, 0.8, 91), row(90, 0.6, 120), row(91, 0.7, 90), row(90, 0.9, 0)]
+        d = rw.tempo_cnn_summary(120.0, [120.0, 120.0, 121.0, 120.0], preds)
+        self.assertEqual(set(d), server.TC_KEYS["done"])
+        self.assertEqual((d["status"], d["bpm"], d["local_count"]), ("done", 120.0, 4))
+        self.assertEqual((d["local_bpm_min"], d["local_bpm_median"], d["local_bpm_max"]), (120.0, 120.0, 121.0))
+        # mean over the 4 rows: class 90 (120 BPM) (0.8+0.6+0.3+0.9)/4, class 91 (0.2+0.7)/4, class 120 0.4/4, ...
+        self.assertEqual(d["top"], [{"bpm": 120.0, "prob": 0.65}, {"bpm": 121.0, "prob": 0.225},
+                                    {"bpm": 150.0, "prob": 0.1}])
+        self.assertEqual(d["model_sha256"], rw.TEMPO_CNN_SHA256)
+        v = json.loads(json.dumps(dict(RHYTHM_OUT_V21, tempo_cnn=d)))
+        self.assertIs(server.check_rhythm(v), v)
+        # class index -> BPM: index 0 = 30, index 255 = 285; ties in the mean go to the lower class
+        d = rw.tempo_cnn_summary(285.0, [285.0], [row(255, 0.6, 0)])
+        self.assertEqual(d["top"], [{"bpm": 285.0, "prob": 0.6}, {"bpm": 30.0, "prob": 0.4}, {"bpm": 31.0, "prob": 0.0}])
+        d = rw.tempo_cnn_summary(30.0, [30.0, 285.0], [row(0, 0.6, 255), row(255, 0.6, 0)])
+        self.assertEqual(d["top"], [{"bpm": 30.0, "prob": 0.5}, {"bpm": 285.0, "prob": 0.5}, {"bpm": 31.0, "prob": 0.0}])
+        self.assertEqual((d["local_bpm_min"], d["local_bpm_median"], d["local_bpm_max"]), (30.0, 157.5, 285.0))
+        self.assertEqual(rw.tempo_cnn_summary(0.0, [], []), {"status": "failed", "code": "too_short"})
+        self.assertEqual(rw.tempo_cnn_summary(float("nan"), [120.0], [row(90)]), {"status": "failed", "code": "non_finite"})
+        bad_row = row(90)
+        bad_row[3] = float("inf")
+        self.assertEqual(rw.tempo_cnn_summary(120.0, [120.0], [bad_row])["code"], "non_finite")
+        for g, loc, pr in ((120.0, [120.0], [row(90)[:255]]), (120.0, [120.0, 120.0], [row(90)]),
+                           (120.0, [121.0], [row(90)]),  # local BPM disagrees with 30 + argmax
+                           (0.0, [120.0], [row(90)]), (290.0, [120.0], [row(90)])):
+            self.assertEqual(rw.tempo_cnn_summary(g, loc, pr), {"status": "failed", "code": "inconsistent_output"})
+        for out in ({"status": "failed", "code": "too_short"}, {"status": "unavailable", "reason": "sha256_mismatch"}):
+            v = json.loads(json.dumps(dict(RHYTHM_OUT_V21, tempo_cnn=out)))
+            self.assertIs(server.check_rhythm(v), v)
+
     def test_beat_chords_vote_and_merge(self):
         step = 0.05
         # frame labels flip every 0.15 s (C C C G G G ...) with C stronger: frame merge gives many tiny segments
@@ -729,6 +853,18 @@ class WorkerLogicTest(unittest.TestCase):
         self.assertEqual([(c["start"], c["end"]) for c in segs], [(0.0, 1.0)])
 
 
+MODEL_PRESENT = os.path.isfile(rw.TEMPO_CNN_MODEL)
+
+
+def run_worker(wav, *opts):
+    p = subprocess.run([ESSENTIA_PY, "-I", WORKER] + list(opts) + [wav], stdout=subprocess.PIPE,
+                       stderr=subprocess.PIPE, timeout=300,
+                       env={"PATH": server.CHILD_ENV_PATH, "HOME": os.path.expanduser("~"), "LANG": "en_US.UTF-8",
+                            "TMPDIR": tempfile.gettempdir()})
+    assert p.returncode == 0, p.stderr
+    return json.loads(p.stdout.decode())
+
+
 @unittest.skipUnless(os.path.isfile(ESSENTIA_PY), "Essentia python missing")
 class RealWorkerTest(unittest.TestCase):
     @classmethod
@@ -740,11 +876,7 @@ class RealWorkerTest(unittest.TestCase):
             wav = os.path.join(cls.dir, kind + ".wav")
             subprocess.run([ESSENTIA_PY, "-I", SYNTH, kind, secs, wav], check=True, timeout=120)
             assert server.strict_wav_check(wav)
-            p = subprocess.run([ESSENTIA_PY, "-I", WORKER, wav], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               timeout=300, env={"PATH": server.CHILD_ENV_PATH, "HOME": os.path.expanduser("~"),
-                                                 "LANG": "en_US.UTF-8", "TMPDIR": tempfile.gettempdir()})
-            assert p.returncode == 0, p.stderr
-            cls.out[kind] = json.loads(p.stdout.decode())
+            cls.out[kind] = run_worker(wav)
 
     @classmethod
     def tearDownClass(cls):
@@ -757,7 +889,8 @@ class RealWorkerTest(unittest.TestCase):
             self.assertEqual((v["sample_rate"], v["chords_reliability"]), (44100, "low_reference"))
             self.assertIn(v["duration"], (30.0, 60.0))
             self.assertEqual(v["tool"]["essentia_version"], "2.1-beta6-dev")
-            self.assertEqual(v["tool"]["version"], "0.2.1")
+            self.assertEqual(v["tool"]["version"], "0.2.2")
+            self.assertEqual(v["tempo_cnn"]["status"], "done" if MODEL_PRESENT else "unavailable", v["tempo_cnn"])
             self.assertIsNotNone(v["double_tempo_evidence"]["mid_to_beat_ratio"])
             self.assertTrue(v["double_tempo_evidence_note"])
             self.assertEqual(v["key"]["profile"], "bgate")
@@ -773,6 +906,45 @@ class RealWorkerTest(unittest.TestCase):
         gaps = [b - a for a, b in zip(v["beats"], v["beats"][1:])]
         self.assertAlmostEqual(sorted(gaps)[len(gaps) // 2], 0.5, delta=0.02)
         self.assertEqual(v["bpm_alternatives"], [60.0, 240.0])
+
+    @unittest.skipUnless(MODEL_PRESENT, "TempoCNN model missing")
+    def test_tempo_cnn_click_120(self):
+        # measured (worker 0.2.2, 30 s): click 120 (top 120 .817 / 121 .171 / 161 .003), kick100 100, kick100mid 100
+        tc = self.out["click"]["tempo_cnn"]
+        self.assertAlmostEqual(tc["bpm"], 120.0, delta=2.0)
+        self.assertAlmostEqual(tc["top"][0]["bpm"], 120.0, delta=2.0)
+        self.assertEqual((tc["model"], tc["model_sha256"], tc["local_count"]),
+                         ("deeptemp-k16-3", rw.TEMPO_CNN_SHA256, 4))  # 30 s: patches of ~11.9 s every ~5.9 s
+        self.assertAlmostEqual(self.out["kick100"]["tempo_cnn"]["bpm"], 100.0, delta=2.0)
+        self.assertEqual(self.out["click"]["bpm_alternatives"], [60.0, 240.0])  # bpm fields untouched
+
+    def test_tempo_cnn_model_unavailable_rest_runs(self):
+        wav = os.path.join(self.dir, "click.wav")
+        other = os.path.join(self.dir, "other.pb")
+        shutil.copyfile(SYNTH, other)
+        link = os.path.join(self.dir, "link.pb")
+        os.symlink(rw.TEMPO_CNN_MODEL, link)
+        for model, reason in ((os.path.join(self.dir, "missing.pb"), "model_missing"), (other, "sha256_mismatch"),
+                              (link, "not_regular_file")):
+            v = run_worker(wav, "--tempo-cnn-model", model)
+            self.assertEqual(v["tempo_cnn"], {"status": "unavailable", "reason": reason})
+            self.assertIsNotNone(server.check_rhythm(v))
+            self.assertAlmostEqual(v["bpm"], 120.0, delta=2.0)
+            self.assertGreater(len(v["beats"]), 50)
+            self.assertTrue(v["key"]["tonic"])
+            self.assertTrue(v["chords"])
+            ref = dict(self.out["click"], tempo_cnn=v["tempo_cnn"])
+            self.assertEqual(v, ref)  # everything else identical to the run with the model
+
+    @unittest.skipUnless(MODEL_PRESENT, "TempoCNN model missing")
+    def test_tempo_cnn_short_audio_and_copy(self):
+        short = os.path.join(self.dir, "short.wav")
+        subprocess.run([ESSENTIA_PY, "-I", SYNTH, "click", "8", short], check=True, timeout=120)
+        self.assertEqual(run_worker(short)["tempo_cnn"], {"status": "failed", "code": "too_short"})  # < one patch
+        copy = os.path.join(self.dir, "copy.pb")  # a byte-identical copy passes the pin
+        shutil.copyfile(rw.TEMPO_CNN_MODEL, copy)
+        self.assertEqual(run_worker(os.path.join(self.dir, "click.wav"), "--tempo-cnn-model", copy)["tempo_cnn"],
+                         self.out["click"]["tempo_cnn"])
 
     def test_double_tempo_evidence_midpoint_hits(self):
         a, b = self.out["kick100"], self.out["kick100mid"]
@@ -824,7 +996,8 @@ class RealWorkerTest(unittest.TestCase):
         bad = os.path.join(self.dir, "bad.wav")
         with open(bad, "wb") as f:
             f.write(b"RIFF0000WAVEjunk")
-        for args in ([bad], ["rel.wav"], []):
+        for args in ([bad], ["rel.wav"], [], ["--tempo-cnn-model", "rel.pb", bad], ["--tempo-cnn-model", bad],
+                     ["--x", "/a.pb", bad]):
             p = subprocess.run([ESSENTIA_PY, "-I", WORKER] + args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                timeout=60)
             self.assertEqual(p.returncode, 1)
@@ -844,6 +1017,7 @@ class RealWorkerTest(unittest.TestCase):
                 self.assertEqual(st, 200, b)
                 self.assertEqual(b["rhythm"]["status"], "done", b["rhythm"])
                 self.assertIn(b["rhythm"]["key"]["tonic"], ("C", "A"))
+                self.assertEqual(b["rhythm"]["tempo_cnn"]["status"], "done" if MODEL_PRESENT else "unavailable")
             finally:
                 h.stop()
         finally:
