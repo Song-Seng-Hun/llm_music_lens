@@ -133,7 +133,10 @@ class RhythmAnalyzeTest(RhythmBase):
             self.assertEqual(b[k], v)  # ASR result untouched
         r = b["rhythm"]
         self.assertEqual((r["status"], r["cache_hit"], r["stored"]), ("done", False, True))
-        self.assertEqual((r["bpm"], r["beats"], r["key"]["tonic"]), (120.0, RHYTHM_OUT["beats"], "C"))
+        self.assertEqual((r["bpm"], r["key"]["tonic"], r["beat_count"], r["chord_segment_count"]), (120.0, "C", 7, 3))
+        self.assertEqual((r["bpm_confidence_band"], r["bpm_estimates"]), ("excellent", RHYTHM_OUT["bpm_estimates"]))
+        self.assertNotIn("beats", r)  # rows only via /timeline
+        self.assertNotIn("chords", r)
         calls = self.fw.calls()
         self.assertEqual(len(calls), 1)
         inbox_name = self.env.argv_log()[-1][1]
@@ -168,6 +171,7 @@ class RhythmAnalyzeTest(RhythmBase):
         self.assertEqual(st, 200)
         self.assertEqual((b["cache_hit"], b["rhythm"]["status"], b["rhythm"]["cache_hit"]), (True, "done", True))
         self.assertEqual(b["rhythm"]["bpm"], 120.0)
+        self.assertNotIn("beats", b["rhythm"])
         self.assertEqual(len(self.fw.calls()), 1)  # not recomputed
 
     def test_worker_failure_keeps_200(self):
@@ -189,6 +193,10 @@ class RhythmAnalyzeTest(RhythmBase):
                     json.dumps(RHYTHM_OUT).replace('"sample_rate": 44100', '"sample_rate": 1' + "0" * 400)):
             self.fw.write(stdout=out)
             self.assert_rhythm_failed("failed", "invalid_output")
+
+    def test_confidence_band_edges(self):
+        self.assertEqual([server.confidence_band(c) for c in (0, 0.99, 1, 1.5, 1.51, 3.5, 3.51, 5.32)],
+                         ["very_low", "very_low", "low", "low", "good", "good", "excellent", "excellent"])
 
     def test_null_chord_strength_accepted(self):
         v = json.loads(json.dumps(RHYTHM_OUT))

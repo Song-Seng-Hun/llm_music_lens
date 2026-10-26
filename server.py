@@ -892,9 +892,21 @@ def check_rhythm(v):
     return v
 
 
+def confidence_band(c):
+    """Bands documented by Essentia BeatTrackerMultiFeature: [0,1) very low, [1,1.5] low, (1.5,3.5] good, >3.5."""
+    if c < 1:
+        return "very_low"
+    if c <= 1.5:
+        return "low"
+    return "good" if c <= 3.5 else "excellent"
+
+
 def rhythm_summary(v):
+    """Compact view for analyze and /report; beats and chord rows stay in the stored file (/timeline)."""
     return {"status": "done", "bpm": v["bpm"], "bpm_confidence": v["bpm_confidence"],
-            "bpm_confidence_scale": v.get("bpm_confidence_scale"), "key": v["key"], "beat_count": len(v["beats"]),
+            "bpm_confidence_band": confidence_band(v["bpm_confidence"]),
+            "bpm_confidence_scale": v.get("bpm_confidence_scale"), "bpm_estimates": v.get("bpm_estimates", []),
+            "key": v["key"], "beat_count": len(v["beats"]),
             "chord_segment_count": len(v["chords"]), "chords_reliability": v.get("chords_reliability"),
             "downbeats": v["downbeats"], "duration": v["duration"], "tool": v["tool"], "warnings": v["warnings"]}
 
@@ -1049,7 +1061,7 @@ class App:
             return {"status": "failed", "code": "no_result_id"}
         state, stored = self.load_rhythm(result_id)
         if state == "ok":
-            return dict(stored, status="done", cache_hit=True, stored=True)
+            return dict(rhythm_summary(stored), cache_hit=True, stored=True)
         if self.stopping:
             return {"status": "failed", "code": "shutting_down"}
         timeout = self.limits["rhythm_timeout"]
@@ -1082,7 +1094,7 @@ class App:
         except OSError:
             self.log.event("rhythm_store_failed", id=job.rid)
             stored = False
-        return dict(data, status="done", cache_hit=False, stored=stored)
+        return dict(rhythm_summary(data), cache_hit=False, stored=stored)
 
     def _spawn_rhythm(self, rh, wav, lock_fd, timeout):
         lim = self.limits

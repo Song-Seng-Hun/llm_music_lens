@@ -55,8 +55,8 @@ stdout is one JSON line: any HTTP response `{http_status, request_id, response}`
 - Server API, if the Mac owner enabled it: `POST /analyze?...&rhythm=1` (signed TARGET as sent). Not configured = 400 `rhythm_unavailable`, nothing ran. `/status` shows `rhythm.configured`; key absent = off.
 - Client flag is owned by Claude-Window and not shipped yet; until then do not hand-craft requests. Report the need to Claude-Window.
 - Reply stays 200 with ASR intact plus `rhythm.status` done, busy (team lock held, nothing ran), timeout or failed (`code`). Rhythm failure never means ASR failed; no automatic resend.
-- Fields: `bpm`, `bpm_confidence` (native 0..~5.32, uncalibrated), `beats`, `key` {tonic, scale, strength, profile bgate}, `chords` (major/minor triads, `low_reference`), `warnings`. `downbeats` = not_provided: no bars or time signature.
-- `report` adds a rhythm summary; `timeline --layer beats|chords` pages stored rows (same range/limit/cursor rules); 404 `rhythm_not_found` = never computed for that result.
+- analyze and report carry a summary only: `bpm`, `bpm_confidence` (native 0..~5.32) with `bpm_confidence_band` (very_low, low, good, excellent; Essentia's guide, not team calibration), `bpm_estimates` (check half/double tempo), `key` {tonic, scale, strength, profile bgate}, `beat_count`, `chord_segment_count`, `warnings`. Beat times and chords (major/minor triads, `low_reference`, strength may be null) come only from timeline. `downbeats` = not_provided: no bars or time signature.
+- `report` adds a rhythm summary; `timeline --layer beats|chords` pages stored rows (same range/limit/cursor rules); 404 `rhythm_not_found` = no stored rhythm file for that result (it may have been computed with `stored: false`).
 - DSP estimates, unvalidated on real music; tempo may be half or double. Say "estimate" when relaying.
 
 ## Rules

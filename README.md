@@ -118,7 +118,8 @@ API:
   file the `ml` wrapper locks) and passes the locked descriptor to the worker, so the lock lives as long as the worker.
   The worker also bounds itself (SIGALRM 330 s, RLIMIT_CPU 600 s) in case the server dies first.
 - Rhythm never fails the analyze: the reply stays 200 with the ASR fields unchanged plus `rhythm`:
-  - success: `{"status":"done","cache_hit":false,"stored":true, ...worker JSON}`;
+  - success: the same compact summary as `/report` plus `cache_hit` and `stored` (no beat or chord rows; page
+    them with `/timeline` `layer=beats|chords`);
   - `{"status":"busy","code":"busy"}` when the team lock is held (never waits);
   - `{"status":"timeout","code":"timeout"|"no_time_left"}`;
   - `{"status":"failed","code":...}` with the worker's error code (`invalid_audio`, `too_short`, `analysis_failed`,
@@ -128,7 +129,8 @@ API:
   `<root>/results-rhythm/<result_id>.json` (directory 0700). A later analyze with the same `result_id` (an `ml` cache
   hit, same audio and settings) reuses it (`cache_hit: true`) and runs nothing. A store failure still returns the
   data with `stored: false`. The files are not pruned automatically (about 30 KB per 10 minutes of audio).
-- `GET /report/<id>` adds a `rhythm` summary (`status`, `bpm`, `bpm_confidence`, `key`, `beat_count`,
+- `GET /report/<id>` adds a `rhythm` summary (`status`, `bpm`, `bpm_confidence`, `bpm_confidence_band`,
+  `bpm_estimates`, `key`, `beat_count`,
   `chord_segment_count`, `downbeats`, `duration`, `tool`, `warnings`) when a stored file exists, re-serializing the
   native JSON (number formatting may change). A damaged file gives `rhythm: {"status":"failed","code":"invalid_result"}`.
   No file: native bytes unchanged.
@@ -139,6 +141,10 @@ API:
   `words`/`emotion` still go to `ml timeline` unchanged.
 - `GET /status`: when the layer is configured, adds `rhythm: {configured, python_present, worker_present}` (file
   checks only, Essentia is not run). Not configured: native bytes unchanged (no `rhythm` key means unavailable).
+
+`bpm_confidence_band` maps the native confidence to Essentia's documented BeatTrackerMultiFeature bands:
+`very_low` [0, 1), `low` [1, 1.5], `good` (1.5, 3.5] (Essentia: about 80% AMLt), `excellent` above 3.5. It is
+Essentia's guide, not a calibration on the team's music.
 
 Worker output: `bpm`, `bpm_confidence` (RhythmExtractor2013 multifeature, native 0..~5.32, uncalibrated),
 `bpm_estimates` (top 5 shares), `beats` (s, ms rounding), `downbeats: {"status":"not_provided"}`, `key`
@@ -178,14 +184,15 @@ are no downbeats, bars or time signature. A 600 s synthetic file took about 6 s 
 
 SIGTERM (launchd unload) or SIGINT: the listeners close first, so no new connection is accepted, and no new job is
 launched (an upload that finishes now gets 503 `shutting_down`, nothing launched). The server then waits up to
-`stop_grace` (630 s: the 600 s analyze bound plus margin) for the running job and its waiting client. A job still
+`stop_grace` (630 s: the 600 s analyze bound plus margin) for the running job and its waiting client. An ASR job still
 running after that is not killed: its receipt becomes `unknown` with `error_code` `interrupted_by_stop`, its paths
 are logged (`receipt_unknown`, `reason: stop`) and kept, as after a crash. The LaunchAgent template sets
 `ExitTimeOut` 660, but on this Mac (macOS 27, 2026-10-26) `launchctl print` shows `exit timeout = 60` for the
 installed agent, while values under 60 in Apple's own jobs are kept: launchd appears to cap it at 60 s (inferred,
 not proven). Treat the reported 60 s as a possible launchd stop budget; a 630 s drain is not guaranteed. Kill
 timing and descendant termination have not been tested. The API may exit while `ml` or its inference children
-remain. Retained `running` receipts become `unknown` on restart and never authorize an automatic retry. The flock
+remain. Retained `running` receipts (ASR phase only; a rhythm-phase receipt is already `done`, see deviation 12) become
+`unknown` on restart and never authorize an automatic retry. The flock
 releases when its holding process exits; server exit or lock release alone does not prove all analysis processes
 ended. Before cleanup, follow the existing owner-verification rule for the job and its descendants. Restart only
 when no analyze is running if its result matters (`analyze_exit` in `api.log` precedes the final receipt and
