@@ -19,6 +19,9 @@
   <true/>
   <key>ThrottleInterval</key>
   <integer>60</integer>
+  <!-- SIGTERM drains the running analyze job (stop_grace 630 s = 600 s bound + margin); launchd SIGKILLs after this. -->
+  <key>ExitTimeOut</key>
+  <integer>660</integer>
   <key>ProcessType</key>
   <string>Background</string>
   <key>WorkingDirectory</key>

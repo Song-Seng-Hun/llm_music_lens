@@ -7,6 +7,7 @@ The listener loads no model; models load only inside each `ml analyze` job's sub
 Usage: server.py [--config PATH]   (default ~/.music-lens/api.json, mode 0600)
 """
 import argparse
+import errno
 import fcntl
 import hashlib
 import hmac
@@ -47,7 +48,7 @@ DEFAULT_LIMITS = {
     "header_deadline": 10.0, "upload_deadline": 60.0, "convert_timeout": 120.0, "handler_total": 800.0,
     "read_timeout": 30.0, "max_body": 64 * MiB, "disk_floor": 2 * 1024 * MiB, "ml_stdout": 8 * MiB,
     "response_max": 8 * MiB, "stderr_line": 4096, "convert_output": 4096, "log_bytes": 5 * MiB, "log_files": 3,
-    "send_timeout": 30.0,
+    "send_timeout": 30.0, "stop_grace": 630.0,
 }
 CONFIG_KEYS = {"bind", "port", "allow", "clients", "cert", "key", "ml", "root", "inbox", "limit_exec",
                "launchd_logs", "test_mode", "limits", "test_ready_file"}
@@ -83,6 +84,9 @@ ERRORS = {
     "insufficient_storage": (503, "Not enough free disk space"),
     "receipt_store_full": (503, "Receipt store full"),
     "storage_error": (503, "Durable storage failed; nothing launched"),
+    "outcome_unknown": (503, "Analysis may have run but its outcome could not be stored; "
+                             "read /receipt later and do not retry"),
+    "shutting_down": (503, "Server is stopping; nothing launched"),
     "timeout": (504, "Operation timed out"),
 }
 ML_400 = ("invalid_audio", "invalid_path", "invalid_id", "invalid_argument")
@@ -136,55 +140,148 @@ def fsync_dir(path):
         os.close(fd)
 
 
-def atomic_write_lines(path, lines):
+def _write_tmp(path, lines):
+    """Write `lines` to path.tmp completely and fsync it. Returns the tmp path."""
     tmp = path + ".tmp"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
     try:
-        data = "".join(json.dumps(x, separators=(",", ":")) + "\n" for x in lines).encode()
-        view = memoryview(data)
-        while view:
-            n = os.write(fd, view)
-            view = view[n:]
+        write_all(fd, "".join(json.dumps(x, separators=(",", ":")) + "\n" for x in lines).encode())
         full_fsync(fd)
     finally:
         os.close(fd)
-    os.replace(tmp, path)
+    return tmp
+
+
+def write_all(fd, data):
+    view = memoryview(data)
+    while view:
+        n = os.write(fd, view)
+        if n <= 0:
+            raise OSError(errno.EIO, "zero-length write")
+        view = view[n:]
+
+
+def atomic_write_lines(path, lines):
+    os.replace(_write_tmp(path, lines), path)
     fsync_dir(os.path.dirname(path))
 
 
-def read_json_lines(path):
-    out = []
+class JournalCorrupt(Exception):
+    pass
+
+
+def load_journal(path):
+    """Parse a JSON-lines journal. Returns (records, torn_tail).
+
+    Only the final line may be damaged (torn by a crash mid-append): it is truncated away and the file fsynced
+    before any new work. An unparsable line followed by any other line raises JournalCorrupt, because it may hide
+    a later acknowledged record; the owner must inspect the file."""
     try:
         with open(path, "rb") as f:
-            for raw in f:
-                try:
-                    v = json.loads(raw.decode("utf-8"))
-                except ValueError:
-                    continue  # torn last line after a crash
-                if isinstance(v, dict):
-                    out.append(v)
+            data = f.read()
     except FileNotFoundError:
-        pass
-    return out
+        return [], False
+    out, pos, good, bad = [], 0, 0, None
+    while pos < len(data):
+        nl = data.find(b"\n", pos)
+        end = len(data) if nl < 0 else nl + 1
+        v = None
+        if nl >= 0:
+            try:
+                v = json.loads(data[pos:nl].decode("utf-8"))
+            except ValueError:
+                v = None
+        if bad is not None:
+            raise JournalCorrupt("%s: unparsable record at byte %d is not the last line" % (path, bad))
+        if isinstance(v, dict):
+            out.append(v)
+            good = end
+        else:
+            bad = pos
+        pos = end
+    if bad is None:
+        return out, False
+    fd = os.open(path, os.O_WRONLY | os.O_NOFOLLOW)
+    try:
+        os.ftruncate(fd, good)
+        full_fsync(fd)
+    finally:
+        os.close(fd)
+    return out, True
 
 
 class AppendLog:
-    def __init__(self, path):
-        self.path = path
-        self.fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    """Append-only JSON-lines journal with a durable boundary `good` (bytes fully written and fsynced).
+
+    Any write/fsync failure poisons the log. Every later append or compaction first repairs it and raises if the
+    repair fails, so nothing is acknowledged on a poisoned log (fail closed). Repair truncates back to `good` and
+    fsyncs; if the descriptor no longer names the journal (or the file is shorter than `good`) it rebuilds the
+    journal from the owner's in-memory `snapshot()` instead."""
+
+    def __init__(self, path, snapshot):
+        self.path, self.snapshot = path, snapshot
+        self.fd = self._open()
+        self.good = os.fstat(self.fd).st_size
+        self.poisoned = None  # None | "append" (tail past good) | "rebind" (fd may name an unlinked inode)
+        self.closed = False
+
+    def _open(self):
+        return os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+
+    def _same_file(self):
+        try:
+            a, b = os.fstat(self.fd), os.stat(self.path)
+        except OSError:
+            return False
+        return (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino) and a.st_size >= self.good
+
+    def _ready(self):
+        if self.closed:
+            raise OSError(errno.EBADF, "journal closed")
+        if self.poisoned == "append" and self._same_file():
+            os.ftruncate(self.fd, self.good)
+            full_fsync(self.fd)
+            if os.fstat(self.fd).st_size != self.good:
+                raise OSError(errno.EIO, "journal repair did not reach the durable boundary")
+            self.poisoned = None
+        elif self.poisoned:
+            self.compact(self.snapshot())
 
     def append(self, obj):
+        self._ready()
         data = (json.dumps(obj, separators=(",", ":")) + "\n").encode()
-        n = os.write(self.fd, data)
-        if n != len(data):
-            raise OSError("short write")
-        full_fsync(self.fd)
+        try:
+            write_all(self.fd, data)
+            full_fsync(self.fd)
+        except OSError:
+            self.poisoned = "append"
+            raise
+        self.good += len(data)
 
-    def reopen(self):
-        os.close(self.fd)
-        self.fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    def compact(self, lines):
+        """One fail-closed transition: tmp+fsync, replace, fsync dir, rebind fd to the new inode, reset good."""
+        if self.closed:
+            raise OSError(errno.EBADF, "journal closed")
+        tmp = _write_tmp(self.path, lines)  # failure here leaves the journal and fd untouched
+        os.replace(tmp, self.path)
+        self.poisoned = "rebind"
+        fsync_dir(os.path.dirname(self.path))
+        fd = self._open()
+        try:
+            os.close(self.fd)
+        except OSError:
+            pass
+        self.fd = fd
+        a, b = os.fstat(fd), os.stat(self.path)
+        if (a.st_dev, a.st_ino) != (b.st_dev, b.st_ino):
+            raise OSError(errno.EIO, "journal descriptor does not name the journal")
+        self.good = a.st_size
+        self.poisoned = None
 
     def close(self):
+        if self.closed:
+            return
+        self.closed = True
         try:
             os.close(self.fd)
         except OSError:
@@ -197,13 +294,17 @@ class NonceStore:
     def __init__(self, path, cap, now):
         self.path, self.cap, self.lock = path, cap, threading.Lock()
         self.live = {}
-        for e in read_json_lines(path):
+        records, self.torn_tail = load_journal(path)
+        for e in records:
             c, n, x = e.get("c"), e.get("n"), e.get("e")
             if isinstance(c, str) and isinstance(n, str) and isinstance(x, int) and x >= now:
                 self.live[(c, n)] = max(x, self.live.get((c, n), 0))
-        atomic_write_lines(path, [{"c": c, "n": n, "e": x} for (c, n), x in self.live.items()])
+        atomic_write_lines(path, self._snapshot())
         self.lines = len(self.live)
-        self.log = AppendLog(path)
+        self.log = AppendLog(path, self._snapshot)
+
+    def _snapshot(self):
+        return [{"c": c, "n": n, "e": x} for (c, n), x in self.live.items()]
 
     def _purge(self, now):
         for k in [k for k, x in self.live.items() if x < now]:
@@ -219,23 +320,20 @@ class NonceStore:
                 if len(self.live) >= self.cap:
                     return "full"
             try:
+                if self.lines >= 2 * len(self.live) + 1000:
+                    self._purge(now)
+                    self.log.compact(self._snapshot())
+                    self.lines = len(self.live)
                 self.log.append({"c": client, "n": nonce, "e": expiry})
             except OSError:
-                return "storage"
+                return "storage"  # nothing admitted; the log stays poisoned until a repair succeeds
             self.live[(client, nonce)] = expiry
             self.lines += 1
-            if self.lines > 2 * len(self.live) + 1000:
-                self._purge(now)
-                try:
-                    atomic_write_lines(self.path, [{"c": c, "n": n, "e": e} for (c, n), e in self.live.items()])
-                    self.log.reopen()
-                    self.lines = len(self.live)
-                except OSError:
-                    pass
             return "ok"
 
     def close(self):
-        self.log.close()
+        with self.lock:
+            self.log.close()
 
 
 class ReceiptStore:
@@ -246,7 +344,8 @@ class ReceiptStore:
     def __init__(self, path, cap, days, now):
         self.path, self.cap, self.max_age, self.lock = path, cap, days * 86400, threading.Lock()
         self.items = {}
-        for e in read_json_lines(path):
+        records, self.torn_tail = load_journal(path)
+        for e in records:
             if isinstance(e.get("client"), str) and isinstance(e.get("request_id"), str):
                 self.items[(e["client"], e["request_id"])] = {k: e.get(k) for k in self.FIELDS}
         self.recovered = []
@@ -255,9 +354,20 @@ class ReceiptStore:
                 r["state"], r["updated"] = "unknown", int(now)
                 self.recovered.append(dict(r))
         self._prune(now)
-        atomic_write_lines(path, list(self.items.values()))
+        atomic_write_lines(path, self._snapshot())
         self.lines = len(self.items)
-        self.log = AppendLog(path)
+        self.log = AppendLog(path, self._snapshot)
+
+    def _snapshot(self):
+        return list(self.items.values())
+
+    def _write(self, r):
+        """Journal one record (compacting first when due). OSError propagates; memory is the caller's job."""
+        if self.lines >= 2 * len(self.items) + 1000:
+            self.log.compact(self._snapshot())
+            self.lines = len(self.items)
+        self.log.append(r)
+        self.lines += 1
 
     def _prune(self, now, need_room=False):
         final = sorted((r for r in self.items.values() if r["state"] in ("done", "failed")),
@@ -283,11 +393,10 @@ class ReceiptStore:
             r = {"client": client, "request_id": rid, "op": op, "state": "running", "http_status": None,
                  "result_id": None, "error_code": None, "upload_sha256": None, "created": int(now), "updated": int(now)}
             try:
-                self.log.append(r)
+                self._write(r)
             except OSError:
                 return "storage"
             self.items[(client, rid)] = r
-            self.lines += 1
             return "ok"
 
     def update(self, client, rid, now, **fields):
@@ -295,20 +404,38 @@ class ReceiptStore:
             r = dict(self.items[(client, rid)])
             r.update(fields)
             r["updated"] = int(now)
-            self.log.append(r)  # OSError propagates to the caller
+            self._write(r)  # OSError propagates to the caller; memory keeps the last durable record
             self.items[(client, rid)] = r
-            self.lines += 1
-            if self.lines > 2 * len(self.items) + 1000:
-                try:
-                    atomic_write_lines(self.path, list(self.items.values()))
-                    self.log.reopen()
-                    self.lines = len(self.items)
-                except OSError:
-                    pass
             return dict(r)
 
+    def _mark_unknown(self, key, now, code):
+        r = dict(self.items[key], state="unknown", updated=int(now), error_code=code)
+        self.items[key] = r  # unknown is the conservative state: a durable "running" also reads unknown at restart
+        try:
+            self._write(r)
+            return True
+        except OSError:
+            return False
+
+    def mark_unknown(self, client, rid, now, code):
+        """Running -> unknown in memory, then best-effort journal. Returns True if durable, None if not running."""
+        with self.lock:
+            r = self.items.get((client, rid))
+            if r is None or r["state"] != "running":
+                return None
+            return self._mark_unknown((client, rid), now, code)
+
+    def mark_running_unknown(self, now, code):
+        with self.lock:
+            out = []
+            for k in [k for k, r in self.items.items() if r["state"] == "running"]:
+                durable = self._mark_unknown(k, now, code)
+                out.append((dict(self.items[k]), durable))
+            return out
+
     def close(self):
-        self.log.close()
+        with self.lock:
+            self.log.close()
 
 
 # ---------------------------------------------------------------- config
@@ -661,6 +788,7 @@ class Job:
         self.client, self.rid, self.op, self.kind, self.src = client, rid, op, kind, src
         self.language, self.emotion_mode, self.name, self.upload_sha256 = language, emotion_mode, name, upload_sha256
         self.linked = False
+        self.ml_started = False  # set just before `ml analyze` is spawned
         self.done = threading.Event()
         self.status, self.body, self.raw = 500, None, None
 
@@ -685,6 +813,9 @@ class App:
         now = self.clock()
         self.nonces = NonceStore(self.api_dir + "/nonces.log", lim["nonce_cap"], now)
         self.receipts = ReceiptStore(self.api_dir + "/receipts.log", lim["receipt_cap"], lim["receipt_days"], now)
+        for name, st in (("nonces", self.nonces), ("receipts", self.receipts)):
+            if st.torn_tail:
+                self.log.event("journal_tail_truncated", journal=name)
         for r in self.receipts.recovered:
             # Crash leftover: outcome unknown; paths kept until the owner verifies the job and descendants ended.
             self.log.event("receipt_unknown", id=r["request_id"], client=r["client"],
@@ -698,6 +829,7 @@ class App:
         self.ssl_ctx = ctx
         self.allow_net = cfg["allow"]
         self.jobs = []
+        self.job_lock, self.stopping = threading.Lock(), False
 
     # connections
     def peer_allowed(self, ip):
@@ -717,11 +849,32 @@ class App:
         with self.conn_lock:
             self.conns -= 1
 
-    def close(self):
-        for j in list(self.jobs):
-            j.done.wait(60)
+    def close(self, grace=None):
+        """Graceful stop. Listeners must already be stopped. Refuse new launches, wait up to `grace` seconds
+        (default stop_grace: the 600 s analyze bound plus margin) for active jobs and connections, then mark
+        receipts still running as unknown (interrupted_by_stop, paths kept) and close the stores."""
+        grace = self.limits["stop_grace"] if grace is None else grace
+        with self.job_lock:
+            self.stopping = True
+        self.log.event("stopping", jobs=len(self.jobs))
+        end = time.monotonic() + grace
+        while time.monotonic() < end:
+            with self.conn_lock:
+                conns = self.conns
+            if not self.jobs and not conns:
+                break
+            time.sleep(0.05)
+        try:
+            marked = self.receipts.mark_running_unknown(self.clock(), "interrupted_by_stop")
+        except Exception:
+            marked = []
+            self.log.event("receipt_write_failed", id=None)
+        for r, durable in marked:
+            self.log.event("receipt_unknown", reason="stop", id=r["request_id"], client=r["client"], durable=durable,
+                           paths=[self.uploads + "/" + str(r["op"]) + "/", self.cfg["inbox"] + "/api-" + str(r["op"]) + ".wav"])
         self.nonces.close()
         self.receipts.close()
+        self.log.event("stopped", interrupted=len(marked))
         self.log.close()
 
     def child_env(self):
@@ -812,8 +965,16 @@ class App:
         try:
             self.receipts.update(job.client, job.rid, self.clock(), **rec)
         except Exception:
-            self.log.event("receipt_write_failed", id=job.rid)
-            status, body, raw = error_body("storage_error", request_id=job.rid) + (None,)
+            # After launch the outcome exists but is not recorded: never say "nothing launched".
+            code = "outcome_unknown" if job.ml_started else "storage_error"
+            self.log.event("receipt_write_failed", id=job.rid, launched=job.ml_started)
+            try:
+                durable = self.receipts.mark_unknown(job.client, job.rid, self.clock(), code)
+            except Exception:
+                durable = False
+            self.log.event("receipt_unknown", reason="final_write_failed", id=job.rid, client=job.client,
+                           durable=durable)
+            status, body, raw = error_body(code, request_id=job.rid) + (None,)
         self.cleanup(job.op, job.linked)
         self.gate.release()
         job.status, job.body, job.raw = status, body, raw
@@ -844,6 +1005,7 @@ class App:
         except FileExistsError:
             return fail("internal_error")
         job.linked = True
+        job.ml_started = True
         ok, data, code = self.run_ml(["analyze", dst_name, "--language", job.language, "--emotion-mode",
                                       job.emotion_mode], None)
         self.log.event("analyze_exit", id=job.rid, ok=ok, code=code)
@@ -853,7 +1015,7 @@ class App:
         native["request_id"], native["upload_sha256"], native["name"] = job.rid, job.upload_sha256, job.name
         rid = native.get("result_id")
         rid = rid if isinstance(rid, str) and RE_HEX64.match(rid) else None
-        return 200, native, None, {"state": "done", "http_status": 200, "result_id": rid}
+        return 200, native, None, {"state": "done", "http_status": 200, "result_id": rid, "error_code": None}
 
     def cleanup(self, op, linked):
         """Request-owned paths only, after owning processes exited. No directory sweeps."""
@@ -1204,10 +1366,15 @@ class Handler(BaseHTTPRequestHandler):
             except OSError:
                 self._prelaunch_fail(app, client, rid, op, "storage_error")
                 return
-            app.jobs.append(job)
-            th = threading.Thread(target=app.run_job, args=(job,), daemon=True)
-            th.start()
-            launched = True
+            with app.job_lock:  # no launch once a graceful stop has begun
+                if not app.stopping:
+                    app.jobs.append(job)
+                    th = threading.Thread(target=app.run_job, args=(job,), daemon=True)
+                    th.start()
+                    launched = True
+            if not launched:
+                self._prelaunch_fail(app, client, rid, op, "shutting_down")
+                return
         except Exception:
             if reserved and not launched:
                 self._prelaunch_fail(app, client, rid, op, "internal_error")
@@ -1349,6 +1516,9 @@ def main(argv=None):
     try:
         cfg = load_config(ns.config)
         app = App(cfg)
+    except JournalCorrupt as e:
+        sys.stderr.write("music-lens-lan-api: journal needs owner recovery: %s\n" % e)
+        return 2
     except (ConfigError, OSError, ssl.SSLError) as e:
         sys.stderr.write("music-lens-lan-api: config error: %s\n" % (e if isinstance(e, ConfigError) else type(e).__name__))
         return 2
@@ -1367,8 +1537,8 @@ def main(argv=None):
     signal.signal(signal.SIGINT, lambda *a: stopped.set())
     while not stopped.wait(1):
         pass
-    stop(listeners)
-    app.log.event("stopped")
+    stop(listeners)  # stop accepting first
+    app.close()  # drain active jobs up to stop_grace, then mark leftovers unknown
     return 0
 
 

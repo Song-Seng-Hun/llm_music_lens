@@ -80,7 +80,8 @@ Do these only after approving an always-on listener (RunAtLoad + KeepAlive, en0/
    cp ~/dev/music-lens-lan/examples/com.music-lens.lan-api.plist.template ~/Library/LaunchAgents/com.music-lens.lan-api.plist
    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.music-lens.lan-api.plist
    ```
-   To unload it: `launchctl bootout gui/$(id -u)/com.music-lens.lan-api`.
+   To unload it: `launchctl bootout gui/$(id -u)/com.music-lens.lan-api`. Unloading sends SIGTERM; see
+   "Stopping" below. A clean exit does not mean every analysis finished or was cancelled.
 
 ## Runtime layout (production)
 
@@ -91,6 +92,23 @@ Do these only after approving an always-on listener (RunAtLoad + KeepAlive, en0/
   start with the same limits.
 - When a run crashes, its receipts left `running` become `unknown` at the next start. Their paths are logged
   (`receipt_unknown`) and **kept**. Delete them only after you verify that the exact job and its descendants ended.
+- Journals fail closed. Every append is written completely and fsynced; the server tracks the last durable size.
+  After any write or fsync error the journal is poisoned: no later nonce or receipt is acknowledged (503
+  `storage_error`) until a repair truncates the file back to that size and fsyncs it. Compaction (tmp + fsync,
+  replace, directory fsync, reopen onto the new file) is one step; a failure after the replace also poisons the
+  journal, and repair rewrites it from memory before any new work.
+- At start, a torn last line (crash mid-append) is truncated away and fsynced, and `journal_tail_truncated` is
+  logged. An unparsable line anywhere else stops the server (exit 2, "journal needs owner recovery"), because it
+  may hide a later acknowledged record. Inspect the file by hand; do not delete it to get the server up.
+
+## Stopping
+
+SIGTERM (launchd unload) or SIGINT: the listeners close first, so no new connection is accepted, and no new job is
+launched (an upload that finishes now gets 503 `shutting_down`, nothing launched). The server then waits up to
+`stop_grace` (630 s: the 600 s analyze bound plus margin) for the running job and its waiting client. A job still
+running after that is not killed: its receipt becomes `unknown` with `error_code` `interrupted_by_stop`, its paths
+are logged (`receipt_unknown`, `reason: stop`) and kept, as after a crash. The LaunchAgent template sets
+`ExitTimeOut` 660 so launchd does not SIGKILL the server during this wait.
 
 ## Interpretations and deviations from v0.6 (safer reading)
 
@@ -107,11 +125,18 @@ Do these only after approving an always-on listener (RunAtLoad + KeepAlive, en0/
    timeout gives 408 `request_timeout`, an early EOF gives 400 `truncated_body`, a conversion wall timeout gives
    504 `timeout`, and a conversion failure gives 400 `invalid_audio`. A body-hash mismatch gives 401.
 5. A reused operation id gives 409 `operation_exists` with `request_id` (use `/receipt`). An id rejected before
-   reservation (`busy`, storage, size) gets no receipt (404), so it stays distinguishable from `unknown`.
+   reservation (`busy`, storage, size) gets no receipt (404).
 6. An address on a bind interface that falls outside `allow` is skipped and logged. The server exits (code 1) only
    when no address remains. A production `allow` must be a private /24 or narrower.
 7. Bind addresses are read once at start. An address change needs a restart (KeepAlive does not detect it).
 8. `server.py` adds its own directory to `sys.path` because `-I` drops it. It needs this to import `sign.py`.
 9. After an early error reply, the server reads at most 1 MiB or 0.5 s of unread body before it closes, so the
    reply is not lost to a TCP reset. A large body that keeps streaming after a `busy` reply can still reset the
-   connection, and the client then reports outcome unknown and reads `/receipt` (404 = never launched).
+   connection, and the client then reports outcome unknown and reads `/receipt`. A 404 there means only that no
+   retained receipt exists for this sender and id: it may never have been reserved, it may have expired or been
+   pruned (30 days / 2000), or it may belong to another client. It does not show that nothing ran, and it never
+   authorizes an automatic POST retry.
+10. If the final receipt write fails after `ml analyze` was launched, the reply is 503 `outcome_unknown` with
+   `request_id` ("may have run ... do not retry"), and the receipt reads `unknown` (`error_code`
+   `outcome_unknown`). The client treats it like a lost response: exit 4, poll `/receipt` later, never retry the
+   POST. `storage_error` ("nothing launched") is used only when nothing was launched.
