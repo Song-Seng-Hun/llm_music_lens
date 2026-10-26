@@ -126,8 +126,15 @@ API:
     `dependency_missing`, `timeout`), or `invalid_output`, `internal_error`, `server_misconfigured`,
     `lock_unavailable`, `no_result_id`, `shutting_down`.
 - The worker JSON is stored durably (tmp 0600 + F_FULLFSYNC, replace, directory fsync) as
-  `<root>/results-rhythm/<result_id>.json` (directory 0700). A later analyze with the same `result_id` (an `ml` cache
-  hit, same audio and settings) reuses it (`cache_hit: true`) and runs nothing. A store failure still returns the
+  `<root>/results-rhythm/<result_id>.json` (directory 0700), plus a server-added `worker_sha256`: the SHA-256 of the
+  configured worker file, hashed once when the server starts. A later analyze with the same `result_id` (an `ml` cache
+  hit, same audio and settings) reuses the stored file (`cache_hit: true`, nothing runs) only when its
+  `worker_sha256` equals the current one. Otherwise (another worker version, or a file from before this field, i.e.
+  every 0.1.0/0.2.0 file) the worker runs again and the file is replaced atomically on success; a busy, timeout or
+  failed re-run leaves the old file in place. Only the worker file is tracked: a changed Essentia python with the same
+  worker file is not detected (restart is needed after editing the worker in place). If the worker file cannot be
+  read at start, nothing is reused and the run fails as for a missing worker. `/report` and `/timeline` read whatever
+  is stored and never recompute. A store failure still returns the
   data with `stored: false`. The files are not pruned automatically (about 30 KB per 10 minutes of audio).
 - `GET /report/<id>` adds a `rhythm` summary (`status`, `bpm`, `bpm_confidence`, `bpm_confidence_band`,
   `bpm_estimates`, `bpm_alternatives`, `bpm_alternatives_note`, `double_tempo_evidence`,
@@ -143,8 +150,8 @@ API:
   `cursor` <= total, a ~43 KB page byte cap, `truncated` and `continuation`. Beats rows are `{"time"}`, chords rows
   `{start, end, label, strength}` (with `reliability: "low_reference"`). No stored file: 404 `rhythm_not_found`.
   `words`/`emotion` still go to `ml timeline` unchanged.
-- `GET /status`: when the layer is configured, adds `rhythm: {configured, python_present, worker_present}` (file
-  checks only, Essentia is not run). Not configured: native bytes unchanged (no `rhythm` key means unavailable).
+- `GET /status`: when the layer is configured, adds `rhythm: {configured, python_present, worker_present,
+  worker_sha256}` (file checks only, Essentia is not run; `worker_sha256` is the start-time hash, null if unreadable). Not configured: native bytes unchanged (no `rhythm` key means unavailable).
 
 `bpm_confidence_band` maps the native confidence to Essentia's documented BeatTrackerMultiFeature bands:
 `very_low` [0, 1), `low` [1, 1.5], `good` (1.5, 3.5] (Essentia: about 80% AMLt), `excellent` above 3.5. It is

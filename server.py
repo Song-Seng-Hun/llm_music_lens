@@ -813,6 +813,25 @@ def last_stderr_code(f, max_line):
 
 # ---------------------------------------------------------------- rhythm layer (optional)
 
+def file_sha256(path, cap=16 * 1024 * 1024):
+    """Hex SHA-256 of a regular file (<= cap bytes), or None when it cannot be read."""
+    h = hashlib.sha256()
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as f:
+            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+                return None
+            n = 0
+            for chunk in iter(lambda: f.read(65536), b""):
+                n += len(chunk)
+                if n > cap:
+                    return None
+                h.update(chunk)
+    except OSError:
+        return None
+    return h.hexdigest()
+
+
 def _num(v, lo, hi):
     return isinstance(v, (int, float)) and not isinstance(v, bool) and _finite(v) and lo <= v <= hi
 
@@ -890,6 +909,8 @@ def check_rhythm(v):
             if not isinstance(e, dict) or not _num(e.get("bpm"), 0, 1000) or not _num(e.get("share"), 0, 1):
                 return None
         if not _rhythm_v2_ok(v, dur) or not _rhythm_v21_ok(v):
+            return None
+        if "worker_sha256" in v and not (isinstance(v["worker_sha256"], str) and RE_HEX64.match(v["worker_sha256"])):
             return None
     except (TypeError, KeyError, OverflowError):
         return None
@@ -1066,8 +1087,10 @@ class App:
         self.job_lock, self.stopping = threading.Lock(), False
         self.rhythm_dir = root + "/" + RHYTHM_DIR
         self.team_lock = root + "/.analyze.lock"  # the same flock the `ml` wrapper takes for analyze
+        self.rhythm_worker_sha256 = None  # identity of the configured worker file, hashed once at start
         if cfg.get("rhythm"):
             self._rhythm_dir_ok(create=True)
+            self.rhythm_worker_sha256 = file_sha256(cfg["rhythm"]["worker"])
 
     # rhythm layer
     def _rhythm_dir_ok(self, create=False):
@@ -1132,15 +1155,18 @@ class App:
         if not rh:
             return None
         return {"configured": True, "python_present": os.path.isfile(rh["python"]),
-                "worker_present": os.path.isfile(rh["worker"])}
+                "worker_present": os.path.isfile(rh["worker"]), "worker_sha256": self.rhythm_worker_sha256}
 
     def run_rhythm(self, job, result_id, wav):
         """Rhythm layer after a successful analyze. Never raises; failure never fails the analyze."""
         if not result_id:
             return {"status": "failed", "code": "no_result_id"}
         state, stored = self.load_rhythm(result_id)
-        if state == "ok":
+        cur = self.rhythm_worker_sha256
+        if state == "ok" and cur is not None and stored.get("worker_sha256") == cur:
             return dict(rhythm_summary(stored), cache_hit=True, stored=True)
+        # absent (worker 0.1.0/0.2.0 files), different or unverifiable worker identity: recompute; the stored file
+        # is replaced only after a successful run, so /report and /timeline keep the old one until then
         if self.stopping:
             return {"status": "failed", "code": "shutting_down"}
         timeout = self.limits["rhythm_timeout"]
@@ -1167,6 +1193,8 @@ class App:
         if res.get("status") != "done":
             return res
         data = res.pop("_data")
+        if cur is not None:
+            data["worker_sha256"] = cur
         try:
             self.store_rhythm(result_id, data)
             stored = True
@@ -1205,7 +1233,7 @@ class App:
                 v = None
             if v is None:
                 return {"status": "failed", "code": "invalid_output"}
-            for k in ("status", "cache_hit", "stored", "code"):
+            for k in ("status", "cache_hit", "stored", "code", "worker_sha256"):  # server-owned fields
                 v.pop(k, None)
             return {"status": "done", "_data": v}
 

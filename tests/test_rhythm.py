@@ -153,6 +153,10 @@ class RhythmBase(Base):
         self.h = Harness(self.env, limits=self.limits, rhythm={"python": PY, "worker": self.fw.path})
         self.c = Client(self.env, self.h.port)
 
+    def worker_sha(self):
+        with open(self.fw.path, "rb") as f:
+            return sha(f.read())
+
     def rhythm_file(self, rid=RID64):
         return os.path.join(self.env.root, "results-rhythm", rid + ".json")
 
@@ -213,8 +217,8 @@ class RhythmAnalyzeTest(RhythmBase):
         p = self.rhythm_file()
         self.assertEqual(stat.S_IMODE(os.stat(p).st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(os.stat(os.path.dirname(p)).st_mode), 0o700)
-        with open(p) as f:
-            self.assertEqual(json.load(f), RHYTHM_OUT)
+        with open(p) as f:  # the server adds the worker file's identity
+            self.assertEqual(json.load(f), dict(RHYTHM_OUT, worker_sha256=self.worker_sha()))
         self.assertEqual(os.listdir(os.path.dirname(p)), [RID64 + ".json"])  # no tmp left
         rec = self.c.json("GET", "/receipt/" + h["X-ML-Nonce"])[1]
         self.assertEqual((rec["state"], rec["result_id"], rec["error_code"]), ("done", RID64, None))
@@ -266,7 +270,7 @@ class RhythmAnalyzeTest(RhythmBase):
         self.assertNotIn("chords", r)
         self.assertNotIn("chord_frame_segment_count", r)  # stored file only
         with open(self.rhythm_file()) as f:
-            self.assertEqual(json.load(f), RHYTHM_OUT_V2)
+            self.assertEqual(json.load(f), dict(RHYTHM_OUT_V2, worker_sha256=self.worker_sha()))
         r = self.c.json("GET", "/report/" + RID64)[1]["rhythm"]
         self.assertEqual((r["key_change_count"], r["key_sections"][1]["strength"]), (1, None))
 
@@ -341,6 +345,85 @@ class RhythmAnalyzeTest(RhythmBase):
         st, b = self.c.json("POST", AR, WAV, headers=h)  # the flag is part of the signed TARGET
         self.assertEqual(st, 401)
         self.assertEqual(self.env.argv_log(), [])
+
+
+class RhythmCacheIdentityTest(RhythmBase):
+    """Stored rhythm files are reused only when their worker_sha256 matches the worker file hashed at App start."""
+
+    def write_stored(self, v):
+        with open(self.rhythm_file(), "w") as f:
+            f.write(json.dumps(v))
+
+    def stored(self):
+        with open(self.rhythm_file()) as f:
+            return json.load(f)
+
+    def test_matching_hash_reused(self):
+        self.write_stored(dict(RHYTHM_OUT_V2, worker_sha256=self.worker_sha()))
+        r = self.c.json("POST", AR, WAV)[1]["rhythm"]
+        self.assertEqual((r["status"], r["cache_hit"], r["chords_grid"]), ("done", True, "beat"))
+        self.assertEqual(self.fw.calls(), [])
+        self.assertNotIn("worker_sha256", r)  # stored file and /status only
+
+    def test_mismatched_or_missing_hash_recomputed(self):
+        for old in (dict(RHYTHM_OUT_V2, worker_sha256="ab" * 32), RHYTHM_OUT_V2):  # other worker; 0.1/0.2.0 file
+            self.write_stored(old)
+            n = len(self.fw.calls())
+            r = self.c.json("POST", AR, WAV)[1]["rhythm"]
+            self.assertEqual((r["status"], r["cache_hit"], r["stored"]), ("done", False, True))
+            self.assertEqual(len(self.fw.calls()), n + 1)
+            self.assertEqual(self.stored(), dict(RHYTHM_OUT, worker_sha256=self.worker_sha()))  # replaced
+            self.assertEqual(os.listdir(os.path.dirname(self.rhythm_file())), [RID64 + ".json"])
+            self.assertTrue(self.c.json("POST", AR, WAV)[1]["rhythm"]["cache_hit"])  # now reused
+            self.assertEqual(len(self.fw.calls()), n + 1)
+
+    def test_failed_recompute_keeps_old_file(self):
+        self.write_stored(RHYTHM_OUT_V2)
+        self.fw.write(exit=1, stdout="", stderr_lines=['{"error":{"code":"analysis_failed","message":"x"}}'])
+        r = self.c.json("POST", AR, WAV)[1]["rhythm"]
+        self.assertEqual(r, {"status": "failed", "code": "analysis_failed"})
+        self.assertEqual(self.stored(), RHYTHM_OUT_V2)
+        self.assertEqual(self.c.json("GET", "/report/" + RID64)[1]["rhythm"]["chords_grid"], "beat")  # read as is
+
+    def test_worker_edited_between_runs(self):
+        self.assertFalse(self.c.json("POST", AR, WAV)[1]["rhythm"]["cache_hit"])
+        first = self.stored()["worker_sha256"]
+        with open(self.fw.path, "a") as f:
+            f.write("# edited\n")
+        self.assertTrue(self.c.json("POST", AR, WAV)[1]["rhythm"]["cache_hit"])  # hashed once at App start
+        self.assertEqual(len(self.fw.calls()), 1)
+        self.h.stop()
+        self.h = Harness(self.env, rhythm={"python": PY, "worker": self.fw.path})
+        self.c = Client(self.env, self.h.port)
+        r = self.c.json("POST", AR, WAV)[1]["rhythm"]
+        self.assertEqual((r["status"], r["cache_hit"]), ("done", False))
+        self.assertEqual(len(self.fw.calls()), 2)
+        self.assertNotEqual(self.stored()["worker_sha256"], first)
+        self.assertEqual(self.stored()["worker_sha256"], self.worker_sha())
+
+    def test_worker_cannot_set_its_own_hash(self):
+        self.fw.write(stdout=json.dumps(dict(RHYTHM_OUT, worker_sha256="cd" * 32)))
+        self.assertEqual(self.c.json("POST", AR, WAV)[1]["rhythm"]["status"], "done")
+        self.assertEqual(self.stored()["worker_sha256"], self.worker_sha())
+
+    def test_unreadable_worker_never_reuses(self):
+        self.write_stored(dict(RHYTHM_OUT_V2, worker_sha256=self.worker_sha()))
+        self.h.app.rhythm_worker_sha256 = None  # as if the worker file could not be read at start
+        r = self.c.json("POST", AR, WAV)[1]["rhythm"]
+        self.assertEqual(r["cache_hit"], False)
+        self.assertNotIn("worker_sha256", self.stored())
+        self.assertIsNone(server.file_sha256(os.path.join(self.env.dir, "nope.py")))
+        self.assertIsNone(server.file_sha256(self.env.dir))  # not a regular file
+
+    def test_bad_hash_value_invalid(self):
+        for bad in ("AB" * 32, "ab" * 31, "ab" * 32 + "\n", 5, None, ["ab" * 32]):
+            v = json.loads(json.dumps(dict(RHYTHM_OUT, worker_sha256=bad)))
+            self.assertIsNone(server.check_rhythm(v), bad)
+            self.write_stored(v)
+            self.assertEqual(self.c.json("GET", "/report/" + RID64)[1]["rhythm"],
+                             {"status": "failed", "code": "invalid_result"})
+        v = json.loads(json.dumps(dict(RHYTHM_OUT, worker_sha256="ab" * 32)))
+        self.assertIs(server.check_rhythm(v), v)
 
 
 class RhythmUnconfiguredTest(Base):
@@ -449,7 +532,8 @@ class RhythmReadTest(RhythmBase):
 
     def test_status_reports_availability(self):
         st, b = self.c.json("GET", "/status")
-        self.assertEqual(b["rhythm"], {"configured": True, "python_present": True, "worker_present": True})
+        self.assertEqual(b["rhythm"], {"configured": True, "python_present": True, "worker_present": True,
+                                       "worker_sha256": self.worker_sha()})
         self.assertEqual(b["tool_version"], "fake")
 
     def test_timeline_beats_paging(self):
