@@ -957,6 +957,7 @@ def _rhythm_v2_ok(v, dur):
 DTE_KEYS = {"method", "window_ms", "beat_onset_median", "mid_onset_median", "mid_to_beat_ratio",
             "mid_strong_fraction", "mid_strong_threshold", "pairs"}
 DTE_WARNING = "double_tempo_evidence_unavailable:"
+DTE_MIN_PAIRS, DTE_MIN_BEAT_MEDIAN = 7, 0.001  # the worker's gates: below either, ratio/fraction must be null
 
 
 def _opt_num(v, lo, hi):
@@ -965,7 +966,8 @@ def _opt_num(v, lo, hi):
 
 def _rhythm_v21_ok(v):
     """Fields added by worker 0.2.1 (double_tempo_evidence[_note]); absent in older files, valid when present.
-    A null ratio (or fraction) is allowed only together with a double_tempo_evidence_unavailable warning."""
+    A null ratio (or fraction) is allowed only together with a double_tempo_evidence_unavailable warning; a numeric
+    one needs pairs >= DTE_MIN_PAIRS and beat_onset_median >= DTE_MIN_BEAT_MEDIAN (the worker's gates)."""
     if "double_tempo_evidence_note" in v and not _short_str(v["double_tempo_evidence_note"], 200):
         return False
     if "double_tempo_evidence" not in v:
@@ -983,7 +985,8 @@ def _rhythm_v21_ok(v):
         return False
     if d["mid_to_beat_ratio"] is None:
         return any(w.startswith(DTE_WARNING) for w in v["warnings"])
-    return n > 0 and d["beat_onset_median"] is not None and d["mid_onset_median"] is not None
+    return (n >= DTE_MIN_PAIRS and d["beat_onset_median"] is not None and d["mid_onset_median"] is not None
+            and d["beat_onset_median"] >= DTE_MIN_BEAT_MEDIAN)
 
 
 TC_KEYS = {"done": {"status", "model", "model_sha256", "bpm", "local_bpm_median", "local_bpm_min", "local_bpm_max",

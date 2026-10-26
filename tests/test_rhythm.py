@@ -108,7 +108,8 @@ def bad_v21():
                  {"mid_onset_median": float("inf")}, {"pairs": -1}, {"pairs": 1.0}, {"pairs": True},
                  {"pairs": 10 ** 6}, {"window_ms": 0}, {"method": ""}, {"method": "x" * 65}, {"method": "a\nb"},
                  {"mid_strong_threshold": 2}, {"extra": 1}, {"mid_strong_fraction": None},
-                 {"mid_to_beat_ratio": None, "mid_strong_fraction": None}, {"beat_onset_median": None}):
+                 {"mid_to_beat_ratio": None, "mid_strong_fraction": None}, {"beat_onset_median": None},
+                 {"pairs": 1}, {"pairs": 6}, {"beat_onset_median": 0}, {"beat_onset_median": 0.0001}):
         out.append(json.dumps(dict(RHYTHM_OUT_V21, double_tempo_evidence=dict(DTE, **over))))
     d = dict(DTE)
     del d["pairs"]
@@ -360,6 +361,16 @@ class RhythmAnalyzeTest(RhythmBase):
         self.assertIs(server.check_rhythm(v), v)
         v = json.loads(json.dumps(dict(RHYTHM_OUT_V21, double_tempo_evidence=dict(DTE, pairs=0))))
         self.assertIsNone(server.check_rhythm(v))  # a ratio needs pairs
+        # numeric ratio/fraction only past the worker's gates (>= 7 pairs, beat median >= 0.001)
+        for over in ({"pairs": 1}, {"pairs": 6}, {"beat_onset_median": 0}, {"beat_onset_median": 0.0},
+                     {"beat_onset_median": 0.0001}):
+            v = json.loads(json.dumps(dict(RHYTHM_OUT_V21, double_tempo_evidence=dict(DTE, **over))))
+            self.assertIsNone(server.check_rhythm(v), over)
+            v = json.loads(json.dumps(dict(v, warnings=[DTE_WARN])))
+            self.assertIsNone(server.check_rhythm(v), over)  # a warning does not excuse a numeric ratio
+        v = json.loads(json.dumps(dict(RHYTHM_OUT_V21, double_tempo_evidence=dict(DTE, pairs=7,
+                                                                                 beat_onset_median=0.001))))
+        self.assertIs(server.check_rhythm(v), v)
         for old in (RHYTHM_OUT, RHYTHM_OUT_V2, RHYTHM_OUT_V21):  # 0.1.0 / 0.2.0 / 0.2.1 shapes stay valid
             v = json.loads(json.dumps(old))
             self.assertIs(server.check_rhythm(v), v)

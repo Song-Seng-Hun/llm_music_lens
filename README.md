@@ -133,7 +133,8 @@ API:
   every 0.1.0/0.2.0 file) the worker runs again and the file is replaced atomically on success; a busy, timeout or
   failed re-run leaves the old file in place. Only the worker file is tracked: a changed Essentia python with the same
   worker file is not detected (restart is needed after editing the worker in place). If the worker file cannot be
-  read at start, nothing is reused and the run fails as for a missing worker. `/report` and `/timeline` read whatever
+  read at start, its hash is null and nothing is reused (every rhythm request recomputes); that alone does not make
+  the run fail, the run then succeeds or fails on its own (a worker that is really missing fails at spawn). `/report` and `/timeline` read whatever
   is stored and never recompute. A store failure still returns the
   data with `stored: false`. The files are not pruned automatically (about 30 KB per 10 minutes of audio).
 - `GET /report/<id>` adds a `rhythm` summary (`status`, `bpm`, `bpm_confidence`, `bpm_confidence_band`,
@@ -219,7 +220,7 @@ the same file: 6.3 s, 0.99 GB).
   plus equally strong kicks exactly halfway (an effective 200 BPM pulse) gave 1.011 / 1.0, and the tracker still said
   100.04 BPM for both. The 120 BPM click track gave 0.0 / 0.0; the C-Am-F-G loop with a soft click gave 0.383 / 0.276
   (60 s modulation track 0.37 / 0.169, 600 s loop 0.357 / 0.242): sustained partials leave a steady flux floor of
-  about 0.2-0.3 of the maximum between onsets, so the baseline on real music will not be 0. The team will evaluate it
+  about 0.2-0.3 of the maximum between onsets, so the baseline on real music may be nonzero (real-song baseline unmeasured). The team will evaluate it
   on the same 8 songs (87-220 BPM, published charts): run them with `--rhythm` and compare the values for the five
   right ones (87-170) with the three halved ones (185, 200, 220). Only a clear, consistent separation there would
   justify proposing a threshold, in a later version.
