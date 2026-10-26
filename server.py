@@ -16,6 +16,7 @@ import ipaddress
 import json
 import logging
 import logging.handlers
+import math
 import os
 import re
 import secrets
@@ -48,10 +49,16 @@ DEFAULT_LIMITS = {
     "header_deadline": 10.0, "upload_deadline": 60.0, "convert_timeout": 120.0, "handler_total": 800.0,
     "read_timeout": 30.0, "max_body": 64 * MiB, "disk_floor": 2 * 1024 * MiB, "ml_stdout": 8 * MiB,
     "response_max": 8 * MiB, "stderr_line": 4096, "convert_output": 4096, "log_bytes": 5 * MiB, "log_files": 3,
-    "send_timeout": 30.0, "stop_grace": 630.0,
+    "send_timeout": 30.0, "stop_grace": 630.0, "rhythm_timeout": 300.0, "rhythm_output": 4 * MiB,
 }
 CONFIG_KEYS = {"bind", "port", "allow", "clients", "cert", "key", "ml", "root", "inbox", "limit_exec",
-               "launchd_logs", "test_mode", "limits", "test_ready_file"}
+               "launchd_logs", "test_mode", "limits", "test_ready_file", "rhythm"}
+RHYTHM_KEYS = {"python", "worker"}
+RHYTHM_DIR = "results-rhythm"  # under root: <result_id>.json, 0600, written atomically
+RHYTHM_LAYERS = ("beats", "chords")
+RHYTHM_MAX_BEATS = 5000
+RHYTHM_MAX_CHORDS = 20000
+MAX_WIRE_PAGE = 128 * 1024 // 3  # same page byte cap as the native timeline (MAX_WIRE // 3)
 PYTHON = "/usr/bin/python3"
 IPCONFIG = "/usr/sbin/ipconfig"
 CHILD_ENV_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
@@ -64,8 +71,10 @@ ERRORS = {
     "invalid_path": (400, "Invalid audio path"),
     "invalid_id": (400, "Invalid result id"),
     "invalid_argument": (400, "Invalid argument"),
+    "rhythm_unavailable": (400, "Rhythm analysis is not configured on this server"),
     "unauthorized": (401, None),
     "not_found": (404, "Not found"),
+    "rhythm_not_found": (404, "No rhythm data is stored for this result"),
     "method_not_allowed": (405, "Method not allowed"),
     "request_timeout": (408, "Upload exceeded its deadline"),
     "busy": (409, "Another analyze job is in progress"),
@@ -575,6 +584,25 @@ def load_config(path):
     if rf is not None and not test_mode:
         raise ConfigError("test_ready_file is test-only")
     cfg["test_ready_file"] = _abs(rf, "test_ready_file") if rf else None
+    cfg["rhythm"] = None
+    if "rhythm" in raw:  # optional layer; absent = unavailable
+        rh = raw["rhythm"]
+        if not isinstance(rh, dict) or set(rh) != RHYTHM_KEYS:
+            raise ConfigError("rhythm must be an object with exactly python and worker")
+        out = {}
+        for k in ("python", "worker"):
+            out[k] = _abs(rh[k], "rhythm " + k)
+            try:
+                st = os.stat(out[k])
+            except OSError:
+                raise ConfigError("rhythm " + k + " missing")
+            if not stat.S_ISREG(st.st_mode):
+                raise ConfigError("rhythm " + k + " is not a regular file")
+            if st.st_mode & 0o022:
+                raise ConfigError("rhythm " + k + " must not be group or world writable")
+        if not os.access(out["python"], os.X_OK):
+            raise ConfigError("rhythm python not executable")
+        cfg["rhythm"] = out
     return cfg
 
 
@@ -781,6 +809,84 @@ def last_stderr_code(f, max_line):
     return code if isinstance(code, str) and len(code) <= 64 else "internal_error"
 
 
+# ---------------------------------------------------------------- rhythm layer (optional)
+
+def _num(v, lo, hi):
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and lo <= v <= hi
+
+
+def _short_str(v, n=64):
+    return isinstance(v, str) and 0 < len(v) <= n and not any(unicodedata.category(c) == "Cc" for c in v)
+
+
+def check_rhythm(v):
+    """Shape check for worker output and stored rhythm files. Returns the dict or None."""
+    try:
+        if not isinstance(v, dict) or not _num(v.get("duration"), 0, 600.5):
+            return None
+        dur = v["duration"] + 0.5
+        if not (_num(v.get("bpm"), 0, 1000) and _num(v.get("bpm_confidence"), 0, 100)
+                and _num(v.get("sample_rate"), 1, 400000)):
+            return None
+        beats = v.get("beats")
+        if not isinstance(beats, list) or len(beats) > RHYTHM_MAX_BEATS or not all(_num(b, 0, dur) for b in beats):
+            return None
+        if any(b2 < b1 for b1, b2 in zip(beats, beats[1:])):
+            return None
+        chords = v.get("chords")
+        if not isinstance(chords, list) or len(chords) > RHYTHM_MAX_CHORDS:
+            return None
+        for c in chords:
+            if (not isinstance(c, dict) or not _num(c.get("start"), 0, dur) or not _num(c.get("end"), 0, dur)
+                    or c["end"] < c["start"] or not _short_str(c.get("label"), 16) or not _num(c.get("strength"), -1e6, 1e6)):
+                return None
+        key = v.get("key")
+        if not (isinstance(key, dict) and _short_str(key.get("tonic"), 8) and _short_str(key.get("scale"), 16)
+                and _num(key.get("strength"), -1e6, 1e6)):
+            return None
+        if not isinstance(v.get("downbeats"), dict) or not isinstance(v.get("tool"), dict):
+            return None
+        w = v.get("warnings")
+        if not isinstance(w, list) or len(w) > 32 or not all(_short_str(x, 200) for x in w):
+            return None
+        est = v.get("bpm_estimates", [])
+        if not isinstance(est, list) or len(est) > 16:
+            return None
+    except (TypeError, KeyError):
+        return None
+    return v
+
+
+def rhythm_summary(v):
+    return {"status": "done", "bpm": v["bpm"], "bpm_confidence": v["bpm_confidence"],
+            "bpm_confidence_scale": v.get("bpm_confidence_scale"), "key": v["key"], "beat_count": len(v["beats"]),
+            "chord_segment_count": len(v["chords"]), "chords_reliability": v.get("chords_reliability"),
+            "downbeats": v["downbeats"], "duration": v["duration"], "tool": v["tool"], "warnings": v["warnings"]}
+
+
+def rhythm_page(rid, v, layer, start, end, cursor, limit):
+    """Native timeline rules: rows overlapping [start, end], cursor <= total, <= limit rows under the page byte cap."""
+    if layer == "beats":
+        rows = [{"time": t} for t in v["beats"] if start <= t <= end]
+    else:
+        rows = [c for c in v["chords"] if c["end"] >= start and c["start"] <= end]
+    if cursor > len(rows):
+        raise HttpError("invalid_argument")
+    page, size = [], 2
+    for r in rows[cursor:cursor + limit]:
+        size += len(json.dumps(r, separators=(",", ":"))) + 1
+        if size > MAX_WIRE_PAGE:
+            break
+        page.append(r)
+    nxt = cursor + len(page)
+    out = {"result_id": rid, "clock": "seconds_from_audio_start", "range": {"start": start, "end": end},
+           "cursor": cursor, "total": len(rows), "layer": layer, layer: page, "layer_status": "done",
+           "warnings": v["warnings"], "truncated": nxt < len(rows), "continuation": nxt if nxt < len(rows) else None}
+    if layer == "chords":
+        out["reliability"] = v.get("chords_reliability", "low_reference")
+    return out
+
+
 # ---------------------------------------------------------------- application core
 
 class Job:
@@ -789,6 +895,8 @@ class Job:
         self.language, self.emotion_mode, self.name, self.upload_sha256 = language, emotion_mode, name, upload_sha256
         self.linked = False
         self.ml_started = False  # set just before `ml analyze` is spawned
+        self.rhythm = False  # opt-in rhythm layer (POST /analyze?rhythm=1)
+        self.deadline = None  # monotonic time by which the waiting handler gives up (handler_total)
         self.done = threading.Event()
         self.status, self.body, self.raw = 500, None, None
 
@@ -830,6 +938,150 @@ class App:
         self.allow_net = cfg["allow"]
         self.jobs = []
         self.job_lock, self.stopping = threading.Lock(), False
+        self.rhythm_dir = root + "/" + RHYTHM_DIR
+        self.team_lock = root + "/.analyze.lock"  # the same flock the `ml` wrapper takes for analyze
+        if cfg.get("rhythm"):
+            self._rhythm_dir_ok(create=True)
+
+    # rhythm layer
+    def _rhythm_dir_ok(self, create=False):
+        d = self.rhythm_dir
+        if create and not os.path.lexists(d):
+            os.mkdir(d, 0o700)
+        st = os.lstat(d)
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077:
+            raise ConfigError(d + " must be a 0700 directory owned by this user")
+
+    def rhythm_path(self, rid):
+        return self.rhythm_dir + "/" + rid + ".json"
+
+    def load_rhythm(self, rid):
+        """Returns (state, value): ("missing", None), ("invalid", None) or ("ok", dict)."""
+        if not RE_HEX64.match(rid or ""):
+            return "missing", None
+        try:
+            fd = os.open(self.rhythm_path(rid), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            return "missing", None
+        except OSError:
+            return "invalid", None
+        try:
+            with os.fdopen(fd, "rb") as f:
+                if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+                    return "invalid", None
+                data = f.read(self.limits["rhythm_output"] + 1)
+        except OSError:
+            return "invalid", None
+        if len(data) > self.limits["rhythm_output"]:
+            return "invalid", None
+        try:
+            v = check_rhythm(json.loads(data.decode("utf-8")))
+        except ValueError:
+            v = None
+        return ("ok", v) if v is not None else ("invalid", None)
+
+    def store_rhythm(self, rid, v):
+        """Atomic durable write: tmp (0600, O_EXCL) + full fsync, replace, directory fsync."""
+        self._rhythm_dir_ok(create=True)
+        path = self.rhythm_path(rid)
+        tmp = "%s.%s.tmp" % (path, secrets.token_hex(8))
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        try:
+            try:
+                write_all(fd, json.dumps(v, separators=(",", ":")).encode("utf-8"))
+                full_fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(tmp, path)
+        except OSError:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        fsync_dir(self.rhythm_dir)
+
+    def rhythm_status(self):
+        rh = self.cfg.get("rhythm")
+        if not rh:
+            return None
+        return {"configured": True, "python_present": os.path.isfile(rh["python"]),
+                "worker_present": os.path.isfile(rh["worker"])}
+
+    def run_rhythm(self, job, result_id, wav):
+        """Rhythm layer after a successful analyze. Never raises; failure never fails the analyze."""
+        if not result_id:
+            return {"status": "failed", "code": "no_result_id"}
+        state, stored = self.load_rhythm(result_id)
+        if state == "ok":
+            return dict(stored, status="done", cache_hit=True, stored=True)
+        if self.stopping:
+            return {"status": "failed", "code": "shutting_down"}
+        timeout = self.limits["rhythm_timeout"]
+        if job.deadline is not None:
+            timeout = min(timeout, job.deadline - time.monotonic() - 5.0)
+        if timeout < 1.0:
+            return {"status": "timeout", "code": "no_time_left"}
+        rh = self.cfg["rhythm"]
+        try:
+            lfd = os.open(self.team_lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        except OSError:
+            return {"status": "failed", "code": "lock_unavailable"}
+        try:
+            try:
+                fcntl.flock(lfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return {"status": "busy", "code": "busy"}
+            except OSError:
+                return {"status": "failed", "code": "lock_unavailable"}
+            res = self._spawn_rhythm(rh, wav, lfd, timeout)
+        finally:
+            os.close(lfd)  # the worker shares this lock while it lives; released when both have closed it
+        self.log.event("rhythm_exit", id=job.rid, status=res.get("status"), code=res.get("code"))
+        if res.get("status") != "done":
+            return res
+        data = res.pop("_data")
+        try:
+            self.store_rhythm(result_id, data)
+            stored = True
+        except OSError:
+            self.log.event("rhythm_store_failed", id=job.rid)
+            stored = False
+        return dict(data, status="done", cache_hit=False, stored=stored)
+
+    def _spawn_rhythm(self, rh, wav, lock_fd, timeout):
+        lim = self.limits
+        with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+            try:
+                p = subprocess.Popen([rh["python"], "-I", rh["worker"], wav], stdin=subprocess.DEVNULL, stdout=out,
+                                     stderr=err, env=self.child_env(), cwd="/", close_fds=True, pass_fds=(lock_fd,),
+                                     shell=False, start_new_session=True)
+            except OSError:
+                return {"status": "failed", "code": "server_misconfigured"}
+            try:
+                p.wait(timeout)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(p.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                p.wait()
+                return {"status": "timeout", "code": "timeout"}
+            if p.returncode != 0:
+                code = last_stderr_code(err, lim["stderr_line"])
+                return {"status": "failed", "code": code if re.match(r"\A[a-z_]{1,64}\Z", code) else "internal_error"}
+            if os.fstat(out.fileno()).st_size > lim["rhythm_output"]:
+                return {"status": "failed", "code": "invalid_output"}
+            out.seek(0)
+            try:
+                v = check_rhythm(json.loads(out.read().decode("utf-8")))
+            except ValueError:
+                v = None
+            if v is None:
+                return {"status": "failed", "code": "invalid_output"}
+            for k in ("status", "cache_hit", "stored", "code"):
+                v.pop(k, None)
+            return {"status": "done", "_data": v}
 
     # connections
     def peer_allowed(self, ip):
@@ -975,6 +1227,15 @@ class App:
             self.log.event("receipt_unknown", reason="final_write_failed", id=job.rid, client=job.client,
                            durable=durable)
             status, body, raw = error_body(code, request_id=job.rid) + (None,)
+        else:
+            if job.rhythm and status == 200 and isinstance(body, dict):
+                # The receipt already says done (ASR outcome); the rhythm layer is an add-on on the same WAV.
+                try:
+                    body["rhythm"] = self.run_rhythm(job, rec.get("result_id"),
+                                                     self.cfg["inbox"] + "/api-" + job.op + ".wav")
+                except Exception as e:
+                    self.log.event("rhythm_error", id=job.rid, kind=type(e).__name__)
+                    body["rhythm"] = {"status": "failed", "code": "internal_error"}
         self.cleanup(job.op, job.linked)
         self.gate.release()
         job.status, job.body, job.raw = status, body, raw
@@ -1274,18 +1535,26 @@ class Handler(BaseHTTPRequestHandler):
             self.info["route"] = "/status"
             if "?" in target:
                 raise HttpError("bad_request")
-            return self.read_call(app, ["status"])
+            return self.read_call(app, ["status"], extra=("rhythm", app.rhythm_status()))
         m = ROUTE_REPORT.match(path)
         if m:
             self.info["route"] = "/report/:id"
             if "?" in target:
                 raise HttpError("bad_request")
-            return self.read_call(app, ["report", m.group(1)])
+            st, v = app.load_rhythm(m.group(1))
+            extra = None
+            if st == "ok":
+                extra = ("rhythm", rhythm_summary(v))
+            elif st == "invalid":
+                extra = ("rhythm", {"status": "failed", "code": "invalid_result"})
+            return self.read_call(app, ["report", m.group(1)], extra=extra)
         m = ROUTE_TIMELINE.match(path)
         if m:
             self.info["route"] = "/timeline/:id"
             q = parse_query(query, ("layer", "start", "end", "limit", "cursor"))
             args = ["timeline", m.group(1)]
+            if q.get("layer") in RHYTHM_LAYERS:
+                return self.rhythm_timeline(app, m.group(1), q)
             if "layer" in q:
                 if q["layer"] not in ("words", "emotion"):
                     raise HttpError("bad_request")
@@ -1316,15 +1585,50 @@ class Handler(BaseHTTPRequestHandler):
                                                            "error_code", "upload_sha256")})
         raise HttpError("not_found")
 
-    def read_call(self, app, args):
+    def read_call(self, app, args, extra=None):
         ok, data, code = app.run_ml(args, app.limits["read_timeout"])
         if not ok:
             raise HttpError(code)
-        self.send_raw(200, data)  # native JSON bytes unchanged
+        if extra is None or extra[1] is None:
+            return self.send_raw(200, data)  # native JSON bytes unchanged
+        v = json.loads(data.decode("utf-8"))  # run_ml already checked it is a JSON object
+        v[extra[0]] = extra[1]
+        self.send_json(200, v)
+
+    def rhythm_timeline(self, app, rid, q):
+        """layer=beats|chords, served from the stored rhythm file with the native range/limit/cursor rules."""
+        vals = {}
+        for k, default in (("start", 0.0), ("end", 600.0)):
+            if k in q:
+                if not RE_NUM.match(q[k]):
+                    raise HttpError("bad_request")
+                vals[k] = float(q[k])
+                if not 0 <= vals[k] <= 600:
+                    raise HttpError("invalid_argument")
+            else:
+                vals[k] = default
+        if vals["end"] < vals["start"]:
+            raise HttpError("invalid_argument")
+        limit = 100
+        if "limit" in q:
+            if not RE_LIMIT.match(q["limit"]) or not 1 <= int(q["limit"]) <= 200:
+                raise HttpError("bad_request")
+            limit = int(q["limit"])
+        cursor = 0
+        if "cursor" in q:
+            if not RE_CURSOR.match(q["cursor"]):
+                raise HttpError("bad_request")
+            cursor = int(q["cursor"])
+        st, v = app.load_rhythm(rid)
+        if st == "missing":
+            raise HttpError("rhythm_not_found")
+        if st != "ok":
+            raise HttpError("invalid_result")
+        self.send_json(200, rhythm_page(rid, v, q["layer"], vals["start"], vals["end"], cursor, limit))
 
     def do_analyze(self, app, client, rid, query, cl, rest, body_sha, expect_continue):
         lim = app.limits
-        q = parse_query(query, ("language", "emotion_mode", "name"))
+        q = parse_query(query, ("language", "emotion_mode", "name", "rhythm"))
         if q.get("language") not in ("en", "ko", "ja", "auto"):
             raise HttpError("bad_request")
         emotion_mode = q.get("emotion_mode", "none")
@@ -1333,6 +1637,12 @@ class Handler(BaseHTTPRequestHandler):
         name = q.get("name")
         if name is not None and not valid_name(name):
             raise HttpError("bad_request")
+        rhythm = q.get("rhythm", "0")
+        if rhythm not in ("0", "1"):
+            raise HttpError("bad_request")
+        rhythm = rhythm == "1"
+        if rhythm and not app.cfg.get("rhythm"):
+            raise HttpError("rhythm_unavailable")
         if cl > lim["max_body"]:
             self.send_error_code("payload_too_large")
             return self.drain()
@@ -1363,6 +1673,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             job = Job(client, rid, op, kind, app.uploads + "/" + op + "/upload." + kind, q["language"], emotion_mode,
                       name, upload_sha)
+            job.rhythm, job.deadline = rhythm, self.t0 + lim["handler_total"]
             try:
                 app.receipts.update(client, rid, app.clock(), upload_sha256=upload_sha)
             except OSError:

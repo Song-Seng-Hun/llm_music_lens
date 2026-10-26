@@ -13,12 +13,13 @@ Nothing here is installed. No LaunchAgent, firewall rule, certificate or key is 
 | File | Purpose |
 | --- | --- |
 | `server.py` | The server: config, en0/en1 address discovery, TLS 1.2+, strict framing, HMAC auth, durable nonce and receipt logs, pipeline gate, staging, afconvert, strict WAV check, hard-link promotion, `ml` calls by argv, error mapping, cleanup, logs |
+| `rhythm_worker.py` | Optional rhythm layer worker (Essentia DSP, no models): BPM, beats, key, chords. Runs under the Essentia python, never in the listener |
 | `limit_exec.py` | Sets RLIMIT_CPU 60 s / FSIZE 24 MiB / NOFILE 32, then `execv /usr/bin/afconvert -f WAVE -d LEI16@16000 -c 1 src dst` |
 | `sign.py` | Shared canonical-string and HMAC helper (server, tests, Python clients) |
 | `sign_vector.mjs` | Reference Node signer; prints or checks the fixed vector (`tests/vectors.json`) |
 | `examples/api.example.json` | Example production config (`~/.music-lens/api.json`, mode 0600) |
 | `examples/com.music-lens.lan-api.plist.template` | LaunchAgent **template** |
-| `tests/` | unittest suite (fake `ml`, throwaway cert, 127.0.0.1 test mode) plus one opt-in live test |
+| `tests/` | unittest suite (fake `ml`, fake rhythm worker, throwaway cert, 127.0.0.1 test mode) plus one opt-in live test; `tests/synth_audio.py` makes synthetic WAVs for the real-worker tests |
 
 ## Tests
 
@@ -27,6 +28,9 @@ cd ~/dev/music-lens-lan
 /usr/bin/python3 -m unittest discover -s tests -v            # offline; uses a fake ml and a temp root
 MUSIC_LENS_LIVE=1 /usr/bin/python3 -m unittest discover -s tests -p test_live.py -v   # real wrapper, once
 ```
+
+The real-worker tests in `tests/test_rhythm.py` run `rhythm_worker.py` under the Essentia python of the emotion pilot
+runtime and skip cleanly when that path is missing.
 
 Tests bind 127.0.0.1 only through the test-only `"test_mode": true` config flag. A production config (no
 `test_mode`) refuses loopback, `0.0.0.0`, literal bind IPs, port 0, `limits` overrides and `test_ready_file`.
@@ -89,6 +93,67 @@ Do these only after approving an always-on listener (RunAtLoad + KeepAlive, en0/
    ```
    To unload it: `launchctl bootout gui/$(id -u)/com.music-lens.lan-api`. Unloading sends SIGTERM; see
    "Stopping" below. A clean exit does not mean every analysis finished or was cancelled.
+
+## Optional rhythm layer (beats, key, chords)
+
+Off unless the config has a `rhythm` key. Without it the server loads and behaves exactly as before.
+
+```json
+"rhythm": {"python": "/Users/songseunghun/Documents/Codex/2026-09-27-window-pc-pc/outputs/music-lens-emotion-pilot-20261025/runtime/bin/python",
+           "worker": "/Users/songseunghun/tools/music-lens/api/rhythm_worker.py"}
+```
+
+Both paths must be absolute regular files, not group- or world-writable, and `python` must be executable; any other
+key or value stops the server (config error). `examples/api.example.json` leaves the key out on purpose: turning the
+layer on is an owner decision (copy `rhythm_worker.py` next to `server.py` first).
+
+API:
+- `POST /analyze?...&rhythm=1` opts in (`rhythm=0` or no flag = unchanged behaviour, byte for byte). The flag is part
+  of the signed TARGET like every other query field. With no `rhythm` config the request gets 400
+  `rhythm_unavailable` before anything is staged (no receipt). Any other value is 400 `bad_request`.
+- After a successful `ml analyze` (receipt already `done`), the server runs `<python> -I rhythm_worker.py
+  <inbox>/api-<op>.wav` by argv on the same promoted WAV, with the same child env (PATH `/usr/bin:/bin:/usr/sbin:/sbin`),
+  its own session, and a wall timeout of `rhythm_timeout` (300 s, capped by the time left before the handler's 800 s
+  deadline) that kills the process group. It takes the team flock `<root>/.analyze.lock` non-blocking (the same
+  file the `ml` wrapper locks) and passes the locked descriptor to the worker, so the lock lives as long as the worker.
+  The worker also bounds itself (SIGALRM 330 s, RLIMIT_CPU 600 s) in case the server dies first.
+- Rhythm never fails the analyze: the reply stays 200 with the ASR fields unchanged plus `rhythm`:
+  - success: `{"status":"done","cache_hit":false,"stored":true, ...worker JSON}`;
+  - `{"status":"busy","code":"busy"}` when the team lock is held (never waits);
+  - `{"status":"timeout","code":"timeout"|"no_time_left"}`;
+  - `{"status":"failed","code":...}` with the worker's error code (`invalid_audio`, `too_short`, `analysis_failed`,
+    `dependency_missing`, `timeout`), or `invalid_output`, `internal_error`, `server_misconfigured`,
+    `lock_unavailable`, `no_result_id`, `shutting_down`.
+- The worker JSON is stored durably (tmp 0600 + F_FULLFSYNC, replace, directory fsync) as
+  `<root>/results-rhythm/<result_id>.json` (directory 0700). A later analyze with the same `result_id` (an `ml` cache
+  hit, same audio and settings) reuses it (`cache_hit: true`) and runs nothing. A store failure still returns the
+  data with `stored: false`. The files are not pruned automatically (about 30 KB per 10 minutes of audio).
+- `GET /report/<id>` adds a `rhythm` summary (`status`, `bpm`, `bpm_confidence`, `key`, `beat_count`,
+  `chord_segment_count`, `downbeats`, `duration`, `tool`, `warnings`) when a stored file exists, re-serializing the
+  native JSON (number formatting may change). A damaged file gives `rhythm: {"status":"failed","code":"invalid_result"}`.
+  No file: native bytes unchanged.
+- `GET /timeline/<id>?layer=beats|chords` is served by the server from the stored file with the native rules:
+  `start`/`end` 0..600 (default 0 and 600, `end >= start`), rows overlapping the range, `limit` 1..200 (default 100),
+  `cursor` <= total, a ~43 KB page byte cap, `truncated` and `continuation`. Beats rows are `{"time"}`, chords rows
+  `{start, end, label, strength}` (with `reliability: "low_reference"`). No stored file: 404 `rhythm_not_found`.
+  `words`/`emotion` still go to `ml timeline` unchanged.
+- `GET /status`: when the layer is configured, adds `rhythm: {configured, python_present, worker_present}` (file
+  checks only, Essentia is not run). Not configured: native bytes unchanged (no `rhythm` key means unavailable).
+
+Worker output: `bpm`, `bpm_confidence` (RhythmExtractor2013 multifeature, native 0..~5.32, uncalibrated),
+`bpm_estimates` (top 5 shares), `beats` (s, ms rounding), `downbeats: {"status":"not_provided"}`, `key`
+(`tonic`, `scale`, `strength`, `profile: "bgate"`), `chords` (HPCP 12 bins + ChordsDetection, hop 2048, 2 s window,
+identical neighbours merged), `chords_reliability: "low_reference"`, `sample_rate` 44100 (input resampled from 16 kHz
+because RhythmExtractor2013 assumes 44.1 kHz), `duration`, `tool` (name, version, `essentia_version`), `warnings`
+(`short_audio` < 10 s, `near_silent`, `no_beats`, `low_bpm_confidence` < 1.5, `low_key_strength` < 0.5,
+`no_chords`). Audio under 1 s is refused (`too_short`). Key profile `bgate` is Essentia's default; its profiles were
+derived from annotated pop/rock recordings, the closest built-in fit for pop/K-pop.
+
+Accuracy (honest notes): every value is a DSP estimate. On synthetic tests a 120 BPM click track gives 120.0 BPM
+(confidence ~3.9) and a C-Am-F-G triad loop gives C major with the four chords at the right 2 s boundaries; real
+music has not been measured. Confidence and strengths are native and uncalibrated. Chords are major/minor triads
+only, a low-reliability reference, not a transcription. Octave errors (half or double tempo) are possible. There
+are no downbeats, bars or time signature. A 600 s synthetic file took about 6 s and ~0.97 GB peak RSS on this Mac.
 
 ## Runtime layout (production)
 
@@ -161,3 +226,10 @@ cleanup, so it alone does not prove the pipeline is idle).
    check (including 0 < duration <= 600 s) and no-overwrite hard link. A canonical WAV (PCM mono 16 kHz s16) skips
    afconvert. A conversion failure gives 400 `invalid_audio`; size limits, magic-byte detection and framing are
    unchanged.
+12. Optional rhythm layer (not in v0.6): `rhythm=1` on `/analyze`, a `rhythm` summary in `/report`, `layer=beats|chords`
+   on `/timeline`, and a `rhythm` object in `/status` (see "Optional rhythm layer"). New rhythm work and the `/status`
+   field need the `rhythm` config key; `/report` and `/timeline` read stored files whenever they exist. The receipt
+   records the ASR outcome only; the rhythm result lives in `results-rhythm/`. The worker runs while the API gate is
+   held (another API analyze meanwhile gets 409 `busy`), and it takes the team flock after
+   `ml analyze` released it, so a Mac-side analyze can win the race (rhythm `busy`). A stop during the rhythm step
+   does not mark the receipt `unknown` (it is already `done`), but the worker may still be running.
