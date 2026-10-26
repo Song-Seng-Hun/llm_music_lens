@@ -19,7 +19,8 @@
   <true/>
   <key>ThrottleInterval</key>
   <integer>60</integer>
-  <!-- SIGTERM drains the running analyze job (stop_grace 630 s = 600 s bound + margin); launchd SIGKILLs after this. -->
+  <!-- SIGTERM drains the running analyze job (stop_grace 630 s = 600 s bound + margin); launchd SIGKILLs after this.
+       Observed 2026-10-26: launchd reports exit timeout = 60 for this agent (apparent cap), so the drain is cut at 60 s; see README Stopping. -->
   <key>ExitTimeOut</key>
   <integer>660</integer>
   <key>ProcessType</key>

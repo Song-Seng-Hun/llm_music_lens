@@ -115,7 +115,12 @@ launched (an upload that finishes now gets 503 `shutting_down`, nothing launched
 `stop_grace` (630 s: the 600 s analyze bound plus margin) for the running job and its waiting client. A job still
 running after that is not killed: its receipt becomes `unknown` with `error_code` `interrupted_by_stop`, its paths
 are logged (`receipt_unknown`, `reason: stop`) and kept, as after a crash. The LaunchAgent template sets
-`ExitTimeOut` 660 so launchd does not SIGKILL the server during this wait.
+`ExitTimeOut` 660, but on this Mac (macOS 27, 2026-10-26) `launchctl print` shows `exit timeout = 60` for the
+installed agent, while values under 60 in Apple's own jobs are kept: launchd appears to cap it at 60 s (inferred,
+not proven). So under launchd a job still running 60 s after SIGTERM is SIGKILLed with the server, not drained.
+That stays fail-closed: at the next start every receipt still `running` becomes `unknown` (no retry), and the
+`ml` team-job lock is an flock that the OS releases when the process dies. Restart only when no analyze is
+running if its result matters (check `receipts.log` or the `api.log` `analyze_exit` events).
 
 ## Interpretations and deviations from v0.6 (safer reading)
 
