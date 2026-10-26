@@ -13,7 +13,7 @@ Nothing here is installed. No LaunchAgent, firewall rule, certificate or key is 
 | File | Purpose |
 | --- | --- |
 | `server.py` | The server: config, en0/en1 address discovery, TLS 1.2+, strict framing, HMAC auth, durable nonce and receipt logs, pipeline gate, staging, afconvert, strict WAV check, hard-link promotion, `ml` calls by argv, error mapping, cleanup, logs |
-| `rhythm_worker.py` | Optional rhythm layer worker (Essentia DSP, no models): BPM, beats, key, chords. Runs under the Essentia python, never in the listener |
+| `rhythm_worker.py` | Optional rhythm layer worker (Essentia DSP, no models): BPM (+ half/double), beats, key (+ 20 s sections), beat-grid chords. Runs under the Essentia python, never in the listener |
 | `limit_exec.py` | Sets RLIMIT_CPU 60 s / FSIZE 24 MiB / NOFILE 32, then `execv /usr/bin/afconvert -f WAVE -d LEI16@16000 -c 1 src dst` |
 | `sign.py` | Shared canonical-string and HMAC helper (server, tests, Python clients) |
 | `sign_vector.mjs` | Reference Node signer; prints or checks the fixed vector (`tests/vectors.json`) |
@@ -130,9 +130,11 @@ API:
   hit, same audio and settings) reuses it (`cache_hit: true`) and runs nothing. A store failure still returns the
   data with `stored: false`. The files are not pruned automatically (about 30 KB per 10 minutes of audio).
 - `GET /report/<id>` adds a `rhythm` summary (`status`, `bpm`, `bpm_confidence`, `bpm_confidence_band`,
-  `bpm_estimates`, `key`, `beat_count`,
-  `chord_segment_count`, `downbeats`, `duration`, `tool`, `warnings`) when a stored file exists, re-serializing the
-  native JSON (number formatting may change). A damaged file gives `rhythm: {"status":"failed","code":"invalid_result"}`.
+  `bpm_estimates`, `bpm_alternatives`, `bpm_alternatives_note`, `key`, `key_sections`, `key_change_count`,
+  `beat_count`, `chord_segment_count`, `chords_grid`, `downbeats`, `duration`, `tool`, `warnings`) when a stored file
+  exists, re-serializing the native JSON (number formatting may change). Files stored by worker 0.1.0 lack the
+  0.2.0 fields and still load; the summary then has `bpm_alternatives`, `bpm_alternatives_note`, `key_sections`,
+  `key_change_count` and `chords_grid` set to `null` (they are not recomputed; old chord rows stay frame-level). A damaged file gives `rhythm: {"status":"failed","code":"invalid_result"}`.
   No file: native bytes unchanged.
 - `GET /timeline/<id>?layer=beats|chords` is served by the server from the stored file with the native rules:
   `start`/`end` 0..600 (default 0 and 600, `end >= start`), rows overlapping the range, `limit` 1..200 (default 100),
@@ -146,21 +148,54 @@ API:
 `very_low` [0, 1), `low` [1, 1.5], `good` (1.5, 3.5] (Essentia: about 80% AMLt), `excellent` above 3.5. It is
 Essentia's guide, not a calibration on the team's music.
 
-Worker output: `bpm`, `bpm_confidence` (RhythmExtractor2013 multifeature, native 0..~5.32, uncalibrated),
-`bpm_estimates` (top 5 shares), `beats` (s, ms rounding), `downbeats: {"status":"not_provided"}`, `key`
-(`tonic`, `scale`, `strength`, `profile: "bgate"`), `chords` (HPCP 12 bins + ChordsDetection, hop 2048, 2 s window,
-identical neighbours merged), `chords_reliability: "low_reference"`, `sample_rate` 44100 (input resampled from 16 kHz
-because RhythmExtractor2013 assumes 44.1 kHz), `duration`, `tool` (name, version, `essentia_version`), `warnings`
-(`short_audio` < 10 s, `near_silent`, `no_beats`, `low_bpm_confidence` < 1.5, `low_key_strength` < 0.5,
-`no_chords`). Audio under 1 s is refused (`too_short`). Key profile `bgate` is Essentia's default; how well it fits the team's
+Worker output (worker 0.2.0): `bpm`, `bpm_confidence` (RhythmExtractor2013 multifeature, native 0..~5.32,
+uncalibrated), `bpm_estimates` (top 5 shares), `bpm_alternatives` (`[bpm/2, bpm*2]`, 2 decimals, only values within
+40..300; empty when bpm is 0) with `bpm_alternatives_note`, `beats` (s, ms rounding),
+`downbeats: {"status":"not_provided"}`, `key` (`tonic`, `scale`, `strength`, `profile: "bgate"`), `key_sections`
+(rows `{start, end, tonic, scale, strength}`, see below), `key_change_count` (sections - 1), `key_section_window`
+(20), `chords` (see below), `chords_grid` (`beat` or `frame`), `chord_frame_segment_count` (frame-level segment
+count before the beat vote, stored file only), `chords_reliability: "low_reference"`, `sample_rate` 44100 (input
+resampled from 16 kHz because RhythmExtractor2013 assumes 44.1 kHz), `duration`, `tool` (name, version,
+`essentia_version`), `warnings` (`short_audio` < 10 s, `near_silent`, `no_beats`, `low_bpm_confidence` < 1.5,
+`low_key_strength` < 0.5, `key_changes` when there is more than one key section, `no_chords`). Audio under 1 s is
+refused (`too_short`).
+
+- Key sections: the same KeyExtractor (`bgate`, frame 4096, hop 2048) on fixed, non-overlapping 20 s windows (a last
+  window under 10 s joins the previous one), then adjacent windows with the same tonic and scale merged; `strength`
+  is the plain mean of the merged windows (null if any window's native strength was non-finite, with warning
+  `key_section_strength_unavailable`). At most 30 sections for 600 s. 20 s holds about 8-10 bars at common tempos,
+  enough chroma for a key profile; shorter windows follow single chords. Weak sections (low `strength`) keep their
+  row: read `strength` before trusting one.
+- Chords: HPCP 12 bins + ChordsDetection (hop 2048, 2 s window) give frame labels. When beats exist, each beat
+  interval (plus the head before the first beat and the tail after the last) takes the label with the largest summed
+  native strength among its frames (a null strength counts 0 in the vote; ties: more frames, then the earliest
+  frame; an interval holding no frame takes the frame nearest its midpoint), then identical neighbours merge. Every
+  segment therefore spans at least one beat, except the head and tail. A segment's `strength` is the mean of the
+  winning label's frame strengths (null if any is null, with warning `chord_strength_unavailable`; never a measured
+  0.0). Without beats, identical consecutive frame labels merge as before (`chords_grid: "frame"`). Key profile `bgate` is Essentia's default; how well it fits the team's
 material is not measured. A non-finite native chord strength becomes `strength: null` plus warning
 `chord_strength_unavailable`. Worker output and stored files are refused if any number is non-finite or too large.
 
 Accuracy (honest notes): every value is a DSP estimate. On synthetic tests a 120 BPM click track gives 120.0 BPM
 (confidence ~3.9) and a C-Am-F-G triad loop gives C major with the four chords at the right 2 s boundaries; real
 music has not been measured. Confidence and strengths are native and uncalibrated. Chords are major/minor triads
-only, a low-reliability reference, not a transcription. Octave errors (half or double tempo) are possible. There
-are no downbeats, bars or time signature. A 600 s synthetic file took about 6 s and ~0.97 GB peak RSS on this Mac.
+only, a low-reliability reference, not a transcription. There are no downbeats, bars or time signature. A 600 s
+synthetic file took about 6.3 s and ~0.97 GB peak RSS on this Mac (worker 0.2.0).
+
+- Tempo octave: the metrical level is ambiguous. On one real song (216 s, published tempo 220) the tracker said
+  109.94 BPM and every `bpm_estimates` entry was ~110, so 220 never appeared there. `bpm_alternatives` lists half and
+  double without choosing; compare them with a published tempo or with your own listening. No heuristic warns.
+- Key sections are a DSP estimate with 20 s resolution: a change inside a window moves the boundary to a window edge
+  (up to 20 s off), and a window straddling the change can report a third key. Synthetic test: C major 0-30 s then
+  D major 30-60 s gave C 0-20, G 20-40 (the straddling window; G major is the union of the two scales), D 40-60;
+  the single global `key` said G major.
+  Relative keys (C major / A minor) share notes and can alternate. One real song with a known modulation (E major,
+  then another key area ~160-180 s, F major from 180 s) motivated the field; it was not re-measured here.
+- Beat-grid chords remove sub-beat flicker (that real song had 324 frame-level segments, median 0.33 s, shorter
+  than one beat) but also any real chord change shorter than a beat; head/tail can be shorter than a beat. On the
+  synthetic C-Am-F-G loop beat-grid and frame-level segments agree (2 s each); on the 30 s click track (no harmony)
+  frame labels flicker and the beat vote cuts 32 segments to 11. Synthetic music did not make the frame labels
+  flicker (the 2 s ChordsDetection window smooths them), so the reduction on real music is untested here.
 
 ## Runtime layout (production)
 

@@ -58,6 +58,8 @@ RHYTHM_DIR = "results-rhythm"  # under root: <result_id>.json, 0600, written ato
 RHYTHM_LAYERS = ("beats", "chords")
 RHYTHM_MAX_BEATS = 5000
 RHYTHM_MAX_CHORDS = 20000
+RHYTHM_MAX_KEY_SECTIONS = 64  # worker 0.2.0 emits <= 30 (20 s windows over 600 s)
+RHYTHM_CHORD_GRIDS = ("beat", "frame")
 MAX_WIRE_PAGE = 128 * 1024 // 3  # same page byte cap as the native timeline (MAX_WIRE // 3)
 PYTHON = "/usr/bin/python3"
 IPCONFIG = "/usr/sbin/ipconfig"
@@ -887,9 +889,48 @@ def check_rhythm(v):
         for e in est:
             if not isinstance(e, dict) or not _num(e.get("bpm"), 0, 1000) or not _num(e.get("share"), 0, 1):
                 return None
+        if not _rhythm_v2_ok(v, dur):
+            return None
     except (TypeError, KeyError, OverflowError):
         return None
     return v
+
+
+def _rhythm_v2_ok(v, dur):
+    """Fields added by worker 0.2.0. Each may be absent (files stored by 0.1.0); when present it must be valid."""
+    if "bpm_alternatives" in v:
+        alt = v["bpm_alternatives"]
+        if not isinstance(alt, list) or len(alt) > 4 or not all(_num(a, 1, 1000) for a in alt):
+            return False
+    if "bpm_alternatives_note" in v and not _short_str(v["bpm_alternatives_note"], 200):
+        return False
+    if "key_sections" in v:
+        ks = v["key_sections"]
+        if not isinstance(ks, list) or len(ks) > RHYTHM_MAX_KEY_SECTIONS:
+            return False
+        prev = 0
+        for r in ks:
+            if (not isinstance(r, dict) or not _num(r.get("start"), 0, dur) or not _num(r.get("end"), 0, dur)
+                    or r["end"] < r["start"] or r["start"] < prev or not _short_str(r.get("tonic"), 8)
+                    or not _short_str(r.get("scale"), 16)
+                    or not (r.get("strength") is None or _num(r.get("strength"), -1e6, 1e6))):
+                return False
+            prev = r["start"]
+    if "key_change_count" in v:
+        n = v["key_change_count"]
+        if not (isinstance(n, int) and not isinstance(n, bool) and 0 <= n < RHYTHM_MAX_KEY_SECTIONS):
+            return False
+        if "key_sections" in v and n != max(0, len(v["key_sections"]) - 1):
+            return False
+    if "key_section_window" in v and not _num(v["key_section_window"], 0.1, 600):
+        return False
+    if "chords_grid" in v and v["chords_grid"] not in RHYTHM_CHORD_GRIDS:
+        return False
+    if "chord_frame_segment_count" in v:
+        n = v["chord_frame_segment_count"]
+        if not (isinstance(n, int) and not isinstance(n, bool) and 0 <= n <= RHYTHM_MAX_CHORDS * 10):
+            return False
+    return True
 
 
 def confidence_band(c):
@@ -902,12 +943,16 @@ def confidence_band(c):
 
 
 def rhythm_summary(v):
-    """Compact view for analyze and /report; beats and chord rows stay in the stored file (/timeline)."""
+    """Compact view for analyze and /report; beats and chord rows stay in the stored file (/timeline).
+    Fields from worker 0.2.0 (bpm_alternatives[_note], key_sections, key_change_count, chords_grid) are null when the
+    stored file predates them."""
     return {"status": "done", "bpm": v["bpm"], "bpm_confidence": v["bpm_confidence"],
             "bpm_confidence_band": confidence_band(v["bpm_confidence"]),
             "bpm_confidence_scale": v.get("bpm_confidence_scale"), "bpm_estimates": v.get("bpm_estimates", []),
-            "key": v["key"], "beat_count": len(v["beats"]),
-            "chord_segment_count": len(v["chords"]), "chords_reliability": v.get("chords_reliability"),
+            "bpm_alternatives": v.get("bpm_alternatives"), "bpm_alternatives_note": v.get("bpm_alternatives_note"),
+            "key": v["key"], "key_sections": v.get("key_sections"), "key_change_count": v.get("key_change_count"),
+            "beat_count": len(v["beats"]), "chord_segment_count": len(v["chords"]),
+            "chords_grid": v.get("chords_grid"), "chords_reliability": v.get("chords_reliability"),
             "downbeats": v["downbeats"], "duration": v["duration"], "tool": v["tool"], "warnings": v["warnings"]}
 
 

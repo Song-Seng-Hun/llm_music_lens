@@ -1,7 +1,8 @@
 """Synthetic test audio (numpy; run with the Essentia python): canonical PCM mono 16 kHz s16 WAV.
 
 Usage: synth_audio.py KIND SECONDS OUT.wav
-KIND: click (120 BPM click track), chords (C - Am - F - G, 2 s each, with a soft 120 BPM pulse), mix (same as chords)
+KIND: click (120 BPM click track), chords (C - Am - F - G, 2 s each, with a soft 120 BPM pulse), mix (same as chords),
+      modulation (C major I-IV-V-I for the first half, then D major I-IV-V-I; 2 s chords, soft 120 BPM pulse)
 """
 import sys
 import wave
@@ -9,7 +10,7 @@ import wave
 import numpy as np
 
 RATE = 16000
-NOTES = {"C": 261.63, "D": 293.66, "E": 329.63, "F": 349.23, "G": 392.00, "A": 440.00, "B": 493.88}
+SEMITONE = {"C": 0, "C#": 1, "D": 2, "E": 4, "F": 5, "F#": 6, "G": 7, "A": 9, "B": 11}
 PROGRESSION = [("C", ("C", "E", "G")), ("Am", ("A", "C", "E")), ("F", ("F", "A", "C")), ("G", ("G", "B", "D"))]
 
 
@@ -24,19 +25,27 @@ def clicks(n, bpm=120.0, gain=0.6):
     return out
 
 
-def chords(n, seg_seconds=2.0):
+C_MAJOR = [("C", ("C", "E", "G")), ("F", ("F", "A", "C")), ("G", ("G", "B", "D")), ("C", ("C", "E", "G"))]
+D_MAJOR = [("D", ("D", "F#", "A")), ("G", ("G", "B", "D")), ("A", ("A", "C#", "E")), ("D", ("D", "F#", "A"))]
+
+
+def freq(name):
+    return 261.63 * 2 ** (SEMITONE[name] / 12.0)
+
+
+def chords(n, seg_seconds=2.0, progression=PROGRESSION):
     out = np.zeros(n, dtype=np.float64)
     seg = int(seg_seconds * RATE)
     t = np.arange(seg) / RATE
     env = np.minimum(1.0, np.minimum(t / 0.02, (seg_seconds - t) / 0.05))
     i = 0
     for start in range(0, n, seg):
-        _, notes = PROGRESSION[i % len(PROGRESSION)]
+        _, notes = progression[i % len(progression)]
         i += 1
         y = np.zeros(seg)
         for name in notes:
             for octave in (0.5, 1.0):
-                f = NOTES[name] * octave
+                f = freq(name) * octave
                 for h, a in ((1, 1.0), (2, 0.5), (3, 0.25)):
                     y += a * np.sin(2 * np.pi * f * h * t)
         y *= env * 0.05
@@ -51,6 +60,10 @@ def main(kind, seconds, path):
         y = clicks(n)
     elif kind in ("chords", "mix"):
         y = chords(n) + clicks(n, gain=0.25)
+    elif kind == "modulation":
+        half = n // 2
+        y = np.concatenate([chords(half, progression=C_MAJOR), chords(n - half, progression=D_MAJOR)])
+        y += clicks(n, gain=0.25)
     else:
         raise SystemExit("unknown kind")
     y = np.clip(y, -0.99, 0.99)

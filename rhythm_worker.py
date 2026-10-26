@@ -10,9 +10,18 @@ Choices:
   carries nothing above 8 kHz; that does not matter for beats, key or chroma below 5 kHz.
 - bpm / beats / bpm_confidence: RhythmExtractor2013 method "multifeature". Its confidence is native,
   uncalibrated, on a 0..~5.32 scale (Essentia: >3.5 means very likely correct, <1.5 low).
+- bpm_alternatives: [bpm/2, bpm*2] kept within 40..300. The metrical level (half/double tempo) is ambiguous for the
+  tracker; no heuristic picks one.
 - key: KeyExtractor profile "bgate" (Essentia's default; fit to real music not measured here).
-- chords: HPCP (12 bins) + ChordsDetection (hop 2048, window 2 s), consecutive identical labels merged.
-  Major/minor triads only; reliability "low_reference".
+- key_sections: the same KeyExtractor on fixed 20 s windows (a last window under 10 s joins the previous one), then
+  adjacent windows with the same tonic+scale merged (strength = plain mean of the window strengths, null if any is
+  null). 20 s holds ~8-10 bars at common tempos, enough chroma for a key profile; shorter windows flip on single
+  chords. Boundary resolution is therefore one window (20 s). Weak (low strength) sections keep their row.
+- chords: HPCP (12 bins) + ChordsDetection (hop 2048, window 2 s) frame labels. With beats, labels are re-voted per
+  beat interval (plus the head before the first beat and the tail after the last): the label with the largest
+  summed strength wins (null strength counts 0; ties: more frames, then earliest frame), then identical neighbours
+  merge, so every segment spans >= one beat except head/tail ("chords_grid": "beat"). Without beats, consecutive
+  identical frame labels merge ("frame"). Major/minor triads only; reliability "low_reference".
 - downbeats: Essentia has no native downbeat tracker; reported as {"status":"not_provided"}.
 """
 import json
@@ -23,7 +32,7 @@ import signal
 import sys
 import wave
 
-TOOL = {"name": "music-lens-rhythm-worker", "version": "0.1.0"}
+TOOL = {"name": "music-lens-rhythm-worker", "version": "0.2.0"}
 SRC_RATE = 16000
 RATE = 44100
 MAX_SECONDS = 600.0
@@ -38,6 +47,10 @@ LOW_BPM_CONFIDENCE = 1.5
 LOW_KEY_STRENGTH = 0.5
 MAX_BEATS = 4000  # 600 s at RhythmExtractor2013's maxTempo 208 yields at most ~2080
 MAX_ESTIMATES = 5
+ALT_MIN_BPM, ALT_MAX_BPM = 40.0, 300.0
+ALT_NOTE = "metrical level is ambiguous; half or double tempo may match a published tempo"
+KEY_WINDOW = 20.0
+KEY_MIN_TAIL = 10.0  # a last window shorter than this joins the previous one
 
 
 class Fail(Exception):
@@ -65,6 +78,107 @@ def finite(x):
     if not math.isfinite(x):
         raise Fail("analysis_failed", "non-finite value from the analyzer")
     return x
+
+
+def bpm_alternatives(bpm):
+    if not bpm > 0:
+        return []
+    return [a for a in (round(bpm / 2.0, 2), round(bpm * 2.0, 2)) if ALT_MIN_BPM <= a <= ALT_MAX_BPM]
+
+
+def key_windows(duration):
+    """[(start, end)] of KEY_WINDOW s covering [0, duration]; a last window under KEY_MIN_TAIL joins the previous."""
+    out, t = [], 0.0
+    while t < duration:
+        out.append([t, min(t + KEY_WINDOW, duration)])
+        t += KEY_WINDOW
+    if len(out) > 1 and out[-1][1] - out[-1][0] < KEY_MIN_TAIL:
+        last = out.pop()
+        out[-1][1] = last[1]
+    return [tuple(w) for w in out]
+
+
+def merge_key_sections(rows):
+    """rows: [(start, end, tonic, scale, strength|None)] in time order -> merged section dicts."""
+    out = []
+    for start, end, tonic, scale, s in rows:
+        if out and (out[-1]["tonic"], out[-1]["scale"]) == (tonic, scale):
+            out[-1]["end"] = end
+            out[-1]["_s"].append(s)
+            continue
+        out.append({"start": start, "end": end, "tonic": tonic, "scale": scale, "_s": [s]})
+    for r in out:
+        ss = r.pop("_s")
+        r["strength"] = None if any(x is None for x in ss) else round(sum(ss) / len(ss), 3)
+        r["start"], r["end"] = r3(r["start"]), r3(r["end"])
+    return out
+
+
+def merge_frames(frames, duration):
+    """frames: [(time, label, strength|None)] -> segments of consecutive identical labels (strength mean, null-sticky)."""
+    segs = []
+    for t, lab, s in frames:
+        if segs and segs[-1]["label"] == lab:
+            segs[-1]["_s"].append(s)
+            continue
+        if segs:
+            segs[-1]["end"] = t
+        segs.append({"start": t, "end": duration, "label": lab, "_s": [s]})
+    return _finish(segs)
+
+
+def _finish(segs):
+    out = []
+    for c in segs:
+        ss = c.pop("_s")
+        c["strength"] = None if any(x is None for x in ss) else round(sum(ss) / len(ss), 3)
+        c["start"], c["end"] = r3(c["start"]), r3(c["end"])
+        if c["end"] > c["start"]:
+            out.append(c)
+    return out
+
+
+def beat_chords(frames, beats, duration):
+    """Beat-synchronous chords. Intervals: [0, b0), [b0, b1), ..., [b_last, duration]. Per interval the label with the
+    largest summed strength among its frames wins (null counts 0; ties: more frames, then earliest frame); an interval
+    holding no frame takes the frame nearest its midpoint. Identical neighbours then merge. The segment strength is
+    the mean of the winning label's frame strengths in it (null if any of them is null: never a measured 0.0)."""
+    if not frames:
+        return []
+    edges = [0.0]
+    for b in beats:
+        b = min(float(b), duration)
+        if b > edges[-1]:
+            edges.append(b)
+    if duration > edges[-1]:
+        edges.append(duration)
+    times = [f[0] for f in frames]
+    segs, i, n = [], 0, len(frames)
+    for j in range(len(edges) - 1):
+        a, b = edges[j], edges[j + 1]
+        last = j == len(edges) - 2
+        while i < n and times[i] < a:
+            i += 1
+        k = i
+        while k < n and (times[k] < b or (last and times[k] <= b)):
+            k += 1
+        group = frames[i:k]
+        if not group:
+            mid = (a + b) / 2.0
+            group = [min(frames, key=lambda f: abs(f[0] - mid))]
+        votes = {}
+        for order, (_, lab, s) in enumerate(group):
+            v = votes.setdefault(lab, [0.0, 0, -order, []])
+            v[0] += 0.0 if s is None else s
+            v[1] += 1
+            v[3].append(s)
+        lab, (_, _, _, ss) = max(votes.items(), key=lambda kv: tuple(kv[1][:3]))
+        if segs and segs[-1]["label"] == lab:
+            segs[-1]["end"] = b
+            segs[-1]["_s"].extend(ss)
+        else:
+            segs.append({"start": a, "end": b, "label": lab, "_s": ss})
+    return _finish(segs)
 
 
 def read_wav(path):
@@ -121,6 +235,21 @@ def analyze(path):
     kstrength = finite(kstrength)
     if kstrength < LOW_KEY_STRENGTH:
         warnings.append("low_key_strength: below 0.5")
+    rows, bad_ks = [], False
+    for ws, we in key_windows(duration):
+        seg = np.ascontiguousarray(audio[int(ws * RATE):int(we * RATE)], dtype=np.float32)
+        if len(seg) < FRAME:
+            continue
+        t_, s_, k_ = es.KeyExtractor(profileType=KEY_PROFILE, sampleRate=RATE, frameSize=FRAME, hopSize=HOP)(seg)
+        k_ = float(k_)
+        if not math.isfinite(k_):
+            k_, bad_ks = None, True
+        rows.append((ws, we, str(t_), str(s_), k_))
+    key_sections = merge_key_sections(rows)
+    if bad_ks:
+        warnings.append("key_section_strength_unavailable: non-finite native strength; section strength is null")
+    if len(key_sections) > 1:
+        warnings.append("key_changes: %d sections on %g s windows (DSP estimate)" % (len(key_sections), KEY_WINDOW))
 
     window = es.Windowing(type="blackmanharris62")
     spectrum = es.Spectrum()
@@ -131,35 +260,19 @@ def analyze(path):
     for frame in es.FrameGenerator(audio, frameSize=FRAME, hopSize=HOP, startFromZero=True):
         f, m = peaks(spectrum(window(frame)))
         pcps.append(hpcp(f, m))
-    chords = []
+    chords, frame_count = [], 0
     if pcps:
         labels, strengths = es.ChordsDetection(hopSize=HOP, sampleRate=RATE, windowSize=2.0)(
             essentia.array(np.array(pcps, dtype=np.float32)))
         step = HOP / float(RATE)
-        cur = None
-        bad_strength = False
-        for i, (lab, s) in enumerate(zip(labels, strengths)):
-            t = min(i * step, duration)
-            s = float(s)
-            if not math.isfinite(s):
-                s = None
-                bad_strength = True
-            if cur is not None and cur["label"] == lab:
-                if s is None or cur["_s"] is None:
-                    cur["_s"] = None
-                else:
-                    cur["_s"] += s
-                cur["_n"] += 1
-                continue
-            if cur is not None:
-                cur["end"] = t
-                chords.append(cur)
-            cur = {"start": t, "end": duration, "label": str(lab)[:16], "_s": s, "_n": 1}
-        if cur is not None:
-            chords.append(cur)
-        chords = [{"start": r3(c["start"]), "end": r3(c["end"]), "label": c["label"],
-                   "strength": None if c["_s"] is None else round(c["_s"] / c["_n"], 3)}
-                  for c in chords if c["end"] > c["start"]]
+        frames, bad_strength = [], False
+        for i, (lab, st) in enumerate(zip(labels, strengths)):
+            st = float(st)
+            if not math.isfinite(st):
+                st, bad_strength = None, True
+            frames.append((min(i * step, duration), str(lab)[:16], st))
+        frame_count = len(merge_frames(frames, duration))
+        chords = beat_chords(frames, beats, duration) if beats else merge_frames(frames, duration)
         if bad_strength:
             warnings.append("chord_strength_unavailable: non-finite native strength; segment strength is null")
     if not chords:
@@ -170,10 +283,17 @@ def analyze(path):
         "bpm_confidence": round(conf, 3),
         "bpm_confidence_scale": "RhythmExtractor2013 multifeature native, 0..~5.32, uncalibrated",
         "bpm_estimates": bpm_estimates,
+        "bpm_alternatives": bpm_alternatives(round(bpm, 2)),
+        "bpm_alternatives_note": ALT_NOTE,
         "beats": beats,
         "downbeats": {"status": "not_provided", "reason": "Essentia has no native downbeat tracker"},
         "key": {"tonic": str(tonic), "scale": str(scale), "strength": round(kstrength, 3), "profile": KEY_PROFILE},
+        "key_sections": key_sections,
+        "key_change_count": max(0, len(key_sections) - 1),
+        "key_section_window": KEY_WINDOW,
         "chords": chords,
+        "chords_grid": "beat" if beats else "frame",
+        "chord_frame_segment_count": frame_count,
         "chords_reliability": "low_reference",
         "chord_vocabulary": "major/minor triads (ChordsDetection)",
         "sample_rate": RATE,

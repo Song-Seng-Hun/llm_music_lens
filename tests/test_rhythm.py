@@ -12,6 +12,8 @@ import unittest
 
 from helpers import ANALYZE_OUT, PY, REPO, RID64, Base, Client, Env, Harness, server, sha, silent_wav_bytes
 
+import rhythm_worker as rw  # noqa: E402  (stdlib-only at import time; numpy/essentia load inside analyze)
+
 A = "/analyze?language=en&emotion_mode=voice"
 AR = A + "&rhythm=1"
 WAV = silent_wav_bytes(0.5)
@@ -57,6 +59,35 @@ RHYTHM_OUT = {
     "chords_reliability": "low_reference", "sample_rate": 44100, "duration": 6.0,
     "tool": {"name": "fake", "version": "0", "essentia_version": "x"}, "warnings": [],
 }
+
+
+V2_FIELDS = {
+    "bpm_alternatives": [60.0, 240.0], "bpm_alternatives_note": "metrical level is ambiguous",
+    "key_sections": [{"start": 0.0, "end": 4.0, "tonic": "C", "scale": "major", "strength": 0.9},
+                     {"start": 4.0, "end": 6.0, "tonic": "D", "scale": "major", "strength": None}],
+    "key_change_count": 1, "key_section_window": 20.0, "chords_grid": "beat", "chord_frame_segment_count": 9,
+}
+RHYTHM_OUT_V2 = dict(RHYTHM_OUT, warnings=["key_changes: 2 sections on 20 s windows (DSP estimate)"], **V2_FIELDS)
+V2_SUMMARY_KEYS = ("bpm_alternatives", "bpm_alternatives_note", "key_sections", "key_change_count", "chords_grid")
+
+
+def bad_v2():
+    """Worker-0.2.0 outputs that must be refused (invalid_output from the worker, invalid_result when stored)."""
+    ks = V2_FIELDS["key_sections"]
+    out = []
+    for over in ({"bpm_alternatives": [float("nan")]}, {"bpm_alternatives": [60, 1e9]}, {"bpm_alternatives": 60},
+                 {"bpm_alternatives": [0]}, {"bpm_alternatives": [60] * 5}, {"bpm_alternatives_note": "x" * 201},
+                 {"bpm_alternatives_note": None}, {"key_sections": [dict(ks[0], start=5.0, end=4.0)]},
+                 {"key_sections": [dict(ks[0], end=60.0)], "key_change_count": 0},
+                 {"key_sections": [dict(ks[0], strength=float("inf"))]},
+                 {"key_sections": [dict(ks[0], strength="x")]}, {"key_sections": [dict(ks[0], tonic="")]},
+                 {"key_sections": [dict(ks[0], tonic="C\n")]}, {"key_sections": [ks[1], ks[0]]},
+                 {"key_sections": [ks[0]] * 65, "key_change_count": 0}, {"key_sections": {"x": 1}},
+                 {"key_change_count": 0}, {"key_change_count": True}, {"key_change_count": -1},
+                 {"key_change_count": 1.0}, {"chords_grid": "bar"}, {"chords_grid": None},
+                 {"chord_frame_segment_count": -1}, {"key_section_window": 0}):
+        out.append(json.dumps(dict(RHYTHM_OUT_V2, **over)))
+    return out
 
 
 class FakeWorker:
@@ -137,6 +168,8 @@ class RhythmAnalyzeTest(RhythmBase):
         self.assertEqual((r["bpm_confidence_band"], r["bpm_estimates"]), ("excellent", RHYTHM_OUT["bpm_estimates"]))
         self.assertNotIn("beats", r)  # rows only via /timeline
         self.assertNotIn("chords", r)
+        for k in V2_SUMMARY_KEYS:  # the default fake output has the worker-0.1.0 shape
+            self.assertIsNone(r[k], k)
         calls = self.fw.calls()
         self.assertEqual(len(calls), 1)
         inbox_name = self.env.argv_log()[-1][1]
@@ -193,6 +226,33 @@ class RhythmAnalyzeTest(RhythmBase):
                     json.dumps(RHYTHM_OUT).replace('"sample_rate": 44100', '"sample_rate": 1' + "0" * 400)):
             self.fw.write(stdout=out)
             self.assert_rhythm_failed("failed", "invalid_output")
+
+    def test_v2_fields_in_summary(self):
+        self.fw.write(stdout=json.dumps(RHYTHM_OUT_V2))
+        r = self.c.json("POST", AR, WAV)[1]["rhythm"]
+        self.assertEqual(r["status"], "done", r)
+        for k in V2_SUMMARY_KEYS:
+            self.assertEqual(r[k], RHYTHM_OUT_V2[k], k)
+        self.assertNotIn("chords", r)
+        self.assertNotIn("chord_frame_segment_count", r)  # stored file only
+        with open(self.rhythm_file()) as f:
+            self.assertEqual(json.load(f), RHYTHM_OUT_V2)
+        r = self.c.json("GET", "/report/" + RID64)[1]["rhythm"]
+        self.assertEqual((r["key_change_count"], r["key_sections"][1]["strength"]), (1, None))
+
+    def test_v2_invalid_output(self):
+        for out in bad_v2():
+            self.fw.write(stdout=out)
+            self.assert_rhythm_failed("failed", "invalid_output")
+
+    def test_v2_single_section_and_empty_alternatives_valid(self):
+        v = json.loads(json.dumps(dict(RHYTHM_OUT_V2, bpm_alternatives=[], key_change_count=0, chords_grid="frame",
+                                       key_sections=[V2_FIELDS["key_sections"][0]])))
+        self.assertIs(server.check_rhythm(v), v)
+        v = json.loads(json.dumps(dict(RHYTHM_OUT_V2, key_sections=[])))
+        self.assertIsNone(server.check_rhythm(v))  # count 1 != max(0, 0 - 1)
+        v0 = dict(v, key_change_count=0)
+        self.assertIs(server.check_rhythm(v0), v0)
 
     def test_confidence_band_edges(self):
         self.assertEqual([server.confidence_band(c) for c in (0, 0.99, 1, 1.5, 1.51, 3.5, 3.51, 5.32)],
@@ -305,6 +365,25 @@ class RhythmReadTest(RhythmBase):
             self.assertEqual((st, b["x"], b["rhythm"]), (200, 1.5, {"status": "failed", "code": "invalid_result"}))
             self.assertEqual(self.tl("layer=chords")[1]["error"]["code"], "invalid_result")
 
+    def test_old_and_v2_stored_files(self):
+        with open(self.rhythm_file()) as f:
+            self.assertNotIn("key_sections", json.load(f))  # stored by the 0.1.0-shaped fake
+        r = self.c.json("GET", "/report/" + RID64)[1]["rhythm"]
+        self.assertEqual((r["status"], r["bpm"]), ("done", 120.0))
+        self.assertEqual([r[k] for k in V2_SUMMARY_KEYS], [None] * len(V2_SUMMARY_KEYS))
+        self.assertEqual(len(self.tl("layer=chords")[1]["chords"]), 3)
+        st, b = self.c.json("POST", AR, WAV)  # ml cache hit path reuses the old file as is
+        self.assertEqual((b["rhythm"]["cache_hit"], b["rhythm"]["key_sections"]), (True, None))
+        with open(self.rhythm_file(), "w") as f:
+            f.write(json.dumps(RHYTHM_OUT_V2))
+        r = self.c.json("GET", "/report/" + RID64)[1]["rhythm"]
+        self.assertEqual((r["chords_grid"], r["bpm_alternatives"]), ("beat", [60.0, 240.0]))
+        for bad in bad_v2():
+            with open(self.rhythm_file(), "w") as f:
+                f.write(bad)
+            st, b = self.c.json("GET", "/report/" + RID64)
+            self.assertEqual((st, b["x"], b["rhythm"]), (200, 1.5, {"status": "failed", "code": "invalid_result"}))
+
     def test_status_reports_availability(self):
         st, b = self.c.json("GET", "/status")
         self.assertEqual(b["rhythm"], {"configured": True, "python_present": True, "worker_present": True})
@@ -393,15 +472,85 @@ class RhythmConfigTest(unittest.TestCase):
             self.assertNotIn("rhythm", json.load(f))
 
 
+class WorkerLogicTest(unittest.TestCase):
+    """rhythm_worker's pure helpers (stdlib only), run under /usr/bin/python3."""
+
+    def test_bpm_alternatives(self):
+        self.assertEqual(rw.bpm_alternatives(120.0), [60.0, 240.0])
+        self.assertEqual(rw.bpm_alternatives(109.94), [54.97, 219.88])
+        self.assertEqual(rw.bpm_alternatives(70.0), [140.0])  # 35 < 40 dropped
+        self.assertEqual(rw.bpm_alternatives(180.0), [90.0])  # 360 > 300 dropped
+        self.assertEqual(rw.bpm_alternatives(0.0), [])
+
+    def test_key_windows(self):
+        self.assertEqual(rw.key_windows(5.0), [(0.0, 5.0)])
+        self.assertEqual(rw.key_windows(60.0), [(0.0, 20.0), (20.0, 40.0), (40.0, 60.0)])
+        self.assertEqual(rw.key_windows(69.0), [(0.0, 20.0), (20.0, 40.0), (40.0, 69.0)])  # 9 s tail merged
+        self.assertEqual(rw.key_windows(70.0)[-1], (60.0, 70.0))  # 10 s tail kept
+        self.assertEqual(len(rw.key_windows(600.0)), 30)
+        self.assertEqual(rw.key_windows(216.0)[-1], (200.0, 216.0))
+
+    def test_merge_key_sections(self):
+        rows = [(0, 20, "E", "major", 0.8), (20, 40, "E", "major", 0.6), (40, 60, "F", "major", 0.3),
+                (60, 80, "F", "major", None), (80, 90, "E", "major", 0.9)]
+        self.assertEqual(rw.merge_key_sections(rows), [
+            {"start": 0.0, "end": 40.0, "tonic": "E", "scale": "major", "strength": 0.7},
+            {"start": 40.0, "end": 80.0, "tonic": "F", "scale": "major", "strength": None},
+            {"start": 80.0, "end": 90.0, "tonic": "E", "scale": "major", "strength": 0.9}])
+
+    def test_beat_chords_vote_and_merge(self):
+        step = 0.05
+        # frame labels flip every 0.15 s (C C C G G G ...) with C stronger: frame merge gives many tiny segments
+        frames = [(round(i * step, 3), "C" if (i // 3) % 2 == 0 else "G", 0.9 if (i // 3) % 2 == 0 else 0.4)
+                  for i in range(200)]
+        beats = [0.25 + 0.5 * k for k in range(19)]
+        frame_segs = rw.merge_frames(frames, 10.0)
+        segs = rw.beat_chords(frames, beats, 10.0)
+        self.assertGreater(len(frame_segs), 60)
+        self.assertEqual([c["label"] for c in segs], ["C"])  # every beat votes C (larger summed strength)
+        self.assertEqual((segs[0]["start"], segs[0]["end"]), (0.0, 10.0))
+        self.assertEqual(segs[0]["strength"], 0.9)  # mean of the winning label's frames only
+
+    def test_beat_chords_grid_head_tail_and_ties(self):
+        frames = [(round(i * 0.1, 3), lab, 0.5) for i, lab in enumerate("AABBBBCCDDEE")]  # 0.0 .. 1.1
+        beats = [0.15, 0.55, 0.95]
+        segs = rw.beat_chords(frames, beats, 1.2)
+        # head [0,0.15): A A; [0.15,0.55): B B B B; [0.55,0.95): C C D D (tie -> earliest, C); tail [0.95,1.2]: E E
+        self.assertEqual([(c["start"], c["end"], c["label"]) for c in segs],
+                         [(0.0, 0.15, "A"), (0.15, 0.55, "B"), (0.55, 0.95, "C"), (0.95, 1.2, "E")])
+        # tie on summed strength and frame count -> earliest frame in the interval wins
+        frames = [(0.0, "X", 0.5), (0.1, "Y", 0.5), (0.2, "Y", 0.5), (0.3, "X", 0.5)]
+        self.assertEqual([c["label"] for c in rw.beat_chords(frames, [], 0.4)], ["X"])
+        # equal sums: more frames wins
+        frames = [(0.0, "X", 0.6), (0.1, "Y", 0.3), (0.2, "Y", 0.3)]
+        self.assertEqual([c["label"] for c in rw.beat_chords(frames, [], 0.3)], ["Y"])
+
+    def test_beat_chords_null_strength_and_empty_interval(self):
+        frames = [(0.0, "C", None), (0.1, "C", None), (0.2, "G", 0.1), (0.3, "C", 0.5)]
+        segs = rw.beat_chords(frames, [], 0.4)
+        self.assertEqual((segs[0]["label"], segs[0]["strength"]), ("C", None))  # null counts 0, stays null
+        frames = [(0.0, "G", None), (0.1, "G", None), (0.2, "C", 0.1)]
+        segs = rw.beat_chords(frames, [], 0.3)
+        self.assertEqual((segs[0]["label"], segs[0]["strength"]), ("C", 0.1))  # 0.1 > 0 + 0
+        # a beat interval with no frame inside takes the frame nearest its midpoint
+        frames = [(0.0, "C", 0.9), (1.0, "G", 0.9)]
+        segs = rw.beat_chords(frames, [0.1, 0.2, 0.6], 1.5)
+        self.assertEqual([(c["start"], c["end"], c["label"]) for c in segs], [(0.0, 0.6, "C"), (0.6, 1.5, "G")])
+        self.assertEqual(rw.beat_chords([], [0.5], 1.0), [])
+        # beats past the end are clamped; no zero-length segment
+        segs = rw.beat_chords([(0.0, "C", 0.5)], [0.0, 1.0, 1.04], 1.0)
+        self.assertEqual([(c["start"], c["end"]) for c in segs], [(0.0, 1.0)])
+
+
 @unittest.skipUnless(os.path.isfile(ESSENTIA_PY), "Essentia python missing")
 class RealWorkerTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.dir = tempfile.mkdtemp(prefix="mlrhythm-")
         cls.out = {}
-        for kind in ("click", "chords"):
+        for kind, secs in (("click", "30"), ("chords", "30"), ("modulation", "60")):
             wav = os.path.join(cls.dir, kind + ".wav")
-            subprocess.run([ESSENTIA_PY, "-I", SYNTH, kind, "30", wav], check=True, timeout=120)
+            subprocess.run([ESSENTIA_PY, "-I", SYNTH, kind, secs, wav], check=True, timeout=120)
             assert server.strict_wav_check(wav)
             p = subprocess.run([ESSENTIA_PY, "-I", WORKER, wav], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                timeout=300, env={"PATH": server.CHILD_ENV_PATH, "HOME": os.path.expanduser("~"),
@@ -417,9 +566,15 @@ class RealWorkerTest(unittest.TestCase):
         for v in self.out.values():
             self.assertIsNotNone(server.check_rhythm(v))
             self.assertEqual(v["downbeats"]["status"], "not_provided")
-            self.assertEqual((v["sample_rate"], v["duration"], v["chords_reliability"]), (44100, 30.0, "low_reference"))
+            self.assertEqual((v["sample_rate"], v["chords_reliability"]), (44100, "low_reference"))
+            self.assertIn(v["duration"], (30.0, 60.0))
             self.assertEqual(v["tool"]["essentia_version"], "2.1-beta6-dev")
+            self.assertEqual(v["tool"]["version"], "0.2.0")
             self.assertEqual(v["key"]["profile"], "bgate")
+            self.assertEqual(v["key_change_count"], len(v["key_sections"]) - 1)
+            self.assertEqual((v["key_sections"][0]["start"], v["key_sections"][-1]["end"]), (0.0, v["duration"]))
+            self.assertEqual(v["chords_grid"], "beat")
+            self.assertTrue(v["bpm_alternatives_note"])
 
     def test_click_120_bpm(self):
         v = self.out["click"]
@@ -427,6 +582,36 @@ class RealWorkerTest(unittest.TestCase):
         self.assertGreater(len(v["beats"]), 50)
         gaps = [b - a for a, b in zip(v["beats"], v["beats"][1:])]
         self.assertAlmostEqual(sorted(gaps)[len(gaps) // 2], 0.5, delta=0.02)
+        self.assertEqual(v["bpm_alternatives"], [60.0, 240.0])
+
+    def test_beat_grid_chords(self):
+        for v in self.out.values():
+            beats, chords = v["beats"], v["chords"]
+            min_gap = min(b - a for a, b in zip(beats, beats[1:]))
+            edges = {0.0, v["duration"]} | set(beats)
+            for c in chords:
+                self.assertIn(c["start"], edges)
+                self.assertIn(c["end"], edges)
+                if c["start"] >= beats[0] and c["end"] <= beats[-1]:  # not head or tail
+                    self.assertGreaterEqual(c["end"] - c["start"], min_gap - 0.002, c)
+            self.assertLessEqual(len(chords), v["chord_frame_segment_count"])
+        # clicks carry no harmony, so frame labels flip; the beat vote removes most of that
+        v = self.out["click"]
+        self.assertLess(len(v["chords"]), v["chord_frame_segment_count"])
+
+    def test_modulation_key_sections(self):
+        v = self.out["modulation"]
+        ks = v["key_sections"]
+        self.assertEqual((ks[0]["tonic"], ks[0]["scale"]), ("C", "major"))
+        self.assertEqual((ks[-1]["tonic"], ks[-1]["scale"]), ("D", "major"))
+        # the true boundary is 30 s; with 20 s windows the C section ends at 20 or 40 and the D section starts at
+        # 20 or 40 (tolerance one window). A window straddling the change may report a third key (seen: G major).
+        self.assertIn(ks[0]["end"], (20.0, 40.0))
+        self.assertIn(ks[-1]["start"], (20.0, 40.0))
+        self.assertLessEqual(len(ks), 3)
+        self.assertTrue(any(w.startswith("key_changes:") for w in v["warnings"]))
+        self.assertEqual(self.out["chords"]["key_change_count"], 0)
+        self.assertFalse(any(w.startswith("key_changes:") for w in self.out["chords"]["warnings"]))
 
     def test_chords_key_c_major_or_a_minor(self):
         v = self.out["chords"]
