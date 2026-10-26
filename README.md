@@ -185,8 +185,11 @@ synthetic file took about 6.3 s and ~0.97 GB peak RSS on this Mac (worker 0.2.0)
 - Tempo octave: the metrical level is ambiguous. On one real song (216 s, published tempo 220) the tracker said
   109.94 BPM and every `bpm_estimates` entry was ~110, so 220 never appeared there. `bpm_alternatives` lists half and
   double without choosing; compare them with a published tempo or with your own listening. No heuristic warns.
-- Key sections are a DSP estimate with 20 s resolution: a change inside a window moves the boundary to a window edge
-  (up to 20 s off), and a window straddling the change can report a third key. Synthetic test: C major 0-30 s then
+  Team check with worker 0.1.0 (8 songs, references from published charts): 87, 102, 145, 164 and 170 BPM came out
+  right; 185, 200 and 220 came out at exactly half. The confidence band did not flag the halved ones.
+- Key sections are a DSP estimate on nominal 20 s windows (a final tail under 10 s is merged, so the last window can
+  approach 30 s). Window resolution is not a measured error bound: a boundary lands on a window edge, and a window
+  straddling a change can report a blended or third key. Synthetic test: C major 0-30 s then
   D major 30-60 s gave C 0-20, G 20-40 (the straddling window; G major is the union of the two scales), D 40-60;
   the single global `key` said G major.
   Relative keys (C major / A minor) share notes and can alternate. One real song with a known modulation (E major,
