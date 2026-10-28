@@ -218,6 +218,40 @@ class OverviewLogicTest(unittest.TestCase):
                                   ("instrumental", None, 45.0, 70.0), ("vocal", None, 70.0, 80.0)])
         self.assertEqual(o["repeat_groups"], [{"group": 0, "count": 2, "seconds": 45.0}])
 
+    def test_exact_4s_gap_is_not_tiny(self):
+        # review F1: 18.4 - 14.4 is 3.9999999999999982 in binary floats; the gap is exactly 4 s and must stay
+        for off in (0.0, 0.4, 0.7, 0.123, 1.001):
+            blocks = [(round(4 + off, 3), round(14 + off, 3), 0), (round(18 + off, 3), round(28 + off, 3), 0),
+                      (round(44 + off, 3), round(54 + off, 3), 0)]
+            v = stored(60.0, [VERSE] * 60, blocks)
+            o = server.rhythm_overview(v, _words(0, 60))
+            assert_shape(self, o, 60.0)
+            gap = [s for s in o["segments"] if s["start"] == blocks[0][1]]
+            self.assertEqual((gap[0]["kind"], gap[0]["end"]), ("vocal", blocks[1][0]), off)
+            self.assertEqual(o["repeat_groups"], [{"group": 0, "count": 3, "seconds": 30.0}], off)
+            # 1 ms shorter: tiny, joins the previous repeat
+            short = [blocks[0], (round(blocks[1][0] - 0.001, 3), blocks[1][1], 0), blocks[2]]
+            o = server.rhythm_overview(stored(60.0, [VERSE] * 60, short), _words(0, 60))
+            assert_shape(self, o, 60.0)
+            self.assertEqual((seq(o)[1][:2], seq(o)[1][3], o["repeat_groups"][0]["seconds"]),
+                             (("repeat", 0), short[1][0], 34.0), off)  # first repeat absorbed the 3.999 s gap
+
+    def test_chord_duration_ties(self):
+        # review F2: C and Am both total 600 ms (float sums 0.5999.. vs 0.6000..); the tie goes to the earlier C
+        rows = [("C", 0.0, 0.3), ("Am", 0.3, 0.6), ("C", 0.6, 0.9), ("Am", 0.9, 1.2), ("F", 1.2, 1.5),
+                ("G", 1.5, 4.5), ("F", 4.5, 6.0)]
+        chords = [{"start": a, "end": b, "label": lab, "strength": 0.8} for lab, a, b in rows]
+        v = stored(6.0, [VERSE] * 6, [(0.0, 6.0, 0)], chords=chords)
+        o = server.rhythm_overview(v, None)
+        self.assertEqual(o["segments"][0]["chords"]["top"], [{"label": "G", "share": 0.5}, {"label": "F", "share": 0.3},
+                                                             {"label": "C", "share": 0.1}])
+        # the review's grid: C 0.3-0.6 + 0.9-1.2, Am 0.6-0.9 + 1.2-1.5 (both 600 ms), G 3 s, F 1.8 s
+        rows = [("F", 0.0, 0.3), ("C", 0.3, 0.6), ("Am", 0.6, 0.9), ("C", 0.9, 1.2), ("Am", 1.2, 1.5),
+                ("G", 1.5, 4.5), ("F", 4.5, 6.0)]
+        chords = [{"start": a, "end": b, "label": lab, "strength": 0.8} for lab, a, b in rows]
+        o = server.rhythm_overview(stored(6.0, [VERSE] * 6, [(0.0, 6.0, 0)], chords=chords), None)
+        self.assertEqual([c["label"] for c in o["segments"][0]["chords"]["top"]], ["G", "F", "C"])
+
     def test_silence_edges(self):
         vals = [VERSE] * 30 + [SIL] * 5 + [VERSE] * 25 + [SIL] * 3
         v = stored(63.0, vals, [(40.0, 50.0, 0)])

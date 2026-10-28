@@ -1497,6 +1497,16 @@ def _ov_wquantile(pairs, q=0.5):
     return pairs[-1][0]
 
 
+def _ms(x):
+    """Seconds -> integer milliseconds (the stored timestamp precision): durations and ties compare exactly, so
+    18.4 - 14.4 is a 4 s gap, not 3.9999999999999982."""
+    return int(round(x * 1000))
+
+
+def _ov_len(s):
+    return _ms(s["end"]) - _ms(s["start"])
+
+
 def _ov_runs(flags, step, a, b, min_len):
     """Edges of runs of True windows (window i = [i*step, (i+1)*step)) clipped to [a, b], kept when >= min_len."""
     cuts, i, n = [], 0, len(flags)
@@ -1508,7 +1518,7 @@ def _ov_runs(flags, step, a, b, min_len):
         while j + 1 < n and flags[j + 1]:
             j += 1
         s, e = max(a, i * step), min(b, (j + 1) * step)
-        if e - s >= min_len - 1e-9:
+        if _ms(e) - _ms(s) >= _ms(min_len):
             cuts += [s, e]
         i = j + 1
     return cuts
@@ -1521,7 +1531,7 @@ def _ov_coalesce(segs):
     for s in segs:
         p = out[-1] if out else None
         if (p is not None and p["kind"] == s["kind"] != "repeat" and p["label"] == s["label"]
-                and s["end"] - p["start"] <= OV_MAX_GAP + 1e-9):
+                and _ms(s["end"]) - _ms(p["start"]) <= _ms(OV_MAX_GAP)):
             p["end"] = s["end"]
         else:
             out.append(dict(s))
@@ -1593,16 +1603,16 @@ class _Ov:
         if self.words is not None:
             cuts.update(_ov_runs([not x for x in self.touched], self.step, a, b, OV_WORDLESS_RUN))
         pts = sorted(x for x in cuts if a <= x <= b)
-        pieces = [(x, y) for x, y in zip(pts, pts[1:]) if y - x > 1e-9]
+        pieces = [(x, y) for x, y in zip(pts, pts[1:]) if _ms(y) > _ms(x)]
         bounds = sorted({r["start"] for r in (self.v.get("sections") or [])[1:]})
         out, todo = [], list(reversed(pieces))
         while todo:
             x, y = todo.pop()
-            if y - x > OV_MAX_GAP:
-                inner = [c for c in bounds if x + OV_MIN_PIECE <= c <= y - OV_MIN_PIECE]
+            if _ms(y) - _ms(x) > _ms(OV_MAX_GAP):
+                lo, hi = _ms(x) + _ms(OV_MIN_PIECE), _ms(y) - _ms(OV_MIN_PIECE)
+                inner = [c for c in bounds if lo <= _ms(c) <= hi]
                 if inner:
-                    mid = (x + y) / 2
-                    c = min(inner, key=lambda c: (abs(c - mid), c))
+                    c = min(inner, key=lambda c: (abs(_ms(c) * 2 - _ms(x) - _ms(y)), c))
                     todo += [(c, y), (x, c)]
                     continue
             out.append({"start": x, "end": y, "kind": self.classify(x, y), "group": None, "label": None})
@@ -1623,16 +1633,16 @@ class _Ov:
         shortest first, ties earliest. Then, while > 40 segments, the shortest non-repeat one joins by the same rule;
         finally same-kind neighbours coalesce (_ov_coalesce)."""
         def pick(limit):
-            cand = [k for k, s in enumerate(segs) if s["kind"] != "repeat" and s["end"] - s["start"] < limit]
-            return min(cand, key=lambda k: (segs[k]["end"] - segs[k]["start"], k)) if cand else None
+            cand = [k for k, s in enumerate(segs) if s["kind"] != "repeat" and (limit is None or _ov_len(s) < limit)]
+            return min(cand, key=lambda k: (_ov_len(segs[k]), k)) if cand else None
 
         while len(segs) > 1:
-            k = pick(OV_MIN_PIECE) if len(segs) <= OV_MAX_SEGMENTS else pick(float("inf"))
+            k = pick(_ms(OV_MIN_PIECE)) if len(segs) <= OV_MAX_SEGMENTS else pick(None)
             if k is None:
                 break
             nb = [j for j in (k - 1, k + 1) if 0 <= j < len(segs) and segs[j]["kind"] != "repeat"]
             if nb:
-                j = max(nb, key=lambda j: (segs[j]["end"] - segs[j]["start"], -j))
+                j = max(nb, key=lambda j: (_ov_len(segs[j]), -j))
             else:
                 j = k - 1 if k > 0 else k + 1
             r = segs[j]
@@ -1663,12 +1673,12 @@ class _Ov:
             if prev is not None and lab != prev and a < s < b:
                 changes += 1
             prev = lab
-            o = min(e, b) - max(s, a)
+            o = _ms(min(e, b)) - _ms(max(s, a))  # integer ms: equal stored durations tie exactly
             if o > 0:
-                acc[lab] = acc.get(lab, 0.0) + o
+                acc[lab] = acc.get(lab, 0) + o
                 first.setdefault(lab, max(s, a))
         top = sorted(acc, key=lambda lab: (-acc[lab], first[lab], lab))[:OV_TOP_CHORDS]
-        return {"top": [{"label": lab, "share": round(min(1.0, acc[lab] / (b - a)), 3)} for lab in top],
+        return {"top": [{"label": lab, "share": round(min(1.0, acc[lab] / (_ms(b) - _ms(a))), 3)} for lab in top],
                 "changes_per_min": round(changes * 60.0 / (b - a), 2)}
 
     def _in(self, starts, a, b):

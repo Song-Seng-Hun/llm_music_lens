@@ -604,7 +604,8 @@ Why lyric repeats are the backbone: on the 8 real songs (stored 0.4.3 `structure
      windows its span overlaps), else `instrumental`. Without verified words (below) the same 25% rule uses the melody
      notes (`method` says "melody notes"; weak: the predominant pitch also follows instruments), and without melody
      too the kind is `gap`;
-  4. a non-repeat piece under 4 s joins its longer non-repeat neighbour (ties: the earlier), else (only repeat
+  4. (lengths, gap limits and chord times are compared in integer milliseconds, the stored precision, so an exact
+     4 s gap is not tiny and equal chord durations tie exactly) a non-repeat piece under 4 s joins its longer non-repeat neighbour (ties: the earlier), else (only repeat
      neighbours) the previous segment (the next one at the song start), shortest first, ties earliest; the receiver
      keeps its kind and group, so a repeat can absorb a gap under 4 s (repeat edges then differ from the block
      edges). While more than 40 segments remain, the shortest non-repeat segment joins by the same rule. Adjacent
@@ -627,7 +628,7 @@ Why lyric repeats are the backbone: on the 8 real songs (stored 0.4.3 `structure
     the non-silent values; `rank` 1 = loudest among non-silence segments (ties earliest), null for silence;
   - `quiet`: true only for a repeat with `rel_db <= -12` (heuristic, not calibrated: far below the -2.4..+1.2 dB
     of the plausible chorus repeats on the 8 songs, e.g. a repeat over a fade), else false;
-  - `chords.top`: up to 3 `{label, share}` by time inside the segment (share of the segment length, ties by first
+  - `chords.top`: up to 3 `{label, share}` by time inside the segment (share of the segment length; durations in integer ms, ties by first
     appearance); `changes_per_min`: chord label changes strictly inside the segment per minute;
   - `melody` (null on every segment when the melody is missing or failed): `{note_count, low, high, median_midi,
     rel_semitones}` over notes whose onset lies in the segment, median duration-weighted like the worker,
