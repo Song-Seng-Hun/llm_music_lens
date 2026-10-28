@@ -145,7 +145,8 @@ API:
   worker file is not detected (restart is needed after editing the worker in place). If the worker file cannot be
   read at start, its hash is null and nothing is reused (every rhythm request recomputes); that alone does not make
   the run fail, the run then succeeds or fails on its own (a worker that is really missing fails at spawn). `/report` and `/timeline` read whatever
-  is stored and never recompute. A store failure still returns the
+  is stored and never recompute the worker (the summary's `overview` is derived from the stored file at read time,
+  see "Overview"). A store failure still returns the
   data with `stored: false`. The files are not pruned automatically (about 35-45 KB per 10 minutes of audio with
   worker 0.3.0: 34,114 B for the 600 s loop, 41,434 B for a 600 s file with 40 sections; worker 0.4.0 adds the
   melody notes, about 54 B per note: 46,911 B for the 600 s loop (225 notes), 103,330 B for the 600 s melody track
@@ -154,14 +155,14 @@ API:
   `bpm_estimates`, `bpm_alternatives`, `bpm_alternatives_note`, `double_tempo_evidence`,
   `double_tempo_evidence_note`, `tempo_cnn`, `key`, `key_sections`, `key_change_count`,
   `beat_count`, `chord_segment_count`, `chords_grid`, `energy_summary`, `sections`, `sections_method`,
-  `sections_reliability`, `melody`, `lyric_repeats`, `downbeats`, `duration`, `tool`, `warnings`) when a stored file
+  `sections_reliability`, `melody`, `lyric_repeats`, `overview`, `downbeats`, `duration`, `tool`, `warnings`) when a stored file
   exists, re-serializing the native JSON (number formatting may change). Files stored by worker 0.1.0 lack the
   0.2.0 fields and still load; the summary then has `bpm_alternatives`, `bpm_alternatives_note`, `key_sections`,
   `key_change_count` and `chords_grid` set to `null` (they are not recomputed; old chord rows stay frame-level).
   Files from 0.1.0 and 0.2.0 likewise give `double_tempo_evidence` and `double_tempo_evidence_note` as `null`, and
   files from before 0.2.2 give `tempo_cnn: null`, and files from before 0.3.0 give `energy_summary`, `sections`,
   `sections_method` and `sections_reliability` as `null`, and files from before 0.4.0 give `melody: null`, and files
-  from before 0.4.3 give `lyric_repeats: null`. `structure_debug` is never in the summary (stored file only). A damaged file gives `rhythm: {"status":"failed","code":"invalid_result"}`.
+  from before 0.4.3 give `lyric_repeats: null` and `overview: null`. `structure_debug` is never in the summary (stored file only). A damaged file gives `rhythm: {"status":"failed","code":"invalid_result"}`.
   No file: native bytes unchanged.
 - `GET /timeline/<id>?layer=beats|chords|energy|melody` is served by the server from the stored file with the native rules:
   `start`/`end` 0..600 (default 0 and 600, `end >= start`), rows overlapping the range, `limit` 1..200 (default 100),
@@ -401,7 +402,11 @@ not a transcription. There are no downbeats and no named parts.
   Boundaries sit on beat times and need 16 beat intervals of context at both ends (about 8 s at 120 BPM, about
   5 s at 200 BPM). A section whose beats carry no chroma (silence, very quiet or peak-free material) gets chroma
   similarity 0, so even an identical repeat scores at most 0.5 and receives a new letter (unless it is quiet enough to
-  be `silence`, 0.4.1). Untested on real songs; `sections_reliability:
+  be `silence`, 0.4.1). Real-song check (8 J-pop songs, stored 0.4.3 `structure_debug`, read-only): sweeping the
+  novelty threshold from 0.04 to 0.20, the share of `lyric_repeats` block edges with a boundary within +-5 s equals
+  the chance level implied by the boundary density at every threshold (0.15: 26% vs ~25% chance; 0.06: 62% vs ~70%),
+  and novelty near lyric edges is mostly 0.02-0.10: the boundaries do not find verse/chorus edges, so use
+  `overview` (lyric repeats as the backbone) for song structure. `sections_reliability:
   "low_reference"`. Synthetic results (worker 0.3.0): A-B-A-B in 15 s blocks (A = C-Am-F-G with 3 soft partials,
   B = E-C#m-A-B with 8 sawtooth-like partials at about +8 dB, soft 120 BPM pulse) gave A 0-15, B 15-30, A 30-45,
   B 45-60 (boundaries exactly on the block edges), energy_mean A -26.68 / B -18.77 dB, similarity_to_first >=
@@ -574,6 +579,66 @@ repeats are reported on their own and clients compare the two.
   (the same line over an instrumental) create one, and an untranscribed chorus is invisible. Repeated text is not
   always a chorus (a repeated verse line, a refrain inside a verse). Word mode (English, Korean) is untested on real
   songs. Say "estimate" when relaying.
+
+### Overview (server, read time)
+
+Purpose: one ordered list of song parts for agents, built from data the stored file already holds. Computed by the
+server each time a summary is produced (`/report` and both analyze paths, fresh run and cache hit; the summary is the
+same everywhere), never stored, never a worker run. About 1-2 ms for a 3-5 min song. `null` when the stored file
+predates worker 0.4.3 (no `lyric_repeats`); no rhythm file or a failed rhythm: no summary at all, as before.
+
+Why lyric repeats are the backbone: on the 8 real songs (stored 0.4.3 `structure_debug`) the audio boundaries match
+`lyric_repeats` block edges (+-5 s) only at the chance level implied by their density, at every novelty threshold from
+0.04 to 0.20 (0.15: 26% vs ~25% chance; 0.06: 62% vs ~70%); novelty near lyric edges is mostly 0.02-0.10. So audio
+`sections` only split long gaps here, or stand in when there are no repeats.
+
+- `source: "lyric"` when `lyric_repeats` is `done` with at least one block (blocks clamped into the duration):
+  1. every block becomes a segment `kind: "repeat"` with its `group`;
+  2. each gap before, between and after the blocks is cut at the edges of runs of >= 4 consecutive 1 s energy
+     windows below `silence_db` (-60 dBFS) and, when words are available, of runs of >= 8 windows touched by no ASR
+     word (about 4 bars at 120 BPM: separates an instrumental intro or interlude from a verse); a piece longer than
+     40 s is split at the audio section boundary (`sections[1:].start`, at least 4 s inside) nearest its middle (ties
+     earliest), repeated while longer than 40 s and a boundary exists;
+  3. each piece gets a kind: `silence` when more than half of its 1 s windows (by midpoint) are below `silence_db`,
+     else `vocal` when >= 25% of its windows are touched by an ASR word (zero-length words count; a word touches the
+     windows its span overlaps), else `instrumental`. Without verified words (below) the same 25% rule uses the melody
+     notes (`method` says "melody notes"; weak: the predominant pitch also follows instruments), and without melody
+     too the kind is `gap`;
+  4. a non-repeat piece under 4 s joins its longer non-repeat neighbour (ties: the earlier), else (only repeat
+     neighbours) the previous segment (the next one at the song start), shortest first, ties earliest; the receiver
+     keeps its kind and group, so a repeat can absorb a gap under 4 s (repeat edges then differ from the block
+     edges). While more than 40 segments remain, the shortest non-repeat segment joins by the same rule. Adjacent
+     non-repeat pieces of the same kind then join while the result stays <= 40 s.
+- `source: "audio"` when lyric repeats are unavailable, failed or empty: the stored `sections`, kind `section` (with
+  its `label` letter) or `silence` (label `silence`), made contiguous. No repeats and no sections (no beats):
+  `{status: "failed", code: "no_structure"}`.
+- Words: the ASR words of `<root>/results/<result_id>.json` read like the lyric input (same checks), used only when
+  their payload hash equals the stored `words_sha256` (the words the repeats came from); otherwise (result file
+  gone, changed by an ASR re-run, malformed) `words` is null on every segment. Only counts are returned, never text.
+- Output: `{status: "done", source, method, reliability: "low_reference", segment_count, repeat_groups: [{group,
+  count, seconds}], segments, notes}`; at most 40 segments, contiguous 0..duration (times 3 decimals). Each segment
+  `{start, end, kind, group (repeat only, else null), label (audio only, else null), energy: {mean_db, rel_db,
+  rank}, chords: {top, changes_per_min}, melody, words}`:
+  - `energy.mean_db`: mean of the 1 s values whose midpoint lies in the segment, leaving out values below
+    `silence_db` unless the segment is silence or holds only such values; `rel_db` = mean_db minus the song median of
+    the non-silent values; `rank` 1 = loudest among non-silence segments (ties earliest), null for silence;
+  - `chords.top`: up to 3 `{label, share}` by time inside the segment (share of the segment length, ties by first
+    appearance); `changes_per_min`: chord label changes strictly inside the segment per minute;
+  - `melody` (null on every segment when the melody is missing or failed): `{note_count, low, high, median_midi,
+    rel_semitones}` over notes whose onset lies in the segment, median duration-weighted like the worker,
+    `rel_semitones` vs the song `melody.median_midi`; MIDI ints, null without notes;
+  - `words`: `{count}` of word onsets in the segment, or null (above).
+- Failure containment: any internal error gives `overview: {status: "failed", code: "internal_error"}`, a result
+  failing the server's own strict shape check `{..., code: "invalid_overview"}`; the rest of the summary and the
+  report are unchanged.
+- Offline check (8 stored songs, read-only): one result predates 0.4.3 -> null; one has `too_little_text` -> audio
+  source, 7 sections all `A`; the other 7 gave 6-15 segments with 2-5 repeats each (1-2 groups); repeat `rel_db`
+  -2.4..+1.2 dB except two hallucination-like repeats over a fading/silent tail (-23, -107 dB); repeat
+  `rel_semitones` -4..+12.
+- Honest limits: `repeat` = repeated ASR text, a chorus/hook candidate, not a verified chorus; verse and pre-chorus
+  are not distinguished (both `vocal`); everything depends on the ASR (missed lines turn into `instrumental`,
+  hallucinated text over an instrumental into `vocal` or `repeat`); split points sit on 1 s windows or section
+  boundaries; thresholds (4 s, 8 s, 25%, 40 s) are set by reasoning, checked on 8 songs only. Say "estimate".
 
 ## Runtime layout (production)
 

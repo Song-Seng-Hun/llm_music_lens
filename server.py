@@ -7,6 +7,7 @@ The listener loads no model; models load only inside each `ml analyze` job's sub
 Usage: server.py [--config PATH]   (default ~/.music-lens/api.json, mode 0600)
 """
 import argparse
+import bisect
 import errno
 import fcntl
 import hashlib
@@ -1434,12 +1435,13 @@ def _tempo_cnn_retry(v):
     return t.get("status") == "unavailable" or (t.get("status") == "failed" and t.get("code") in TEMPO_CNN_RETRY_CODES)
 
 
-def rhythm_summary(v):
+def rhythm_summary(v, overview=None):
     """Compact view for analyze and /report; beats and chord rows stay in the stored file (/timeline).
     Fields from worker 0.2.0 (bpm_alternatives[_note], key_sections, key_change_count, chords_grid) and 0.2.1
     (double_tempo_evidence[_note]) and 0.2.2 (tempo_cnn) and 0.3.0 (energy_summary, sections, sections_method,
     sections_reliability) and 0.4.0 (melody) and 0.4.3 (lyric_repeats) are null when the stored file predates them.
-    Energy values and melody notes come only from /timeline; structure_debug stays in the stored file."""
+    Energy values and melody notes come only from /timeline; structure_debug stays in the stored file.
+    `overview` is computed by the caller (App.rhythm_overview, read time, never stored); null before 0.4.3."""
     return {"status": "done", "bpm": v["bpm"], "bpm_confidence": v["bpm_confidence"],
             "bpm_confidence_band": confidence_band(v["bpm_confidence"]),
             "bpm_confidence_scale": v.get("bpm_confidence_scale"), "bpm_estimates": v.get("bpm_estimates", []),
@@ -1451,9 +1453,383 @@ def rhythm_summary(v):
             "chords_grid": v.get("chords_grid"), "chords_reliability": v.get("chords_reliability"),
             "energy_summary": v.get("energy_summary"), "sections": v.get("sections"),
             "sections_method": v.get("sections_method"), "sections_reliability": v.get("sections_reliability"),
-            "melody": v.get("melody"), "lyric_repeats": v.get("lyric_repeats"), "downbeats": v["downbeats"],
+            "melody": v.get("melody"), "lyric_repeats": v.get("lyric_repeats"), "overview": overview,
+            "downbeats": v["downbeats"],
             "duration": v["duration"], "tool": v["tool"],
             "warnings": v["warnings"]}
+
+
+# ---------------------------------------------------------------- section overview (read time, never stored)
+# Evidence (8 real J-pop songs, stored 0.4.3 structure_debug): sweeping the Foote threshold 0.04-0.20, audio
+# boundaries agree with lyric_repeats block edges (+-5 s) only at the chance level implied by boundary density, so
+# the lyric repeats are the backbone and the audio sections only split long gaps (or stand in when no repeats).
+OV_MAX_SEGMENTS = 40
+OV_MAX_GAP = 40.0  # s; a longer non-repeat piece is split at the audio section boundary nearest its middle
+OV_MIN_PIECE = 4.0  # s; shorter non-repeat pieces join a neighbour (the lyric blocks' own minimum)
+OV_SILENCE_RUN = 4.0  # s of consecutive 1 s windows below silence_db that cut a gap
+OV_WORDLESS_RUN = 8.0  # s of consecutive 1 s windows touched by no ASR word that cut a gap (about 4 bars)
+OV_VOCAL_FRACTION = 0.25  # share of a piece's 1 s windows touched by a word (or, without words, by a melody note)
+OV_SILENCE_DB = -60.0  # the worker's SILENCE_DB, used when energy_summary carries no silence_db
+OV_TOP_CHORDS = 3
+OV_KEYS = {"status", "source", "method", "reliability", "segment_count", "repeat_groups", "segments", "notes"}
+OV_SEG_KEYS = {"start", "end", "kind", "group", "label", "energy", "chords", "melody", "words"}
+OV_KINDS = {"lyric": ("repeat", "vocal", "instrumental", "silence", "gap"), "audio": ("section", "silence")}
+OV_VOCAL_BY = ("words", "melody", "none")
+OV_METHOD_LYRIC = ("lyric_repeats blocks; gaps: silence if >half 1 s windows < silence_db, else vocal if >=25%% "
+                   "windows touched by %s; cuts: silence >=4 s, wordless >=8 s, sections if >40 s; <4 s merged")
+OV_METHOD = {"lyric": {b: OV_METHOD_LYRIC % {"words": "ASR words", "melody": "melody notes",
+                                             "none": "none (gap)"}[b] for b in OV_VOCAL_BY},
+             "audio": "audio sections (Foote novelty, chroma+MFCC); lyric repeats unavailable or empty"}
+OV_NOTES = ("estimate: repeat = repeated ASR text (chorus/hook candidate), verse/pre-chorus not distinguished, "
+            "depends on ASR; audio sections near chance vs lyric edges on 8 songs")
+
+
+def _ov_wquantile(pairs, q=0.5):
+    """The worker's duration-weighted quantile (_wquantile): smallest midi whose cumulative weight reaches q."""
+    pairs = sorted(pairs)
+    total, acc = sum(w for _, w in pairs), 0.0
+    for m, w in pairs:
+        acc += w
+        if acc >= q * total - 1e-12:
+            return m
+    return pairs[-1][0]
+
+
+def _ov_runs(flags, step, a, b, min_len):
+    """Edges of runs of True windows (window i = [i*step, (i+1)*step)) clipped to [a, b], kept when >= min_len."""
+    cuts, i, n = [], 0, len(flags)
+    while i < n:
+        if not flags[i]:
+            i += 1
+            continue
+        j = i
+        while j + 1 < n and flags[j + 1]:
+            j += 1
+        s, e = max(a, i * step), min(b, (j + 1) * step)
+        if e - s >= min_len - 1e-9:
+            cuts += [s, e]
+        i = j + 1
+    return cuts
+
+
+def _ov_coalesce(segs):
+    """Adjacent non-repeat pieces of the same kind join while the joined piece stays <= 40 s (so a cut that only
+    separated two pieces of one kind disappears, but a long-gap split at a section boundary stays)."""
+    out = []
+    for s in segs:
+        p = out[-1] if out else None
+        if (p is not None and p["kind"] == s["kind"] != "repeat" and p["label"] == s["label"]
+                and s["end"] - p["start"] <= OV_MAX_GAP + 1e-9):
+            p["end"] = s["end"]
+        else:
+            out.append(dict(s))
+    return out
+
+
+class _Ov:
+    """One overview computation over a validated stored rhythm dict and (optionally) the verified ASR words."""
+
+    def __init__(self, v, words):
+        self.v, self.dur = v, float(v["duration"])
+        e = v.get("energy") or {"step_s": 1.0, "values": []}
+        self.step, self.values = float(e["step_s"]), e["values"]
+        es = v.get("energy_summary")
+        self.sil_db = es["silence_db"] if isinstance(es, dict) and "silence_db" in es else OV_SILENCE_DB
+        self.silent = [x < self.sil_db for x in self.values]
+        m = v.get("melody")
+        self.melody = m if isinstance(m, dict) and m.get("status") == "done" else None
+        self.notes = sorted(((n["start"], n["end"], n["midi"]) for n in v.get("melody_notes", [])), key=lambda n: n[:2]) \
+            if self.melody else []
+        self.note_starts = [n[0] for n in self.notes]
+        self.words = None if words is None else sorted((float(w[1]), float(w[2])) for w in words)
+        self.word_starts = None if self.words is None else [w[0] for w in self.words]
+        self.vocal_by = "words" if self.words is not None else "melody" if self.melody else "none"
+        self.touched = self._touched([(max(s, 0.0), max(s, e)) for s, e in self.words] if self.words is not None
+                                     else [(s, e) for s, e, _ in self.notes])
+        self.chords = sorted((c["start"], c["end"], c["label"]) for c in v["chords"])
+
+    def _touched(self, spans):
+        n, out = len(self.values), [False] * len(self.values)
+        for s, e in spans:
+            i0 = int(s // self.step)
+            i1 = max(i0, int(math.ceil(e / self.step)) - 1) if e > s else i0
+            for i in range(max(i0, 0), min(i1, n - 1) + 1):
+                out[i] = True
+        return out
+
+    def windows(self, a, b):
+        """Indices of energy windows whose midpoint lies in [a, b) ([a, b] for the piece ending the song)."""
+        last = b >= self.dur - 1e-9
+        return [i for i in range(len(self.values))
+                if a <= (i + 0.5) * self.step < b or (last and (i + 0.5) * self.step == b)]
+
+    # ---- segmentation
+    def lyric(self, blocks):
+        segs, t = [], 0.0
+        for s, e, g in blocks:
+            if s > t + 1e-9:
+                segs += self.gap(t, s)
+            segs.append({"start": s, "end": e, "kind": "repeat", "group": g, "label": None})
+            t = e
+        if self.dur > t + 1e-9:
+            segs += self.gap(t, self.dur)
+        return self.merge(segs)
+
+    def gap(self, a, b):
+        cuts = {a, b}
+        cuts.update(_ov_runs(self.silent, self.step, a, b, OV_SILENCE_RUN))
+        if self.words is not None:
+            cuts.update(_ov_runs([not x for x in self.touched], self.step, a, b, OV_WORDLESS_RUN))
+        pts = sorted(x for x in cuts if a <= x <= b)
+        pieces = [(x, y) for x, y in zip(pts, pts[1:]) if y - x > 1e-9]
+        bounds = sorted({r["start"] for r in (self.v.get("sections") or [])[1:]})
+        out, todo = [], list(reversed(pieces))
+        while todo:
+            x, y = todo.pop()
+            if y - x > OV_MAX_GAP:
+                inner = [c for c in bounds if x + OV_MIN_PIECE <= c <= y - OV_MIN_PIECE]
+                if inner:
+                    mid = (x + y) / 2
+                    c = min(inner, key=lambda c: (abs(c - mid), c))
+                    todo += [(c, y), (x, c)]
+                    continue
+            out.append({"start": x, "end": y, "kind": self.classify(x, y), "group": None, "label": None})
+        return _ov_coalesce(out)
+
+    def classify(self, a, b):
+        idx = self.windows(a, b)
+        if idx and 2 * sum(self.silent[i] for i in idx) > len(idx):
+            return "silence"
+        if self.vocal_by == "none":
+            return "gap"
+        frac = sum(self.touched[i] for i in idx) / len(idx) if idx else 0.0
+        return "vocal" if frac >= OV_VOCAL_FRACTION else "instrumental"
+
+    def merge(self, segs):
+        """A non-repeat piece < 4 s joins its longer non-repeat neighbour (ties: the earlier one), else (only repeat
+        neighbours) the previous segment (the next one at the song start), keeping the receiver's kind and group;
+        shortest first, ties earliest. Then, while > 40 segments, the shortest non-repeat one joins by the same rule;
+        finally same-kind neighbours coalesce (_ov_coalesce)."""
+        def pick(limit):
+            cand = [k for k, s in enumerate(segs) if s["kind"] != "repeat" and s["end"] - s["start"] < limit]
+            return min(cand, key=lambda k: (segs[k]["end"] - segs[k]["start"], k)) if cand else None
+
+        while len(segs) > 1:
+            k = pick(OV_MIN_PIECE) if len(segs) <= OV_MAX_SEGMENTS else pick(float("inf"))
+            if k is None:
+                break
+            nb = [j for j in (k - 1, k + 1) if 0 <= j < len(segs) and segs[j]["kind"] != "repeat"]
+            if nb:
+                j = max(nb, key=lambda j: (segs[j]["end"] - segs[j]["start"], -j))
+            else:
+                j = k - 1 if k > 0 else k + 1
+            r = segs[j]
+            r["start"], r["end"] = min(r["start"], segs[k]["start"]), max(r["end"], segs[k]["end"])
+            del segs[k]
+        return _ov_coalesce(segs)
+
+    def audio(self):
+        ss = self.v["sections"]
+        segs = []
+        for k, r in enumerate(ss):
+            sil = r["label"] == SILENCE_LABEL
+            segs.append({"start": 0.0 if k == 0 else r["start"], "end": self.dur if k == len(ss) - 1 else ss[k + 1]["start"],
+                         "kind": "silence" if sil else "section", "group": None, "label": r["label"]})
+        return segs
+
+    # ---- per segment measures
+    def energy(self, a, b, kind):
+        vals = [self.values[i] for i in self.windows(a, b)]
+        loud = [x for x in vals if x >= self.sil_db]
+        use = loud if kind != "silence" and loud else vals
+        return round(sum(use) / len(use), 2) if use else None
+
+    def chord_info(self, a, b):
+        acc, first = {}, {}
+        prev, changes = None, 0
+        for s, e, lab in self.chords:
+            if prev is not None and lab != prev and a < s < b:
+                changes += 1
+            prev = lab
+            o = min(e, b) - max(s, a)
+            if o > 0:
+                acc[lab] = acc.get(lab, 0.0) + o
+                first.setdefault(lab, max(s, a))
+        top = sorted(acc, key=lambda lab: (-acc[lab], first[lab], lab))[:OV_TOP_CHORDS]
+        return {"top": [{"label": lab, "share": round(min(1.0, acc[lab] / (b - a)), 3)} for lab in top],
+                "changes_per_min": round(changes * 60.0 / (b - a), 2)}
+
+    def _in(self, starts, a, b):
+        lo = bisect.bisect_left(starts, a)
+        hi = bisect.bisect_right(starts, b) if b >= self.dur - 1e-9 else bisect.bisect_left(starts, b)
+        return lo, hi
+
+    def melody_info(self, a, b):
+        if not self.melody:
+            return None
+        lo, hi = self._in(self.note_starts, a, b)
+        inside = self.notes[lo:hi]
+        if not inside:
+            return {"note_count": 0, "low": None, "high": None, "median_midi": None, "rel_semitones": None}
+        med = _ov_wquantile([(m, max(e - s, 1e-6)) for s, e, m in inside])
+        song = self.melody["median_midi"]
+        return {"note_count": len(inside), "low": min(n[2] for n in inside), "high": max(n[2] for n in inside),
+                "median_midi": med, "rel_semitones": None if song is None else med - song}
+
+    def words_info(self, a, b):
+        if self.word_starts is None:
+            return None
+        lo, hi = self._in(self.word_starts, a, b)
+        return {"count": hi - lo}
+
+    def build(self):
+        ly = self.v["lyric_repeats"]
+        blocks = []
+        if ly.get("status") == "done":
+            for b in ly["blocks"]:
+                s, e = round(min(b["start"], self.dur), 3), round(min(b["end"], self.dur), 3)
+                if e > s and (not blocks or s >= blocks[-1][1]):
+                    blocks.append((s, e, b["group"]))
+        if blocks:
+            source, segs, method = "lyric", self.lyric(blocks), OV_METHOD["lyric"][self.vocal_by]
+        elif self.v.get("sections"):
+            source, segs, method = "audio", self.audio(), OV_METHOD["audio"]
+        else:
+            return {"status": "failed", "code": "no_structure"}
+        loud = sorted(x for x in self.values if x >= self.sil_db)
+        median = None
+        if loud:
+            h = len(loud) // 2
+            median = loud[h] if len(loud) % 2 else (loud[h - 1] + loud[h]) / 2
+        out = []
+        for s in segs:
+            a, b = s["start"], s["end"]
+            mean = self.energy(a, b, s["kind"])
+            out.append({"start": round(a, 3), "end": round(b, 3), "kind": s["kind"], "group": s["group"],
+                        "label": s["label"],
+                        "energy": {"mean_db": mean,
+                                   "rel_db": None if mean is None or median is None else round(mean - median, 2),
+                                   "rank": None},
+                        "chords": self.chord_info(a, b), "melody": self.melody_info(a, b), "words": self.words_info(a, b)})
+        ranked = sorted((k for k, s in enumerate(out) if s["kind"] != "silence" and s["energy"]["mean_db"] is not None),
+                        key=lambda k: (-out[k]["energy"]["mean_db"], k))
+        for r, k in enumerate(ranked, 1):
+            out[k]["energy"]["rank"] = r
+        groups = {}
+        for s in out:
+            if s["kind"] == "repeat":
+                c, t = groups.get(s["group"], (0, 0.0))
+                groups[s["group"]] = (c + 1, t + s["end"] - s["start"])
+        return {"status": "done", "source": source, "method": method, "reliability": "low_reference",
+                "segment_count": len(out),
+                "repeat_groups": [{"group": g, "count": groups[g][0], "seconds": round(groups[g][1], 3)}
+                                  for g in sorted(groups)],
+                "segments": out, "notes": OV_NOTES}
+
+
+def overview_words(payload, sha, v):
+    """The ASR words for the overview: the --words-stdin payload bytes (App.lyric_words) when they are the words the
+    stored lyric_repeats came from (same words_sha256), else None. Returns [[text, start, end], ...] or None."""
+    if not isinstance(v.get("words_sha256"), str) or v["words_sha256"] != sha:
+        return None
+    w = json.loads(payload.decode("ascii")).get("words")
+    return w if isinstance(w, list) else None
+
+
+def rhythm_overview(v, words):
+    """Section overview of a validated stored rhythm dict (null before worker 0.4.3). Pure and deterministic; any
+    internal error or a result failing its own shape check gives {status: failed, code} and never raises."""
+    if not isinstance(v, dict) or "lyric_repeats" not in v:
+        return None
+    try:
+        o = _Ov(v, words).build()
+        if not overview_ok(o, v["duration"]):
+            return {"status": "failed", "code": "invalid_overview"}
+        return o
+    except Exception:  # noqa: BLE001  (the overview must never break /report or analyze)
+        return {"status": "failed", "code": "internal_error"}
+
+
+def _int(x, lo, hi):
+    return isinstance(x, int) and not isinstance(x, bool) and lo <= x <= hi
+
+
+def overview_ok(o, dur):
+    """Strict shape of an overview: exact keys, kinds per source, contiguous 0..duration, <= 40 segments, groups only
+    on repeats, labels only on audio segments, ranks a permutation over non-silent measured segments, bounded."""
+    if not isinstance(o, dict) or o.get("status") not in ("done", "failed"):
+        return False
+    if o["status"] == "failed":
+        return set(o) == {"status", "code"} and isinstance(o["code"], str) and bool(RE_CODE.match(o["code"]))
+    if set(o) != OV_KEYS or o["source"] not in OV_KINDS or o["reliability"] != "low_reference":
+        return False
+    if not (_short_str(o["method"], 200) and _short_str(o["notes"], 200)):
+        return False
+    segs = o["segments"]
+    if not (isinstance(segs, list) and 1 <= len(segs) <= OV_MAX_SEGMENTS and o["segment_count"] == len(segs)):
+        return False
+    t, ranks, groups = 0.0, [], {}
+    mel = [s.get("melody") is None for s in segs if isinstance(s, dict)]
+    wrd = [s.get("words") is None for s in segs if isinstance(s, dict)]
+    if len(set(mel)) > 1 or len(set(wrd)) > 1:  # melody / words present for every segment or none
+        return False
+    for s in segs:
+        if not (isinstance(s, dict) and set(s) == OV_SEG_KEYS and s["kind"] in OV_KINDS[o["source"]]
+                and _num(s["start"], 0, 601) and _num(s["end"], 0, 601) and s["start"] == t and s["end"] > s["start"]):
+            return False
+        t = s["end"]
+        if (s["kind"] == "repeat") != _int(s["group"], 0, LYRIC_MAX_BLOCKS - 1) or (s["kind"] != "repeat"
+                                                                                  and s["group"] is not None):
+            return False
+        if o["source"] == "audio":
+            if not (s["label"] == SILENCE_LABEL if s["kind"] == "silence"
+                    else isinstance(s["label"], str) and bool(RE_SECTION_LABEL.match(s["label"]))):
+                return False
+        elif s["label"] is not None:
+            return False
+        e = s["energy"]
+        if not (isinstance(e, dict) and set(e) == {"mean_db", "rel_db", "rank"} and _opt_num(e["mean_db"], *ENERGY_DB)
+                and _opt_num(e["rel_db"], -120, 120) and (e["mean_db"] is not None or e["rel_db"] is None)):
+            return False
+        if s["kind"] == "silence" or e["mean_db"] is None:
+            if e["rank"] is not None:
+                return False
+        elif not _int(e["rank"], 1, OV_MAX_SEGMENTS):
+            return False
+        else:
+            ranks.append(e["rank"])
+        c = s["chords"]
+        if not (isinstance(c, dict) and set(c) == {"top", "changes_per_min"} and _num(c["changes_per_min"], 0, 1e6)
+                and isinstance(c["top"], list) and len(c["top"]) <= OV_TOP_CHORDS
+                and all(isinstance(x, dict) and set(x) == {"label", "share"} and _short_str(x["label"], 16)
+                        and _num(x["share"], 0, 1) for x in c["top"])
+                and len({x["label"] for x in c["top"]}) == len(c["top"])
+                and all(b["share"] <= a["share"] for a, b in zip(c["top"], c["top"][1:]))):
+            return False
+        m = s["melody"]
+        if m is not None:
+            if not (isinstance(m, dict) and set(m) == {"note_count", "low", "high", "median_midi", "rel_semitones"}
+                    and _count(m["note_count"], MELODY_MAX_NOTES)):
+                return False
+            if m["note_count"] == 0:
+                if any(m[k] is not None for k in ("low", "high", "median_midi", "rel_semitones")):
+                    return False
+            elif not (_midi(m["low"]) and _midi(m["high"]) and _midi(m["median_midi"])
+                      and m["low"] <= m["median_midi"] <= m["high"]
+                      and (m["rel_semitones"] is None or _int(m["rel_semitones"], -127, 127))):
+                return False
+        w = s["words"]
+        if w is not None and not (isinstance(w, dict) and set(w) == {"count"} and _count(w["count"], LYRIC_MAX_WORDS)):
+            return False
+        if s["kind"] == "repeat":
+            c0, t0 = groups.get(s["group"], (0, 0.0))
+            groups[s["group"]] = (c0 + 1, t0 + s["end"] - s["start"])
+    if abs(t - round(dur, 3)) > 0.001 or sorted(ranks) != list(range(1, len(ranks) + 1)):
+        return False
+    rg = o["repeat_groups"]
+    return (isinstance(rg, list) and [x.get("group") if isinstance(x, dict) else None for x in rg] == sorted(groups)
+            and all(set(x) == {"group", "count", "seconds"} and x["count"] == groups[x["group"]][0]
+                    and _num(x["seconds"], 0, 601) and abs(x["seconds"] - groups[x["group"]][1]) <= 0.002 for x in rg))
 
 
 def rhythm_page(rid, v, layer, start, end, cursor, limit):
@@ -1634,6 +2010,19 @@ class App:
         b = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("ascii")
         return b, hashlib.sha256(b).hexdigest()
 
+    def rhythm_overview(self, rid, v, words=None, words_sha=None):
+        """overview for the summary: computed at read time from the stored dict plus, for its word counts, the ASR
+        words of <root>/results/<rid>.json when they still hash to the stored words_sha256. Never raises."""
+        if not isinstance(v, dict) or "lyric_repeats" not in v:
+            return None
+        try:
+            if words is None:
+                words, words_sha = self.lyric_words(rid)
+            w = overview_words(words, words_sha, v)
+        except Exception:  # noqa: BLE001
+            return {"status": "failed", "code": "internal_error"}
+        return rhythm_overview(v, w)
+
     def run_rhythm(self, job, result_id, wav):
         """Rhythm layer after a successful analyze. Never raises; failure never fails the analyze."""
         if not result_id:
@@ -1644,7 +2033,8 @@ class App:
         # reuse needs the same worker file and the same ASR words (a re-run ASR can change them for this result_id)
         if (state == "ok" and cur is not None and stored.get("worker_sha256") == cur
                 and stored.get("words_sha256") == words_sha and not _rhythm_retry(stored)):
-            return dict(rhythm_summary(stored), cache_hit=True, stored=True)
+            return dict(rhythm_summary(stored, self.rhythm_overview(result_id, stored, words, words_sha)),
+                        cache_hit=True, stored=True)
         # absent (worker 0.1.0/0.2.0 files), different or unverifiable worker identity: recompute; the stored file
         # is replaced only after a successful run, so /report and /timeline keep the old one until then
         if self.stopping:
@@ -1682,7 +2072,8 @@ class App:
         except OSError:
             self.log.event("rhythm_store_failed", id=job.rid)
             stored = False
-        return dict(rhythm_summary(data), cache_hit=False, stored=stored)
+        return dict(rhythm_summary(data, self.rhythm_overview(result_id, data, words, words_sha)), cache_hit=False,
+                    stored=stored)
 
     def _spawn_rhythm(self, rh, wav, lock_fd, timeout, words):
         lim = self.limits
@@ -2182,7 +2573,7 @@ class Handler(BaseHTTPRequestHandler):
             st, v = app.load_rhythm(m.group(1))
             extra = None
             if st == "ok":
-                extra = ("rhythm", rhythm_summary(v))
+                extra = ("rhythm", rhythm_summary(v, app.rhythm_overview(m.group(1), v)))
             elif st == "invalid":
                 extra = ("rhythm", {"status": "failed", "code": "invalid_result"})
             return self.read_call(app, ["report", m.group(1)], extra=extra)
