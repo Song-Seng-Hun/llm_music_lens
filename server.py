@@ -1600,8 +1600,8 @@ class _Ov:
         """Heuristic, overview only (lyric_repeats unchanged): a repeat segment > 45 s is cut at its best internal
         point, both parts >= 8 s and keeping kind, group and block; repeated while > 45 s and < 40 segments. Cut:
         the middle of the longest run of 1 s windows inside it touched by no word (ties earliest), else the middle
-        of the largest gap between consecutive word onsets/ends inside it, else the audio section boundary nearest
-        its middle; with no candidate meeting the 8 s rule (or no words for the first two), no cut."""
+        of the largest gap in the union of the word spans reaching into it (ties earliest), else the audio section
+        boundary nearest its middle; with no candidate meeting the 8 s rule (or no words for the first two), no cut."""
         out, todo = [], list(reversed(segs))
         while todo:
             x = todo.pop()
@@ -1636,12 +1636,19 @@ class _Ov:
                 i = j + 1
             if best is not None:
                 return best[1] / 1000.0
-            ws = [(_ms(s), _ms(e)) for s, e in self.words if a <= _ms(s) < b]
-            gaps = [(ws[k + 1][0] - max(ws[k][1], ws[k][0]), -k, (max(ws[k][1], ws[k][0]) + ws[k + 1][0]) // 2)
-                    for k in range(len(ws) - 1)]
-            gaps = [g for g in gaps if g[0] > 0 and ok(g[2])]
+            # gaps in the union of every word span reaching into the repeat (a word starting earlier counts too):
+            # measured from the furthest end of all earlier words, so no cut falls inside a still-active word
+            gaps, cov = [], None
+            for s0, e0 in self.words:  # sorted by start
+                ws, we = _ms(s0), max(_ms(s0), _ms(e0))
+                if ws >= b or we < a:
+                    continue
+                if cov is not None and ws > cov:
+                    gaps.append((ws - cov, -cov, (cov + ws) // 2))
+                cov = we if cov is None else max(cov, we)
+            gaps = [g for g in gaps if ok(g[2])]
             if gaps:
-                return max(gaps)[2] / 1000.0
+                return max(gaps)[2] / 1000.0  # largest, ties earliest
         bounds = [_ms(r["start"]) for r in (self.v.get("sections") or [])[1:]]
         inner = [t for t in bounds if ok(t)]
         if inner:
@@ -1773,7 +1780,7 @@ class _Ov:
             source, segs, method = "audio", self.audio(), OV_METHOD["audio"]
         else:
             return {"status": "failed", "code": "no_structure"}
-        blocks_of = {}  # group -> its surviving (not dropped) blocks; one block = the text repeats only inside it
+        blocks_of = {}  # group -> its surviving (not dropped) blocks; one = internal (weaker cross-section evidence)
         for x in segs:
             if x["kind"] == "repeat":
                 blocks_of.setdefault(x["group"], set()).add(x["block"])

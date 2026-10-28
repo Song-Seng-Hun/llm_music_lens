@@ -215,6 +215,18 @@ class OverviewLogicTest(unittest.TestCase):
         words = [w for w in _words(0, 120) if not 39.2 < w[1] < 40.0]
         self.assertEqual([x for x in seq(ov(rep, words)) if x[0] == "repeat"][:2],
                          [("repeat", 0, 10.0, 39.725), ("repeat", 0, 39.725, 70.0)])
+        # review F1: a word contained in a longer one (30.2-30.3 and a point word at 30.6 inside 30.0-31.0) is no gap;
+        # gapless 1 s words leave only the section boundary at 60
+        words = [["あ", float(t), float(t + 1)] for t in range(120)] + [["い", 30.2, 30.3], ["う", 30.6, 30.6]]
+        o = ov([(0.0, 120.0, 0)], words, bounds=(60.0,))
+        cuts = [s["start"] for s in o["segments"][1:]]
+        self.assertEqual(cuts, [60.0])
+        for c in cuts:
+            self.assertFalse(any(a < c < b for _, a, b in words), c)
+        # a word starting before the repeat still covers its head: no gap 9.5..10.2 when 9.0-11.0 spans it
+        words = [["あ", 9.0, 11.0], ["あ", 10.2, 10.4]] + [["あ", float(t), float(t + 1)] for t in range(11, 120)]
+        self.assertEqual([s["start"] for s in ov([(10.0, 120.0, 0)], words, bounds=(65.0,))["segments"][1:]],
+                         [10.0, 65.0])
         # 3) no words: the section boundary nearest the middle (44 beats 20 and 61)
         self.assertEqual([x for x in seq(ov(rep, None, bounds=(20.0, 44.0, 61.0))) if x[0] == "repeat"][:2],
                          [("repeat", 0, 10.0, 44.0), ("repeat", 0, 44.0, 70.0)])

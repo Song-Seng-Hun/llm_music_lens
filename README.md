@@ -616,15 +616,18 @@ Why lyric repeats are the backbone: on the 8 real songs (stored 0.4.3 `structure
   6. (heuristic, overview only; `lyric_repeats` is unchanged) a repeat segment longer than 45 s is cut at its best
      internal point, both parts >= 8 s, keeping kind `repeat`, the group and the block: the middle of the longest
      run of whole 1 s windows inside it touched by no ASR word (ties earliest), else the middle of the largest gap
-     between consecutive words inside it, else the audio section boundary nearest its middle; repeated while longer
+     in the union of all word spans reaching into it (measured from the furthest end of every earlier word, so a
+     short word inside a longer one makes no gap and no cut falls inside a word; ties earliest), else the audio
+     section boundary nearest its middle (this last rule does not check for words); repeated while longer
      than 45 s and fewer than 40 segments exist; no candidate meeting the 8 s rule (word rules need words): no cut.
      On the 8 songs: 111-171 -> 111-138 + 138-171 and 65-116 -> 65-80 + 80-116 (both at a word-free second).
-- `internal` (every segment; false unless a repeat): true when the repeat's group has a single surviving block,
-  i.e. the text repeats only inside that block (a line sung twice >= 15 s apart within it), not across the song.
+- `internal` (every segment; false unless a repeat): `internal: true` means this group has only one surviving block
+  after silence filtering (step 5); splitting that block (step 6) does not add occurrences. It is weaker
+  cross-section repeat evidence, not proof that the text repeats only within that block (e.g. the group's other
+  block may have been dropped as silence).
   Chosen as a flag rather than a new kind so every lyric-repeat segment keeps `kind: "repeat"` (clients filtering
   by kind still see it) while `repeat_groups` lists only groups with >= 2 blocks: `count` = blocks (a cut block
-  still counts once), `seconds` = their segments' total. Internal groups are not listed. Blocks dropped to silence
-  (step 5) do not count, so a group left with one audible block becomes internal.
+  still counts once), `seconds` = their segments' total. Internal groups are not listed.
 - `source: "audio"` when lyric repeats are unavailable, failed or empty: the stored `sections`, kind `section` (with
   its `label` letter) or `silence` (label `silence`), made contiguous. `structure` tells how much form there is:
   `lyric` (lyric source), `audio_labels` (audio source with >= 2 different section letters) or `unknown` (audio
