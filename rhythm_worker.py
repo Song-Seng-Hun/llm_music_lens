@@ -1,11 +1,14 @@
 """Music Lens LAN API optional rhythm layer worker (Essentia 2.1-beta6-dev DSP plus one pinned local TempoCNN model,
 no network).
 
-Usage: <essentia python> -I rhythm_worker.py WAV
-       <essentia python> -I rhythm_worker.py --tempo-cnn-model /abs/model.pb WAV   (tests and measurement only; the
-       server always passes WAV alone. The SHA-256 pin is not overridable, so the option can only select a
-       byte-identical copy or make tempo_cnn unavailable.)
+Usage: <essentia python> -I rhythm_worker.py [--words-stdin] WAV
+       <essentia python> -I rhythm_worker.py --tempo-cnn-model /abs/model.pb [--words-stdin] WAV   (tests and
+       measurement only; the server never passes --tempo-cnn-model. The SHA-256 pin is not overridable, so the
+       option can only select a byte-identical copy or make tempo_cnn unavailable.)
 WAV is the server's already-validated canonical file (PCM mono 16 kHz s16, 0 < duration <= 600 s).
+--words-stdin (0.4.3; the server always passes it): stdin holds one JSON object {"words": [[text, start, end], ...]}
+(the ASR words of the same result) or {"words": null, "reason": code} (the server could not provide them), at most
+WORDS_MAX_BYTES; used only for lyric_repeats. Without the option lyric_repeats is unavailable (no_words_input).
 stdout: one JSON object. Error: exit 1, one JSON line {"error":{"code","message"}} on stderr.
 
 Choices:
@@ -108,20 +111,44 @@ Choices:
   alternations (pieces >= 0.2 s) stay; a trill or neighbour-note figure within 2 semitones with pieces < 0.2 s
   (72-74-72-74) is merged: at note level it is indistinguishable from wide vibrato.
   note_count_raw = segmentation output after smoothing, before the merge. Not a transcription: octave errors, split or merged repeated notes.
+- structure_debug (0.4.3, stored file only; calibration data, the detector parameters are unchanged): the Foote
+  novelty at every beat boundary where the full kernel fits (times = the beat times, values rounded to 4 decimals,
+  at most one per beat, so <= MAX_BEATS; not downsampled), the kernel/threshold/gap/grouping parameters, `peaks` =
+  every local maximum of the novelty under the boundary rule's +-8 beat neighbourhood and end margins but with no
+  threshold (all selected ones plus the strongest others, at most SEC_DEBUG_PEAKS, sorted by time; `selected` =
+  became a section boundary), and `section_similarity` = the full symmetric matrix of segment-mean similarities
+  between all sections (silence included; <= 40 x 40, 3 decimals; null when fewer than 2 x 16 beat intervals, the
+  single-section case without features). null without beats. Measured 20.7-27.1 KB for 600 s synthetic at 120 BPM
+  (27.1 KB with 40 sections); estimated under 60 KB at 208 BPM with 300 peaks.
+- lyric_repeats (0.4.3): repeated ASR text, likely chorus/hook lines; not verified, as good as the ASR. Each word's
+  text is NFKC-normalized and lowercased, and only letters, digits and marks (Unicode L*, N*, M*) are kept
+  (punctuation, symbols, spaces dropped). Words are sorted by start and clamped to [0, duration]. Units: when the
+  median normalized word length is 1 (char-level ASR such as Japanese/Chinese Whisper output) the units are
+  characters, each timed by an even split of its word span, and an n-gram is LYRIC_N_CHAR (8) characters (about one
+  sung phrase fragment, 1-2 s); otherwise (space-delimited words: English, Korean) the units are whole words and an
+  n-gram is LYRIC_N_WORD (4) words, since 8 letters are only ~1.5 English words and common pairs ("iloveyou")
+  recur outside refrains. Every n-gram occurring >= 2 times with its occurrence starts spread >= LYRIC_SPREAD (15 s)
+  marks all units of every occurrence covered; covered units closer than LYRIC_JOIN (3 s) join into blocks; blocks
+  shorter than LYRIC_MIN_BLOCK (4 s) are dropped; blocks sharing a repeated n-gram are one group (union-find; ids
+  0, 1, ... in order of first appearance). At most LYRIC_MAX_BLOCKS (40) blocks (the longest; warning
+  lyric_repeats_capped). Fewer than LYRIC_MIN_CHARS (50) normalized characters: unavailable too_little_text (no
+  word at all: no_words). Independent of sections; clients compare. Untested on real English or Korean songs.
 """
 import errno
 import hashlib
 import json
 import math
 import os
+import re
 import resource
 import signal
 import stat
 import statistics
 import sys
+import unicodedata
 import wave
 
-TOOL = {"name": "music-lens-rhythm-worker", "version": "0.4.2"}
+TOOL = {"name": "music-lens-rhythm-worker", "version": "0.4.3"}
 SRC_RATE = 16000
 RATE = 44100
 MAX_SECONDS = 600.0
@@ -193,6 +220,21 @@ MEL_METHOD = ("EqualLoudness+PredominantPitchMelodia 16 kHz frame 1024 hop 128 (
 NOTE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
 PITCH_CLASS = {"C": 0, "C#": 1, "Db": 1, "D": 2, "D#": 3, "Eb": 3, "E": 4, "F": 5, "F#": 6, "Gb": 6, "G": 7,
                "G#": 8, "Ab": 8, "A": 9, "A#": 10, "Bb": 10, "B": 11}
+SEC_DEBUG_PEAKS = 300  # novelty peaks kept in structure_debug (4000 beats / 9-beat spacing could give ~440)
+WORDS_MAX_BYTES = 8 * 1024 * 1024  # stdin cap for --words-stdin
+LYRIC_MAX_WORDS = 20000
+LYRIC_MAX_TEXT = 200  # characters per word text
+LYRIC_N_CHAR = 8  # characters per n-gram (char-level ASR)
+LYRIC_N_WORD = 4  # words per n-gram (space-delimited ASR)
+LYRIC_SPREAD = 15.0  # s; an n-gram counts as repeated when its occurrence starts span at least this
+LYRIC_JOIN = 3.0  # s; covered units closer than this join one block
+LYRIC_MIN_BLOCK = 4.0  # s; shorter blocks are dropped
+LYRIC_MIN_CHARS = 50  # normalized characters below which lyric_repeats is unavailable
+LYRIC_MAX_BLOCKS = 40
+RE_REASON = re.compile(r"\A[a-z][a-z0-9_]{0,63}\Z")  # the server's code pattern
+LYRIC_METHOD = ("NFKC lowercase, letters/digits/marks only; char 8-gram (word 4-gram for space-delimited words) "
+                "repeats >= 15 s apart; covered units joined within 3 s; blocks >= 4 s; groups share an n-gram")
+LYRIC_NOTE = "repeated ASR text, likely chorus/hook; not verified, depends on ASR quality"
 SEC_METHOD = ("beat-sync HPCP12+MFCC2-13(z) cosine SSM; Foote checkerboard 2x16 beats (full kernel only), "
               "novelty>=0.15, min 8 beats; groups: segment-mean similarity>=0.75 to the group's first segment")
 
@@ -504,19 +546,26 @@ def energy_summary(values, duration, step=ENERGY_STEP, w=ENERGY_WINDOW, floor=SI
             "quietest": span(*quiet) if quiet else None, "silence_db": floor, "silence_s": silence_s}
 
 
-def pick_boundaries(nov, min_gap=SEC_MIN, thresh=SEC_NOVELTY_MIN, cap=SEC_MAX - 1):
-    """nov[i]: novelty at boundary index i (None where not computed). Candidates: nov >= thresh and the maximum of
-    its +-min_gap neighbourhood (ties: the earliest). Accepted greedily by novelty (ties earliest) when >= min_gap
-    from every accepted one and from both ends (0 and len(nov)); at most cap. Returns sorted indices."""
+def novelty_peaks(nov, min_gap=SEC_MIN, thresh=None):
+    """Indices i with nov[i] >= thresh (any value when thresh is None), >= min_gap from both ends (0 and len(nov)),
+    that are the maximum of their +-min_gap neighbourhood (ties: the earliest)."""
     n = len(nov)
     cand = []
     for i, x in enumerate(nov):
-        if x is None or x < thresh or i < min_gap or n - i < min_gap:
+        if x is None or (thresh is not None and x < thresh) or i < min_gap or n - i < min_gap:
             continue
         lo, hi = max(0, i - min_gap), min(n, i + min_gap + 1)
         if all(nov[j] is None or nov[j] < x for j in range(lo, i)) and \
                 all(nov[j] is None or nov[j] <= x for j in range(i + 1, hi)):
             cand.append(i)
+    return cand
+
+
+def pick_boundaries(nov, min_gap=SEC_MIN, thresh=SEC_NOVELTY_MIN, cap=SEC_MAX - 1):
+    """nov[i]: novelty at boundary index i (None where not computed). Candidates: nov >= thresh and the maximum of
+    its +-min_gap neighbourhood (ties: the earliest). Accepted greedily by novelty (ties earliest) when >= min_gap
+    from every accepted one and from both ends (0 and len(nov)); at most cap. Returns sorted indices."""
+    cand = novelty_peaks(nov, min_gap, thresh)
     out = []
     for i in sorted(cand, key=lambda k: (-nov[k], k)):
         if len(out) >= cap:
@@ -584,14 +633,33 @@ def _segment_similarity(ca, cb, za, zb):
     return 0.5 * min(1.0, max(0.0, cc)) + 0.5 * math.exp(-d2 / 2.0)
 
 
+def structure_debug(nov, times, cut, sim):
+    """structure_debug dict (see docstring). nov[i]: novelty at boundary index i (None where not computed), times[i]:
+    its time; cut: the selected boundary indices; sim: the full section similarity matrix or None."""
+    idx = [i for i, x in enumerate(nov) if x is not None]
+    peaks = novelty_peaks(nov)
+    sel = set(cut)
+    keep = [i for i in peaks if i in sel]
+    rest = sorted((i for i in peaks if i not in sel), key=lambda i: (-nov[i], i))
+    keep = sorted(keep + rest[:max(0, SEC_DEBUG_PEAKS - len(keep))])
+    rv = lambda x: round(min(1.0, max(-1.0, x)), 4)
+    return {"kernel_beats": SEC_KERNEL, "min_gap_beats": SEC_MIN, "novelty_threshold": SEC_NOVELTY_MIN,
+            "group_threshold": SEC_GROUP_MIN,
+            "novelty": {"times": [r3(times[i]) for i in idx], "values": [rv(nov[i]) for i in idx]},
+            "peaks": [{"time": r3(times[i]), "value": rv(nov[i]), "selected": i in sel} for i in keep],
+            "section_similarity": None if sim is None else [[round(min(1.0, max(0.0, x)), 3) for x in row]
+                                                            for row in sim]}
+
+
 def structure(chroma, mfcc, frame_times, beats, duration, energy, chords):
     """Sections from beat-synchronous chroma + timbre (see SEC_METHOD). chroma/mfcc: per-frame arrays (frames x 12),
-    frame_times: their times. Returns (sections, warning|None)."""
+    frame_times: their times. Returns (sections, warning|None, structure_debug|None)."""
     import numpy as np
     edges = [b for b in beats if 0.0 < b < duration]
     if not beats or len(frame_times) == 0:
-        return [], "no_sections: no beats, sections need a beat grid"
+        return [], "no_sections: no beats, sections need a beat grid", None
     nb = len(edges) - 1  # beat intervals [edges[k], edges[k+1])
+    debug_nov, cut, full = [], [], None
     if nb < 2 * SEC_KERNEL:
         sections = [(0.0, duration)]
         warn = "sections_single: fewer than %d beat intervals, one section" % (2 * SEC_KERNEL)
@@ -626,6 +694,12 @@ def structure(chroma, mfcc, frame_times, beats, duration, energy, chords):
         idx = [0] + cut + [nb]
         cm = [C[a:b].mean(axis=0).tolist() for a, b in zip(idx[:-1], idx[1:])]
         zm = [Z[a:b].mean(axis=0).tolist() for a, b in zip(idx[:-1], idx[1:])]
+        debug_nov = nov
+        k = len(cm)
+        full = [[0.0] * k for _ in range(k)]
+        for a in range(k):
+            for b in range(a, k):  # upper triangle mirrored: exactly symmetric
+                full[a][b] = full[b][a] = _segment_similarity(cm[a], cm[b], zm[a], zm[b])
     silent = [section_silent(energy, s, e) for s, e in sections]
     keep = [k for k in range(len(sections)) if not silent[k]]  # silence takes no letter and is no reference
     if len(keep) == 1:
@@ -641,7 +715,117 @@ def structure(chroma, mfcc, frame_times, beats, duration, energy, chords):
     for (s, e), (lab, sf) in zip(sections, labels):
         out.append({"start": r3(s), "end": r3(e), "label": lab, "energy_mean": section_energy(energy, s, e),
                     "top_chord": top_chord(chords, s, e), "similarity_to_first": sf})
-    return out, warn
+    return out, warn, structure_debug(debug_nov, edges, cut, full)
+
+
+def lyric_norm(text):
+    """NFKC, lowercase, keep only letters, digits and marks (Unicode categories L*, N*, M*)."""
+    return "".join(c for c in unicodedata.normalize("NFKC", text).lower() if unicodedata.category(c)[0] in "LNM")
+
+
+def parse_words(data):
+    """stdin bytes of --words-stdin -> (words [(text, start, end)] or None, reason or None)."""
+    if len(data) > WORDS_MAX_BYTES:
+        return None, "words_too_large"
+    try:
+        v = json.loads(data.decode("utf-8"), parse_constant=lambda name: float("nan"))
+    except ValueError:
+        return None, "words_invalid"
+    if not isinstance(v, dict):
+        return None, "words_invalid"
+    w = v.get("words")
+    if w is None:
+        r = v.get("reason")
+        return None, r if isinstance(r, str) and RE_REASON.match(r) else "words_invalid"
+    if not isinstance(w, list) or len(w) > LYRIC_MAX_WORDS:
+        return None, "words_invalid"
+    out = []
+    for x in w:
+        if not (isinstance(x, list) and len(x) == 3 and isinstance(x[0], str) and len(x[0]) <= LYRIC_MAX_TEXT
+                and all(isinstance(t, (int, float)) and not isinstance(t, bool) and math.isfinite(t) for t in x[1:])):
+            return None, "words_invalid"
+        out.append((x[0], float(x[1]), float(x[2])))
+    return out, None
+
+
+def lyric_units(words, duration):
+    """(units [(unit, t0, t1)], unit kind, normalized char count). Words sorted by start (stable), clamped to
+    [0, duration]; empty normalized words dropped. Char units split their word span evenly."""
+    toks = []
+    for text, a, b in sorted(words, key=lambda x: x[1]):
+        t = lyric_norm(text)
+        if t:
+            a = min(max(a, 0.0), duration)
+            toks.append((t, a, min(max(b, a), duration)))
+    nchar = sum(len(t) for t, _, _ in toks)
+    kind = "char" if not toks or statistics.median(len(t) for t, _, _ in toks) < 2 else "word"
+    if kind == "word":
+        return toks, kind, nchar
+    units = []
+    for t, a, b in toks:
+        d = (b - a) / len(t)
+        units += [(c, a + d * k, a + d * (k + 1)) for k, c in enumerate(t)]
+    return units, kind, nchar
+
+
+def lyric_repeats(words, duration, reason=None):
+    """lyric_repeats dict plus warnings (see docstring). words: [(text, start, end)] or None (then `reason`)."""
+    if words is None:
+        return {"status": "unavailable", "reason": reason or "no_words_input"}, []
+    if not words:
+        return {"status": "unavailable", "reason": "no_words"}, []
+    units, kind, nchar = lyric_units(words, duration)
+    if nchar < LYRIC_MIN_CHARS:
+        return {"status": "unavailable", "reason": "too_little_text"}, []
+    n = LYRIC_N_CHAR if kind == "char" else LYRIC_N_WORD
+    pos = {}
+    for i in range(len(units) - n + 1):
+        pos.setdefault(tuple(u[0] for u in units[i:i + n]), []).append(i)
+    reps = []  # occurrence start lists of the repeated n-grams
+    covered = [False] * len(units)
+    for ps in pos.values():
+        ts = [units[p][1] for p in ps]
+        if len(ps) < 2 or max(ts) - min(ts) < LYRIC_SPREAD:
+            continue
+        reps.append(ps)
+        for p in ps:
+            for k in range(p, p + n):
+                covered[k] = True
+    blocks, of = [], [None] * len(units)  # [start, end], unit index -> block index
+    for i, cv in enumerate(covered):
+        if not cv:
+            continue
+        a, b = units[i][1], units[i][2]
+        if blocks and a - blocks[-1][1] <= LYRIC_JOIN:
+            blocks[-1][1] = max(blocks[-1][1], b)
+        else:
+            blocks.append([a, b])
+        of[i] = len(blocks) - 1
+    kept = [k for k, (a, b) in enumerate(blocks) if b - a >= LYRIC_MIN_BLOCK]
+    warns = []
+    if len(kept) > LYRIC_MAX_BLOCKS:
+        warns.append("lyric_repeats_capped: %d blocks, the %d longest kept" % (len(kept), LYRIC_MAX_BLOCKS))
+        kept = sorted(sorted(kept, key=lambda k: (-(blocks[k][1] - blocks[k][0]), k))[:LYRIC_MAX_BLOCKS])
+    kset = set(kept)
+    parent = {k: k for k in kept}
+
+    def root(k):
+        while parent[k] != k:
+            parent[k] = parent[parent[k]]
+            k = parent[k]
+        return k
+    for ps in reps:
+        bs = sorted({of[p] for p in ps if of[p] in kset})
+        for k in bs[1:]:
+            ra, rb = root(bs[0]), root(k)
+            if ra != rb:
+                parent[max(ra, rb)] = min(ra, rb)
+    gid, out = {}, []
+    for k in kept:  # time order: group ids by first appearance
+        g = gid.setdefault(root(k), len(gid))
+        out.append({"start": r3(blocks[k][0]), "end": r3(blocks[k][1]), "group": g})
+    return ({"status": "done", "method": LYRIC_METHOD, "unit": kind, "n": n, "blocks": out, "group_count": len(gid),
+             "coverage_s": r3(sum(b["end"] - b["start"] for b in out)), "note": LYRIC_NOTE}, warns)
 
 
 def note_name(midi):
@@ -908,7 +1092,7 @@ def read_wav(path):
     return x, len(x) / float(SRC_RATE)
 
 
-def analyze(path, model=TEMPO_CNN_MODEL):
+def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None):
     import essentia
     import essentia.standard as es
     import numpy as np
@@ -999,13 +1183,18 @@ def analyze(path, model=TEMPO_CNN_MODEL):
         warnings.append("no_chords: no chord segment was produced")
 
     step = HOP / float(RATE)
-    sections, sec_warn = structure(np.array(pcps, dtype=np.float64).reshape(-1, 12),
+    sections, sec_warn, sec_debug = structure(np.array(pcps, dtype=np.float64).reshape(-1, 12),
                                    np.array(mfccs, dtype=np.float64).reshape(-1, 12),
                                    [min(i * step, duration) for i in range(len(pcps))], beats, duration, energy, chords)
     if sec_warn:
         warnings.append(sec_warn)
     mel, mel_notes, mel_warn = melody(x16, r3(duration), str(tonic), str(scale), sections)
     warnings.extend(mel_warn)
+    try:  # pure Python on the server's words; never fails the worker
+        lyr, lyr_warn = lyric_repeats(words, r3(duration), words_reason)
+    except Exception:
+        lyr, lyr_warn = {"status": "failed", "code": "analysis_error"}, []
+    warnings.extend(lyr_warn)
 
     return {
         "bpm": round(bpm, 2),
@@ -1035,6 +1224,8 @@ def analyze(path, model=TEMPO_CNN_MODEL):
         "sections_reliability": "low_reference",
         "melody": mel,
         "melody_notes": mel_notes,
+        "structure_debug": sec_debug,
+        "lyric_repeats": lyr,
         "sample_rate": RATE,
         "source_sample_rate": SRC_RATE,
         "duration": r3(duration),
@@ -1045,11 +1236,23 @@ def analyze(path, model=TEMPO_CNN_MODEL):
 
 
 def main(argv):
-    model = TEMPO_CNN_MODEL
-    if len(argv) == 4 and argv[1] == "--tempo-cnn-model" and os.path.isabs(argv[2]):
-        model, argv = argv[2], [argv[0], argv[3]]
-    if len(argv) != 2 or not os.path.isabs(argv[1]):
-        fail_out("invalid_argument", "usage: rhythm_worker.py [--tempo-cnn-model /abs/model.pb] /absolute/path.wav")
+    model, use_model, use_words, rest = TEMPO_CNN_MODEL, False, False, list(argv[1:])
+    usage = "usage: rhythm_worker.py [--tempo-cnn-model /abs/model.pb] [--words-stdin] /absolute/path.wav"
+    while len(rest) > 1:
+        if rest[0] == "--tempo-cnn-model" and not use_model and len(rest) > 2 and os.path.isabs(rest[1]):
+            model, use_model, rest = rest[1], True, rest[2:]
+        elif rest[0] == "--words-stdin" and not use_words:
+            use_words, rest = True, rest[1:]
+        else:
+            fail_out("invalid_argument", usage)
+    if len(rest) != 1 or not os.path.isabs(rest[0]):
+        fail_out("invalid_argument", usage)
+    words, words_reason = None, None
+    if use_words:
+        try:
+            words, words_reason = parse_words(sys.stdin.buffer.read(WORDS_MAX_BYTES + 1))
+        except OSError:
+            words, words_reason = None, "words_unreadable"
     signal.signal(signal.SIGALRM, on_alarm)
     signal.alarm(WALL_SECONDS)
     try:
@@ -1057,7 +1260,7 @@ def main(argv):
     except (ValueError, OSError):
         pass
     try:
-        out = analyze(argv[1], model)
+        out = analyze(rest[0], model, words, words_reason)
     except Fail as e:
         fail_out(e.code, e.message)
     except ImportError as e:

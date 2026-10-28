@@ -112,7 +112,8 @@ API:
   of the signed TARGET like every other query field. With no `rhythm` config the request gets 400
   `rhythm_unavailable` before anything is staged (no receipt). Any other value is 400 `bad_request`.
 - After a successful `ml analyze` (receipt already `done`), the server runs `<python> -I rhythm_worker.py
-  <inbox>/api-<op>.wav` by argv on the same promoted WAV, with the same child env (PATH `/usr/bin:/bin:/usr/sbin:/sbin`),
+  --words-stdin <inbox>/api-<op>.wav` by argv on the same promoted WAV (worker 0.4.3: stdin = the result's ASR words
+  for `lyric_repeats`, see "Lyric repeats" below; before 0.4.3 the WAV was the only argument), with the same child env (PATH `/usr/bin:/bin:/usr/sbin:/sbin`),
   its own session, and a wall timeout of `rhythm_timeout` (300 s, capped by the time left before the handler's 800 s
   deadline) that kills the process group. It takes the team flock `<root>/.analyze.lock` non-blocking (the same
   file the `ml` wrapper locks) and passes the locked descriptor to the worker, so the lock lives as long as the worker.
@@ -129,13 +130,17 @@ API:
   `<root>/results-rhythm/<result_id>.json` (directory 0700), plus a server-added `worker_sha256`: the SHA-256 of the
   configured worker file, hashed once when the server starts. A later analyze with the same `result_id` (an `ml` cache
   hit, same audio and settings) reuses the stored file (`cache_hit: true`, nothing runs) only when its
-  `worker_sha256` equals the current one. Otherwise (another worker version, or a file from before this field, i.e.
+  `worker_sha256` equals the current one and (0.4.3) its server-added `words_sha256` equals the SHA-256 of the
+  words payload the server would pass now (so an ASR re-run that changes the words of the same `result_id`
+  recomputes; files without it are recomputed, which older files are anyway because the worker hash changed). Otherwise (another worker version, or a file from before this field, i.e.
   every 0.1.0/0.2.0 file) the worker runs again and the file is replaced atomically on success; a busy, timeout or
   failed re-run leaves the old file in place. A stored file with the current worker is also recomputed when its
   optional `tempo_cnn` is `unavailable` (any reason, e.g. model restored later) or `failed` with `inference_error` /
   `dependency_missing`, since those causes can change without a worker change; deterministic `too_short`,
   `non_finite`, `inconsistent_output` and (0.4.1) `no_audible_patches` stay cached. The same applies to a melody
-  `failed` with `analysis_error` or `dependency_missing` (recomputed; `non_finite` cached). While the model stays missing, every rhythm request therefore
+  `failed` with `analysis_error` or `dependency_missing` (recomputed; `non_finite` cached). Likewise (0.4.3) a `lyric_repeats` `unavailable` with reason
+  `result_unreadable` (the ml result file could not be read: may work next time); every other lyric outcome is
+  deterministic for the same words and stays cached. While the model stays missing, every rhythm request therefore
   reruns the worker (about 15 s for a 4 min song). Only the worker file is tracked: a changed Essentia python with the same
   worker file is not detected (restart is needed after editing the worker in place). If the worker file cannot be
   read at start, its hash is null and nothing is reused (every rhythm request recomputes); that alone does not make
@@ -149,13 +154,14 @@ API:
   `bpm_estimates`, `bpm_alternatives`, `bpm_alternatives_note`, `double_tempo_evidence`,
   `double_tempo_evidence_note`, `tempo_cnn`, `key`, `key_sections`, `key_change_count`,
   `beat_count`, `chord_segment_count`, `chords_grid`, `energy_summary`, `sections`, `sections_method`,
-  `sections_reliability`, `melody`, `downbeats`, `duration`, `tool`, `warnings`) when a stored file
+  `sections_reliability`, `melody`, `lyric_repeats`, `downbeats`, `duration`, `tool`, `warnings`) when a stored file
   exists, re-serializing the native JSON (number formatting may change). Files stored by worker 0.1.0 lack the
   0.2.0 fields and still load; the summary then has `bpm_alternatives`, `bpm_alternatives_note`, `key_sections`,
   `key_change_count` and `chords_grid` set to `null` (they are not recomputed; old chord rows stay frame-level).
   Files from 0.1.0 and 0.2.0 likewise give `double_tempo_evidence` and `double_tempo_evidence_note` as `null`, and
   files from before 0.2.2 give `tempo_cnn: null`, and files from before 0.3.0 give `energy_summary`, `sections`,
-  `sections_method` and `sections_reliability` as `null`, and files from before 0.4.0 give `melody: null`. A damaged file gives `rhythm: {"status":"failed","code":"invalid_result"}`.
+  `sections_method` and `sections_reliability` as `null`, and files from before 0.4.0 give `melody: null`, and files
+  from before 0.4.3 give `lyric_repeats: null`. `structure_debug` is never in the summary (stored file only). A damaged file gives `rhythm: {"status":"failed","code":"invalid_result"}`.
   No file: native bytes unchanged.
 - `GET /timeline/<id>?layer=beats|chords|energy|melody` is served by the server from the stored file with the native rules:
   `start`/`end` 0..600 (default 0 and 600, `end >= start`), rows overlapping the range, `limit` 1..200 (default 100),
@@ -190,9 +196,9 @@ resampled from 16 kHz because RhythmExtractor2013 assumes 44.1 kHz), `duration`,
 `low_key_strength` < 0.5, `key_changes` when there is more than one key section, `no_chords`,
 `double_tempo_evidence_unavailable`, `no_sections`, `sections_single`, `tempo_cnn_patch_count_mismatch` (0.3.1-0.4.0
 only), `no_melody`, `melody_failed`, `melody_scale_degrees_unavailable`,
-`melody_notes_capped`), `energy`, `energy_summary`, `sections`, `sections_method`, `sections_reliability:
-"low_reference"` (see "Energy and sections" below), `melody` and `melody_notes` (see "Melody features" below). Audio under 1 s is
-refused (`too_short`).
+`melody_notes_capped`, `lyric_repeats_capped` (0.4.3)), `energy`, `energy_summary`, `sections`, `sections_method`, `sections_reliability:
+"low_reference"` (see "Energy and sections" below), `melody` and `melody_notes` (see "Melody features" below), and (worker 0.4.3) `structure_debug` (stored file only, see
+"Energy and sections") and `lyric_repeats` (see "Lyric repeats"). Audio under 1 s is refused (`too_short`).
 
 - Key sections: the same KeyExtractor (`bgate`, frame 4096, hop 2048) on fixed, non-overlapping 20 s windows (a last
   window under 10 s joins the previous one), then adjacent windows with the same tonic and scale merged; `strength`
@@ -375,6 +381,21 @@ not a transcription. There are no downbeats and no named parts.
      neighbour. All silent with a beat grid: every section is `silence`.
   No beats: `sections: []` and warning `no_sections`. Fewer than 32 beat intervals: one section `A` and warning
   `sections_single`. Deterministic (fixed parameters, no random state).
+- `structure_debug` (worker 0.4.3, stored file only, not in the summary or a timeline layer; calibration data for a
+  later detector change, the parameters above are unchanged): `{kernel_beats: 16, min_gap_beats: 8,
+  novelty_threshold: 0.15, group_threshold: 0.75, novelty: {times, values}, peaks: [{time, value, selected}],
+  section_similarity}`. `novelty` = the Foote value at every beat boundary where the full kernel fits (times =
+  beat times, values 4 decimals, one per beat so at most the beat count, about 2080 for 600 s at 208 BPM; not
+  downsampled). `peaks` = every local maximum under the boundary rule's +-8 beat neighbourhood and end margins but
+  without the 0.15 threshold (all selected ones, then the strongest others, at most 300, sorted by time);
+  `selected` = became a section boundary (so the selected times are exactly `sections[1:].start`).
+  `section_similarity` = the full symmetric matrix (3 decimals, 0..1) of the label similarity between every pair
+  of sections, silence included, one row per section (<= 40 x 40); null when fewer than 32 beat intervals (one
+  section, no features). `null` without beats. Server checks: exact keys, bounds, novelty times sorted inside the
+  duration, every peak a novelty point, selected peaks >= the threshold and equal to the section boundaries,
+  matrix square, sized to `sections`, symmetric. Size (600 s synthetic, 120 BPM): 20.7 KB with one section, 27.1 KB
+  with 40 sections (matrix 40 x 40), stored files 67.8-124.3 KB; worst case (208 BPM, 300 peaks, 40 sections)
+  estimated under 60 KB, far below the 4 MiB `rhythm_output` cap.
 - Honest limits: labels are similarity groups, not verse/chorus/bridge, and two different parts with the same
   chords and timbre get one letter; a part that differs only in melody or lyrics is invisible to these features.
   Boundaries sit on beat times and need 16 beat intervals of context at both ends (about 8 s at 120 BPM, about
@@ -506,6 +527,51 @@ balance, which scale degrees it sits on, where it climbs). Not a transcription a
 Worker 0.4.1 runtime (600 s, 2 runs each, same session): melody track 9.24 s and 1.13-1.14 GB peak RSS vs 0.4.0
 9.33-9.35 s and 1.14 GB; C-Am-F-G loop 8.98-9.02 s vs 9.11-9.13 s (the second TempoCNN call is gone). Stored file
 +54 B (`silence_db`, `silence_s`, `silent_patches`).
+
+### Lyric repeats (worker 0.4.3)
+
+Purpose: where the words repeat (likely chorus or hook), independent of the audio sections. Evidence: on the team's 8
+real songs (worker 0.4.2) repeated-lyric blocks often started or ended 10-60 s away from any section boundary, and one
+song had a single section 0-175 s holding two repeats: the boundary detector finds too few boundaries, so lyric
+repeats are reported on their own and clients compare the two.
+
+- Input: the ASR words of the same result. The server reads `<root>/results/<result_id>.json` (the `ml` result
+  file, read-only: `O_NOFOLLOW`, regular file, <= 16 MiB, strict JSON, `result_id` must match, at most 20000 words,
+  each `{text <= 200 chars, start, end}` finite 0..700; probabilities are not passed) and sends the worker
+  `{"words": [[text, start, end], ...]}` on stdin (`--words-stdin`), or `{"words": null, "reason": code}` with
+  `result_missing`, `result_invalid` (any malformed word, a symlink or non-regular file) or `result_unreadable`
+  (other read errors; retried on the next analyze). No temporary file is named: stdin is an unlinked temporary file.
+  Computing it in the worker keeps the cache correct by construction: a worker change changes `worker_sha256`, and a
+  words change changes `words_sha256` (see the cache rule above).
+- Method (`lyric_repeats.method`): each word's text is NFKC-normalized and lowercased, and only letters, digits and
+  marks (Unicode L*, N*, M*) are kept, so punctuation, symbols, full-width/half-width and case differences do not
+  matter. Words are sorted by start and clamped into the duration. Unit choice: when the median normalized word is
+  one character (char-level ASR: Whisper's Japanese and Chinese output, all 8 team songs) the units are characters,
+  each timed by an even split of its word span, and an n-gram is **8 characters** (about 1-2 s of singing, longer
+  than common particles and short phrases); otherwise (space-delimited words such as English or Korean) the units
+  are whole words and an n-gram is **4 words**, because 8 letters are only about 1.5 English words and short
+  common pairs recur outside refrains. Every n-gram occurring at least twice with its occurrence starts spread over
+  >= **15 s** marks all units of every occurrence covered (a line doubled within 15 s is not a repeat); covered units
+  closer than **3 s** join into one block; blocks shorter than **4 s** are dropped; blocks that share any repeated
+  n-gram form one group (union-find; group ids 0, 1, ... in order of first appearance). A group can have one block
+  when the repetition lies inside it (a long block holding a line sung twice >= 15 s apart).
+- Output (summary and stored file): `done` `{status, method, unit: "char"|"word", n, blocks: [{start, end, group}],
+  group_count, coverage_s, note}`: blocks sorted, non-overlapping, inside the duration, at most 40 (more: the 40
+  longest, warning `lyric_repeats_capped`); `coverage_s` = summed block length. `unavailable` `{status, reason}`:
+  `no_words` (ASR failed or heard nothing), `too_little_text` (under 50 normalized characters), `no_words_input`
+  (worker run without `--words-stdin`), `words_invalid`/`words_too_large` (malformed stdin), or the server's reason
+  above. `failed` `{status, code: "analysis_error"}` on an unexpected exception (never fails the worker). Server
+  checks: exact key sets per status, block order, non-overlap, >= 4 s (rounding tolerance 2 ms), group ids in order
+  of first appearance with `group_count` = number of groups, coverage = summed blocks. No timeline layer (the
+  blocks are in the summary).
+- Offline check (worker code on the stored words of the 8 songs, read-only; numbers only): one song has 9 words ->
+  `too_little_text`; the other 7 gave 2-5 blocks, 1-2 groups, coverage 10.8-107.7 s. Block edges vs the stored
+  0.4.2 section boundaries: 44 edges, median distance 10.8 s, 75th percentile 23.1 s, max 63.8 s, 2 within 3 s, 19
+  within 10 s; 13 of 22 blocks lie fully inside one section. Runtime about 2 ms for a 216 s song (1215 words).
+- Honest limits: repeated ASR text, not verified lyrics: Whisper mishearing a repeat breaks it, hallucinated repeats
+  (the same line over an instrumental) create one, and an untranscribed chorus is invisible. Repeated text is not
+  always a chorus (a repeated verse line, a refrain inside a verse). Word mode (English, Korean) is untested on real
+  songs. Say "estimate" when relaying.
 
 ## Runtime layout (production)
 

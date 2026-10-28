@@ -34,9 +34,10 @@ try:
 except BlockingIOError:
     held = True
 os.close(fd)
-wav = sys.argv[1]
+wav = sys.argv[-1]
+stdin = sys.stdin.read()
 with open(os.path.join(HERE, "calls.log"), "a") as f:
-    f.write(json.dumps({"argv": sys.argv[1:], "exists": os.path.isfile(wav), "lock_held": held,
+    f.write(json.dumps({"argv": sys.argv[1:], "exists": os.path.isfile(wav), "lock_held": held, "stdin": stdin,
                         "path_env": os.environ.get("PATH"), "env_keys": sorted(os.environ),
                         "pid": os.getpid()}) + "\n")
 time.sleep(ctl.get("sleep", 0))
@@ -241,6 +242,10 @@ def bad_v41():
     return out
 
 
+WORDS = [{"text": c, "start": round(i * 0.3, 3), "end": round(i * 0.3 + 0.25, 3), "probability": 0.9}
+         for i, c in enumerate("あいうえお")]
+
+
 def _n(start, end, midi):
     return {"start": start, "end": end, "midi": midi, "note": rw.note_name(midi)}
 
@@ -296,6 +301,65 @@ def bad_v40():
     return out
 
 
+SDEBUG = {"kernel_beats": 16, "min_gap_beats": 8, "novelty_threshold": 0.15, "group_threshold": 0.75,
+          "novelty": {"times": [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0], "values": [0.01, 0.1, 0.3, 0.02, 0.05, -0.01, 0.2]},
+          "peaks": [{"time": 2.0, "value": 0.3, "selected": True}, {"time": 3.0, "value": 0.05, "selected": False},
+                    {"time": 4.0, "value": 0.2, "selected": True}],
+          "section_similarity": [[1.0, 0.5, 0.8], [0.5, 1.0, 0.4], [0.8, 0.4, 1.0]]}
+LYRIC = {"status": "done", "method": rw.LYRIC_METHOD, "unit": "char", "n": 8,
+         "blocks": [{"start": 0.5, "end": 5.0, "group": 0}], "group_count": 1, "coverage_s": 4.5, "note": rw.LYRIC_NOTE}
+LYRIC_6 = dict(LYRIC, blocks=[{"start": 0.0, "end": 4.0, "group": 0}, {"start": 7.0, "end": 11.5, "group": 1},
+                              {"start": 15.0, "end": 19.0, "group": 0}], group_count=2, coverage_s=12.5)
+RHYTHM_OUT_V43 = dict(RHYTHM_OUT_V40, structure_debug=SDEBUG, lyric_repeats=LYRIC)
+V43_SUMMARY_KEYS = ("lyric_repeats",)
+
+
+def bad_v43():
+    """Worker-0.4.3 structure_debug / lyric_repeats values that must be refused."""
+    out = []
+    d, nv, pk, sim = SDEBUG, SDEBUG["novelty"], SDEBUG["peaks"], SDEBUG["section_similarity"]
+    for over in ({"extra": 1}, {"kernel_beats": -1}, {"kernel_beats": 16.0}, {"novelty_threshold": 2},
+                 {"group_threshold": None}, {"novelty": None}, {"novelty": dict(nv, times=nv["times"][:-1])},
+                 {"novelty": dict(nv, times=[2.0] + nv["times"][1:])}, {"novelty": dict(nv, values=[1.5] * 7)},
+                 {"novelty": dict(nv, times=nv["times"][:-1] + [7.0])}, {"novelty": dict(nv, extra=[])},
+                 {"novelty": {"times": [1.0] * 5001, "values": [0.0] * 5001}},
+                 {"peaks": pk[::-1]}, {"peaks": pk[:1]}, {"peaks": [dict(pk[0], value=0.31)] + pk[1:]},
+                 {"peaks": [pk[0], dict(pk[1], selected=True), pk[2]]}, {"peaks": [dict(pk[0], selected=1)] + pk[1:]},
+                 {"peaks": [pk[0], pk[0]] + pk[1:]}, {"peaks": [dict(pk[0], extra=1)] + pk[1:]},
+                 {"peaks": [{"time": 0.5 + i * 0.001, "value": 0.0, "selected": False} for i in range(301)]},
+                 {"section_similarity": sim[:2]}, {"section_similarity": [r[:2] for r in sim]},
+                 {"section_similarity": [[1.0, 0.6, 0.8], [0.5, 1.0, 0.4], [0.8, 0.4, 1.0]]},  # not symmetric
+                 {"section_similarity": [[1.1, 0.5, 0.8], [0.5, 1.0, 0.4], [0.8, 0.4, 1.0]]},
+                 {"section_similarity": "x"}):
+        out.append(json.dumps(dict(RHYTHM_OUT_V43, structure_debug=dict(d, **over))))
+    # a below-threshold peak cannot be selected; selected peaks must be exactly the section boundaries
+    low = dict(d, novelty=dict(nv, values=[0.01, 0.1, 0.1, 0.02, 0.05, -0.01, 0.2]),
+               peaks=[dict(pk[0], value=0.1), pk[1], pk[2]])
+    out.append(json.dumps(dict(RHYTHM_OUT_V43, structure_debug=low)))
+    out.append(json.dumps(dict(RHYTHM_OUT_V43, structure_debug="x")))
+    out.append(json.dumps(dict({k: x for k, x in RHYTHM_OUT_V43.items() if k not in ("sections", "melody",
+                                                                                      "melody_notes")})))
+    b = LYRIC["blocks"]
+    for over in ({"status": "Done"}, {"extra": 1}, {"unit": "byte"}, {"n": 0}, {"n": 8.0}, {"method": ""},
+                 {"note": None}, {"blocks": None}, {"blocks": [dict(b[0], end=4.0)]},  # 3.5 s < 4 s
+                 {"blocks": [dict(b[0], end=7.0)]}, {"blocks": [dict(b[0], group=1)]},
+                 {"blocks": [dict(b[0], group=0.0)]},
+                 {"blocks": [dict(b[0], extra=1)]}, {"group_count": 2}, {"coverage_s": 4.6}, {"coverage_s": -1},
+                 {"blocks": [{"start": 0.0, "end": 4.5, "group": 0}] * 41, "coverage_s": 184.5}):
+        out.append(json.dumps(dict(RHYTHM_OUT_V43, lyric_repeats=dict(LYRIC, **over))))
+    lb = LYRIC_6["blocks"]
+    for blocks in ([lb[1], lb[0], lb[2]], [lb[0], dict(lb[1], start=3.5), lb[2]], [lb[0], dict(lb[1], group=2), lb[2]],
+                   [dict(lb[0], group=1), dict(lb[1], group=0), dict(lb[2], group=1)]):
+        out.append(json.dumps(dict(RHYTHM_OUT_V43, duration=20.0, lyric_repeats=dict(LYRIC_6, blocks=blocks))))
+    for ly in ({"status": "unavailable"}, {"status": "unavailable", "reason": "Too few"},
+               {"status": "unavailable", "reason": "no_words", "blocks": []}, {"status": "failed", "reason": "x"},
+               {"status": "failed", "code": 5}, {"status": "running"}, None, []):
+        out.append(json.dumps(dict(RHYTHM_OUT_V43, lyric_repeats=ly)))
+    for bad in ("AB" * 32, "ab" * 31, 5, None):
+        out.append(json.dumps(dict(RHYTHM_OUT_V43, words_sha256=bad)))
+    return out
+
+
 class FakeWorker:
     def __init__(self, env):
         self.dir = os.path.join(env.dir, "fakerhythm")
@@ -328,10 +392,23 @@ class RhythmBase(Base):
         self.fw = FakeWorker(self.env)
         self.h = Harness(self.env, limits=self.limits, rhythm={"python": PY, "worker": self.fw.path})
         self.c = Client(self.env, self.h.port)
+        self.write_result()
 
     def worker_sha(self):
         with open(self.fw.path, "rb") as f:
             return sha(f.read())
+
+    def write_result(self, words=None, rid=RID64, raw=None):
+        """The ml result file the server reads the words from (the fake ml writes none)."""
+        d = os.path.join(self.env.root, "results")
+        os.makedirs(d, 0o700, exist_ok=True)
+        with open(os.path.join(d, rid + ".json"), "w", encoding="utf-8") as f:
+            f.write(raw if raw is not None else json.dumps({"result_id": rid, "words": WORDS if words is None
+                                                            else words}))
+
+    def ids(self):
+        """Server-added identity fields of a file stored now: worker file hash and words payload hash."""
+        return {"worker_sha256": self.worker_sha(), "words_sha256": self.h.app.lyric_words(RID64)[1]}
 
     def rhythm_file(self, rid=RID64):
         return os.path.join(self.env.root, "results-rhythm", rid + ".json")
@@ -378,12 +455,15 @@ class RhythmAnalyzeTest(RhythmBase):
         self.assertEqual((r["bpm_confidence_band"], r["bpm_estimates"]), ("excellent", RHYTHM_OUT["bpm_estimates"]))
         self.assertNotIn("beats", r)  # rows only via /timeline
         self.assertNotIn("chords", r)
-        for k in V2_SUMMARY_KEYS + V21_SUMMARY_KEYS + V22_SUMMARY_KEYS + V30_SUMMARY_KEYS + V40_SUMMARY_KEYS:  # 0.1.0 shape
+        for k in (V2_SUMMARY_KEYS + V21_SUMMARY_KEYS + V22_SUMMARY_KEYS + V30_SUMMARY_KEYS + V40_SUMMARY_KEYS
+                  + V43_SUMMARY_KEYS):  # 0.1.0 shape
             self.assertIsNone(r[k], k)
         calls = self.fw.calls()
         self.assertEqual(len(calls), 1)
         inbox_name = self.env.argv_log()[-1][1]
-        self.assertEqual(calls[0]["argv"], [os.path.join(self.env.inbox, inbox_name)])  # same promoted WAV, argv
+        # same promoted WAV, argv; the ASR words of the result on stdin
+        self.assertEqual(calls[0]["argv"], ["--words-stdin", os.path.join(self.env.inbox, inbox_name)])
+        self.assertEqual(json.loads(calls[0]["stdin"]), {"words": [[w["text"], w["start"], w["end"]] for w in WORDS]})
         self.assertTrue(calls[0]["exists"])
         self.assertTrue(calls[0]["lock_held"], "team flock held while the worker runs")
         self.assertEqual(calls[0]["path_env"], server.CHILD_ENV_PATH)
@@ -394,7 +474,7 @@ class RhythmAnalyzeTest(RhythmBase):
         self.assertEqual(stat.S_IMODE(os.stat(p).st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(os.stat(os.path.dirname(p)).st_mode), 0o700)
         with open(p) as f:  # the server adds the worker file's identity
-            self.assertEqual(json.load(f), dict(RHYTHM_OUT, worker_sha256=self.worker_sha()))
+            self.assertEqual(json.load(f), dict(RHYTHM_OUT, **self.ids()))
         self.assertEqual(os.listdir(os.path.dirname(p)), [RID64 + ".json"])  # no tmp left
         rec = self.c.json("GET", "/receipt/" + h["X-ML-Nonce"])[1]
         self.assertEqual((rec["state"], rec["result_id"], rec["error_code"]), ("done", RID64, None))
@@ -446,7 +526,7 @@ class RhythmAnalyzeTest(RhythmBase):
         self.assertNotIn("chords", r)
         self.assertNotIn("chord_frame_segment_count", r)  # stored file only
         with open(self.rhythm_file()) as f:
-            self.assertEqual(json.load(f), dict(RHYTHM_OUT_V2, worker_sha256=self.worker_sha()))
+            self.assertEqual(json.load(f), dict(RHYTHM_OUT_V2, **self.ids()))
         r = self.c.json("GET", "/report/" + RID64)[1]["rhythm"]
         self.assertEqual((r["key_change_count"], r["key_sections"][1]["strength"]), (1, None))
 
@@ -500,7 +580,7 @@ class RhythmAnalyzeTest(RhythmBase):
         self.assertNotIn("energy", r)  # values only via /timeline layer=energy
         self.assertEqual(r["tempo_cnn"], TC_DONE)
         with open(self.rhythm_file()) as f:
-            self.assertEqual(json.load(f), dict(RHYTHM_OUT_V30, worker_sha256=self.worker_sha()))
+            self.assertEqual(json.load(f), dict(RHYTHM_OUT_V30, **self.ids()))
         r = self.c.json("GET", "/report/" + RID64)[1]["rhythm"]
         self.assertEqual([x["label"] for x in r["sections"]], ["A", "B", "A"])
         self.assertEqual(r["energy_summary"]["peaks"][0]["start"], 3.0)
@@ -525,7 +605,7 @@ class RhythmAnalyzeTest(RhythmBase):
         self.assertEqual(r["melody"], MELODY)
         self.assertNotIn("melody_notes", r)  # rows only via /timeline layer=melody
         with open(self.rhythm_file()) as f:
-            self.assertEqual(json.load(f), dict(RHYTHM_OUT_V40, worker_sha256=self.worker_sha()))
+            self.assertEqual(json.load(f), dict(RHYTHM_OUT_V40, **self.ids()))
         self.assertEqual(self.c.json("GET", "/report/" + RID64)[1]["rhythm"]["melody"], MELODY)
         # valid edge shapes: failed melody (no rows), no note at all, no sections, capped notes
         empty = rw.melody_summary([], [], 0.008, 750, "C", "major", SECTIONS)
@@ -601,6 +681,74 @@ class RhythmAnalyzeTest(RhythmBase):
                                            notes_per_second=2.5, peak={"midi": 69, "note": "A4", "time": 9.992})])):
             v = json.loads(json.dumps(dict(base, melody=bad, melody_notes=notes)))
             self.assertIsNone(server.check_rhythm(v))
+
+    def test_v43_lyric_repeats_in_summary(self):
+        self.fw.write(stdout=json.dumps(RHYTHM_OUT_V43))
+        r = self.c.json("POST", AR, WAV)[1]["rhythm"]
+        self.assertEqual((r["status"], r["lyric_repeats"]), ("done", LYRIC), r)
+        self.assertNotIn("structure_debug", r)  # calibration data: stored file only
+        with open(self.rhythm_file()) as f:
+            self.assertEqual(json.load(f), dict(RHYTHM_OUT_V43, **self.ids()))
+        r = self.c.json("GET", "/report/" + RID64)[1]["rhythm"]
+        self.assertEqual(r["lyric_repeats"], LYRIC)
+        self.assertNotIn("structure_debug", r)
+        for ly in ({"status": "unavailable", "reason": "no_words"}, {"status": "failed", "code": "analysis_error"},
+                   dict(LYRIC, blocks=[], group_count=0, coverage_s=0.0), dict(LYRIC, unit="word", n=4)):
+            v = json.loads(json.dumps(dict(RHYTHM_OUT_V43, lyric_repeats=ly)))
+            self.assertIs(server.check_rhythm(v), v, ly)
+        single = {"sections": [dict(SECTIONS[0], end=6.0)], "melody": MELODY_FAILED, "melody_notes": []}
+        for over in ({"structure_debug": None}, {"structure_debug": dict(SDEBUG, section_similarity=None)},
+                     dict(single, structure_debug=dict(SDEBUG, novelty={"times": [], "values": []}, peaks=[],
+                                                       section_similarity=None)),  # fewer than 32 beat intervals
+                     dict(single, structure_debug=dict(SDEBUG, peaks=[SDEBUG["peaks"][1]],
+                                                       section_similarity=[[1.0]]))):
+            v = json.loads(json.dumps(dict(RHYTHM_OUT_V43, **over)))
+            self.assertIs(server.check_rhythm(v), v, over)
+        v = json.loads(json.dumps(dict(RHYTHM_OUT_V43, duration=20.0, lyric_repeats=LYRIC_6)))
+        self.assertIs(server.check_rhythm(v), v)
+        v = json.loads(json.dumps(RHYTHM_OUT_V40))  # a 0.4.2 file (neither field) stays valid; summary null
+        self.assertIs(server.check_rhythm(v), v)
+        self.assertIsNone(server.rhythm_summary(v)["lyric_repeats"])
+
+    def test_v43_invalid_output(self):
+        for out in bad_v43():
+            self.fw.write(stdout=out)
+            self.assert_rhythm_failed("failed", "invalid_output")
+
+    def test_words_from_result_file(self):
+        # ASR failed / no words: an empty list goes to the worker; rhythm still runs
+        self.write_result(words=[])
+        self.assertEqual(self.c.json("POST", AR, WAV)[1]["rhythm"]["status"], "done")
+        self.assertEqual(json.loads(self.fw.calls()[-1]["stdin"]), {"words": []})
+        cases = ((None, {"words": None, "reason": "result_missing"}),
+                 ("{", {"words": None, "reason": "result_invalid"}),
+                 (json.dumps({"result_id": "cd" * 32, "words": WORDS}), {"words": None, "reason": "result_invalid"}),
+                 (json.dumps({"result_id": RID64, "words": [dict(WORDS[0], start=float("nan"))]}),
+                  {"words": None, "reason": "result_invalid"}),
+                 (json.dumps({"result_id": RID64, "words": [dict(WORDS[0], text=5)]}),
+                  {"words": None, "reason": "result_invalid"}),
+                 (json.dumps({"result_id": RID64, "words": [dict(WORDS[0], text="x" * 201)]}),
+                  {"words": None, "reason": "result_invalid"}),
+                 (json.dumps({"result_id": RID64, "words": [WORDS[0]] * 20001}),
+                  {"words": None, "reason": "result_invalid"}),
+                 (json.dumps({"result_id": RID64, "words": "x"}), {"words": None, "reason": "result_invalid"}),
+                 (json.dumps({"result_id": RID64}), {"words": []}),  # no words key: same as an empty ASR
+                 (json.dumps({"result_id": RID64, "words": [{"text": "a", "start": 1, "end": 2}]}),
+                  {"words": [["a", 1, 2]]}))
+        path = os.path.join(self.env.root, "results", RID64 + ".json")
+        for raw, want in cases:
+            if raw is None:
+                os.unlink(path)
+            else:
+                self.write_result(raw=raw)
+            b, h = self.h.app.lyric_words(RID64)
+            self.assertEqual((json.loads(b), h), (want, sha(b)), raw and raw[:60])
+        os.unlink(path)
+        os.symlink(self.rhythm_file(), path)  # never followed
+        self.assertEqual(json.loads(self.h.app.lyric_words(RID64)[0]), {"words": None, "reason": "result_invalid"})
+        os.unlink(path)
+        os.mkdir(path)
+        self.assertEqual(json.loads(self.h.app.lyric_words(RID64)[0]), {"words": None, "reason": "result_invalid"})
 
     def test_v40_invalid_output(self):
         for out in bad_v40():
@@ -682,7 +830,7 @@ class RhythmCacheIdentityTest(RhythmBase):
             return json.load(f)
 
     def test_matching_hash_reused(self):
-        self.write_stored(dict(RHYTHM_OUT_V2, worker_sha256=self.worker_sha()))
+        self.write_stored(dict(RHYTHM_OUT_V2, **self.ids()))
         r = self.c.json("POST", AR, WAV)[1]["rhythm"]
         self.assertEqual((r["status"], r["cache_hit"], r["chords_grid"]), ("done", True, "beat"))
         self.assertEqual(self.fw.calls(), [])
@@ -695,7 +843,7 @@ class RhythmCacheIdentityTest(RhythmBase):
             r = self.c.json("POST", AR, WAV)[1]["rhythm"]
             self.assertEqual((r["status"], r["cache_hit"], r["stored"]), ("done", False, True))
             self.assertEqual(len(self.fw.calls()), n + 1)
-            self.assertEqual(self.stored(), dict(RHYTHM_OUT, worker_sha256=self.worker_sha()))  # replaced
+            self.assertEqual(self.stored(), dict(RHYTHM_OUT, **self.ids()))  # replaced
             self.assertEqual(os.listdir(os.path.dirname(self.rhythm_file())), [RID64 + ".json"])
             self.assertTrue(self.c.json("POST", AR, WAV)[1]["rhythm"]["cache_hit"])  # now reused
             self.assertEqual(len(self.fw.calls()), n + 1)
@@ -705,7 +853,7 @@ class RhythmCacheIdentityTest(RhythmBase):
                  {"status": "failed", "code": "inference_error"},
                  {"status": "failed", "code": "dependency_missing"})
         for tc in cases:
-            self.write_stored(dict(RHYTHM_OUT_V2, tempo_cnn=tc, worker_sha256=self.worker_sha()))
+            self.write_stored(dict(RHYTHM_OUT_V2, tempo_cnn=tc, **self.ids()))
             n = len(self.fw.calls())
             r = self.c.json("POST", AR, WAV)[1]["rhythm"]
             self.assertEqual((r["status"], r["cache_hit"]), ("done", False), tc)
@@ -715,7 +863,7 @@ class RhythmCacheIdentityTest(RhythmBase):
     def test_deterministic_tempo_cnn_failure_reused(self):
         for code in ("too_short", "non_finite", "inconsistent_output"):
             self.write_stored(dict(RHYTHM_OUT_V2, tempo_cnn={"status": "failed", "code": code},
-                                   worker_sha256=self.worker_sha()))
+                                   **self.ids()))
             n = len(self.fw.calls())
             r = self.c.json("POST", AR, WAV)[1]["rhythm"]
             self.assertEqual((r["status"], r["cache_hit"]), ("done", True), code)
@@ -725,7 +873,7 @@ class RhythmCacheIdentityTest(RhythmBase):
         # review F2: environment-dependent melody failures are retried like tempo_cnn; non_finite stays cached
         for code in ("analysis_error", "dependency_missing"):
             failed = dict(RHYTHM_OUT_V40, melody={"status": "failed", "code": code}, melody_notes=[],
-                          worker_sha256=self.worker_sha())
+                          **self.ids())
             self.write_stored(failed)
             self.fw.write(stdout=json.dumps(RHYTHM_OUT_V40))  # the cause went away: melody done now
             n = len(self.fw.calls())
@@ -743,11 +891,43 @@ class RhythmCacheIdentityTest(RhythmBase):
             self.assertEqual(self.stored(), failed)
             self.fw.write(exit=0, stderr_lines=[])
         self.write_stored(dict(RHYTHM_OUT_V40, melody={"status": "failed", "code": "non_finite"}, melody_notes=[],
-                               worker_sha256=self.worker_sha()))
+                               **self.ids()))
         n = len(self.fw.calls())
         r = self.c.json("POST", AR, WAV)[1]["rhythm"]
         self.assertEqual((r["cache_hit"], r["melody"]), (True, {"status": "failed", "code": "non_finite"}))
         self.assertEqual(len(self.fw.calls()), n)
+
+    def test_changed_words_recomputed(self):
+        # the cache key includes the words payload: a re-run ASR (new words for the same result_id) recomputes
+        self.assertFalse(self.c.json("POST", AR, WAV)[1]["rhythm"]["cache_hit"])
+        self.assertTrue(self.c.json("POST", AR, WAV)[1]["rhythm"]["cache_hit"])
+        first = self.stored()["words_sha256"]
+        self.write_result(words=WORDS[:3])
+        r = self.c.json("POST", AR, WAV)[1]["rhythm"]
+        self.assertEqual((r["status"], r["cache_hit"]), ("done", False))
+        self.assertEqual(len(self.fw.calls()), 2)
+        self.assertNotEqual(self.stored()["words_sha256"], first)
+        self.assertEqual(self.stored()["words_sha256"], self.ids()["words_sha256"])
+        self.write_stored(dict(RHYTHM_OUT_V43, worker_sha256=self.worker_sha()))  # no words hash: recomputed
+        self.assertFalse(self.c.json("POST", AR, WAV)[1]["rhythm"]["cache_hit"])
+        self.fw.write(stdout=json.dumps(dict(RHYTHM_OUT, words_sha256="cd" * 32)))  # worker cannot set it either
+        self.write_result(words=WORDS[:2])
+        self.c.json("POST", AR, WAV)
+        self.assertEqual(self.stored()["words_sha256"], self.ids()["words_sha256"])
+
+    def test_unreadable_words_recomputed(self):
+        # result_unreadable may pass later (retried, like a missing TempoCNN model); other reasons stay cached
+        for reason, retry in (("result_unreadable", True), ("result_missing", False), ("no_words", False),
+                              ("too_little_text", False)):
+            self.write_stored(dict(RHYTHM_OUT_V43, lyric_repeats={"status": "unavailable", "reason": reason},
+                                   **self.ids()))
+            n = len(self.fw.calls())
+            r = self.c.json("POST", AR, WAV)[1]["rhythm"]
+            self.assertEqual(r["cache_hit"], not retry, reason)
+            self.assertEqual(len(self.fw.calls()), n + retry)
+        self.write_stored(dict(RHYTHM_OUT_V43, lyric_repeats={"status": "failed", "code": "analysis_error"},
+                               **self.ids()))
+        self.assertTrue(self.c.json("POST", AR, WAV)[1]["rhythm"]["cache_hit"])  # pure code: deterministic
 
     def test_failed_recompute_keeps_old_file(self):
         self.write_stored(RHYTHM_OUT_V2)
@@ -779,7 +959,7 @@ class RhythmCacheIdentityTest(RhythmBase):
         self.assertEqual(self.stored()["worker_sha256"], self.worker_sha())
 
     def test_unreadable_worker_never_reuses(self):
-        self.write_stored(dict(RHYTHM_OUT_V2, worker_sha256=self.worker_sha()))
+        self.write_stored(dict(RHYTHM_OUT_V2, **self.ids()))
         self.h.app.rhythm_worker_sha256 = None  # as if the worker file could not be read at start
         r = self.c.json("POST", AR, WAV)[1]["rhythm"]
         self.assertEqual(r["cache_hit"], False)
@@ -914,8 +1094,12 @@ class RhythmReadTest(RhythmBase):
         self.assertEqual((st, b["error"]["code"]), (404, "rhythm_not_found"))
         with open(self.rhythm_file(), "w") as f:
             f.write(json.dumps(RHYTHM_OUT_V40))
-        self.assertEqual(self.c.json("GET", "/report/" + RID64)[1]["rhythm"]["melody"], MELODY)
-        for bad in bad_v2() + bad_v21() + bad_v22() + bad_v30() + bad_v40() + bad_v41():
+        r = self.c.json("GET", "/report/" + RID64)[1]["rhythm"]
+        self.assertEqual((r["melody"], r["lyric_repeats"]), (MELODY, None))  # 0.4.0-0.4.2 file: no lyric_repeats
+        with open(self.rhythm_file(), "w") as f:
+            f.write(json.dumps(RHYTHM_OUT_V43))
+        self.assertEqual(self.c.json("GET", "/report/" + RID64)[1]["rhythm"]["lyric_repeats"], LYRIC)
+        for bad in bad_v2() + bad_v21() + bad_v22() + bad_v30() + bad_v40() + bad_v41() + bad_v43():
             with open(self.rhythm_file(), "w") as f:
                 f.write(bad)
             st, b = self.c.json("GET", "/report/" + RID64)
@@ -1358,6 +1542,187 @@ def _seq(pairs, t0=0.0, gap=0.008):
     return out
 
 
+def _chars(text, t, step=0.3):
+    """Char-level ASR words (Japanese Whisper style): one word per character, `step` s each, from t."""
+    return [(c, round(t + i * step, 3), round(t + i * step + step * 0.9, 3)) for i, c in enumerate(text)], \
+        t + len(text) * step
+
+
+def _song(parts, step=0.3, gap=2.0):
+    """parts: strings sung one after another with `gap` s between them -> (words, end time)."""
+    words, t = [], 0.0
+    for p in parts:
+        w, t = _chars(p, t, step)
+        words += w
+        t += gap
+    return words, t
+
+
+CHORUS = "きみのなまえをよんでいるよずっと"  # 16 chars = 4.8 s at 0.3 s
+VERSES = ("あさのひかりがまどをてらすころ", "かぜがふいてはなびらがまう", "よるのまちにあかりがともる",
+          "ゆめのつづきをさがしてあるく")
+
+
+class LyricLogicTest(unittest.TestCase):
+    """lyric_repeats (worker 0.4.3): pure Python on ASR words; output checked by the server validator too."""
+
+    def check(self, d, dur):
+        self.assertTrue(server._lyric_repeats_ok(json.loads(json.dumps(d)), dur + 0.5), d)
+
+    def test_chorus_three_times_one_group(self):
+        words, end = _song([VERSES[0], CHORUS, VERSES[1], CHORUS, VERSES[2], VERSES[3], CHORUS])
+        d, warns = rw.lyric_repeats(words, end)
+        self.check(d, end)
+        self.assertEqual((d["status"], d["unit"], d["n"], warns), ("done", "char", 8, []))
+        self.assertEqual([b["group"] for b in d["blocks"]], [0, 0, 0])
+        self.assertEqual(d["group_count"], 1)
+        starts = [w[1] for w in words if w[0] == CHORUS[0] and words[words.index(w) + 1][0] == CHORUS[1]]
+        self.assertEqual([b["start"] for b in d["blocks"]], starts)
+        for b in d["blocks"]:
+            self.assertAlmostEqual(b["end"] - b["start"], 4.77, delta=0.01)  # last char ends at 0.9 x its 0.3 s
+        self.assertEqual(d["coverage_s"], round(sum(b["end"] - b["start"] for b in d["blocks"]), 3))
+
+    def test_no_repeat_and_spread(self):
+        words, end = _song(VERSES)
+        d, _ = rw.lyric_repeats(words, end)
+        self.assertEqual((d["status"], d["blocks"], d["group_count"], d["coverage_s"]), ("done", [], 0, 0.0))
+        self.check(d, end)
+        # the same line twice within 15 s (a doubled line) is not a repeat; >= 15 s apart it is
+        words, end = _song([VERSES[0], CHORUS, CHORUS, VERSES[1]])
+        self.assertEqual(rw.lyric_repeats(words, end)[0]["blocks"], [])
+        words, end = _song([CHORUS, VERSES[0], VERSES[1], CHORUS])
+        self.assertEqual(len(rw.lyric_repeats(words, end)[0]["blocks"]), 2)
+        # a repeated fragment shorter than 4 s is dropped (8 chars = 2.4 s)
+        words, end = _song([CHORUS[:9], VERSES[0], VERSES[1], VERSES[2], CHORUS[:9]])
+        self.assertEqual(rw.lyric_repeats(words, end)[0]["blocks"], [])
+
+    def test_two_refrains_two_groups_join(self):
+        hook = "らららうたおうよあしたへむかって"
+        words, end = _song([CHORUS, VERSES[0], hook, VERSES[1], CHORUS, VERSES[2], hook], gap=1.0)
+        d, _ = rw.lyric_repeats(words, end)
+        self.check(d, end)
+        self.assertEqual([b["group"] for b in d["blocks"]], [0, 1, 0, 1])
+        # covered chars closer than 3 s join one block: chorus + hook with a 2 s gap give one block per pair
+        words, end = _song([CHORUS, hook, VERSES[0], VERSES[1], CHORUS, hook], gap=2.0)
+        d, _ = rw.lyric_repeats(words, end)
+        self.assertEqual([b["group"] for b in d["blocks"]], [0, 0])
+        self.assertGreater(d["blocks"][0]["end"] - d["blocks"][0]["start"], 11.0)
+        words, end = _song([CHORUS, hook, VERSES[0], VERSES[1], CHORUS, hook], gap=3.5)
+        self.assertEqual([b["group"] for b in rw.lyric_repeats(words, end)[0]["blocks"]], [0, 1, 0, 1])
+
+    def test_unavailable(self):
+        self.assertEqual(rw.lyric_repeats(None, 10.0), ({"status": "unavailable", "reason": "no_words_input"}, []))
+        self.assertEqual(rw.lyric_repeats(None, 10.0, "result_missing")[0]["reason"], "result_missing")
+        self.assertEqual(rw.lyric_repeats([], 10.0)[0], {"status": "unavailable", "reason": "no_words"})
+        words, end = _chars("あ" * 49, 0.0)
+        self.assertEqual(rw.lyric_repeats(words, end)[0], {"status": "unavailable", "reason": "too_little_text"})
+        words, end = _chars("、。！ 「」…" * 20, 0.0)  # punctuation only
+        self.assertEqual(rw.lyric_repeats(words, end)[0]["reason"], "too_little_text")
+        words, end = _chars("あ" * 50, 0.0)
+        self.assertEqual(rw.lyric_repeats(words, end)[0]["status"], "done")
+        for d in (rw.lyric_repeats(None, 1.0)[0], rw.lyric_repeats([], 1.0)[0]):
+            self.check(d, 1.0)
+
+    def test_normalization(self):
+        self.assertEqual(rw.lyric_norm(" Ｈｅｌｌｏ、World！ ﾗﾗﾗ"), "helloworldラララ")  # NFKC, lower, no punct
+        self.assertEqual(rw.lyric_norm("ｶﾞ"), "ガ")  # half-width kana + voiced mark compose
+        self.assertEqual(rw.lyric_norm("e\u0301"), "é")
+        self.assertEqual(rw.lyric_norm("♪★ 123"), "123")  # symbols dropped, digits kept
+        # the same chorus written with punctuation, full-width and case differences still matches
+        a, t = _chars("ＬＯＶＥきみのなまえをよぶよ", 0.0)
+        v1, t = _chars(VERSES[0] + VERSES[1], t + 2)
+        b, t = _chars("love、きみの　なまえを「よぶよ」！", t + 2)
+        v2, t = _chars(VERSES[2], t + 2)
+        d, _ = rw.lyric_repeats(a + v1 + b + v2, t)
+        self.assertEqual([x["group"] for x in d["blocks"]], [0, 0], d)
+
+    def test_english_spaced_words(self):
+        chorus = " we will find our way back home tonight".split(" ")[1:]
+        verse = [" the city lights are fading into gray and cold", " i walked along the river where we used to go",
+                 " no one waits for me at the station anymore"]
+        words, t = [], 0.0
+        for line in (verse[0], " " + " ".join(chorus), verse[1], " " + " ".join(chorus), verse[2],
+                     " " + " ".join(chorus)):
+            for w in line.split(" ")[1:]:
+                words.append((" " + w.capitalize(), round(t, 3), round(t + 0.5, 3)))  # Whisper: leading space
+                t += 0.6
+            t += 2.0
+        d, _ = rw.lyric_repeats(words, t)
+        self.check(d, t)
+        self.assertEqual((d["unit"], d["n"]), ("word", 4))
+        self.assertEqual([b["group"] for b in d["blocks"]], [0, 0, 0])
+        self.assertAlmostEqual(d["blocks"][0]["end"] - d["blocks"][0]["start"], 4.7, delta=0.01)  # 8 words
+        # verses alone share only short words ("the", "we") and letter runs: no block with 4-word n-grams
+        verses = [w for w in words if not any(w[1] >= b["start"] and w[2] <= b["end"] for b in d["blocks"])]
+        d2 = rw.lyric_repeats(verses, t)[0]
+        self.assertEqual((d2["unit"], d2["blocks"]), ("word", []))
+
+    def test_order_clamp_and_cap(self):
+        words, end = _song([CHORUS, VERSES[0], VERSES[1], CHORUS])
+        d1 = rw.lyric_repeats(words, end)[0]
+        self.assertEqual(rw.lyric_repeats(words[::-1], end)[0], d1)  # sorted by start
+        d2 = rw.lyric_repeats(words + [("x", -5.0, 900.0)], 30.0)[0]  # clamped into [0, duration]
+        self.check(d2, 30.0)
+        self.assertTrue(all(0 <= b["start"] < b["end"] <= 30.0 for b in d2["blocks"]))
+        # 45 distinct refrains each sung twice 20 s apart -> 90 blocks -> the 40 longest, in time order
+        words, t = [], 0.0
+        lines = ["%02dあいうえおかきくけこさしすせそ" % i for i in range(45)]
+        for i, line in enumerate(lines):
+            w, t = _chars(line + "ん" * (i % 3), t)
+            words += w
+            w, t = _chars("たちつてとなにぬねの" * 6, t + 1.0)  # >= 15 s apart, no shared 8-gram with the lines
+            words += [(c, a, b) for c, a, b in w]
+            t += 1.0
+        for i, line in enumerate(lines):
+            w, t = _chars(line + "ん" * (i % 3), t)
+            words += w
+            t += 4.0
+        d, warns = rw.lyric_repeats(words, t)
+        self.check(d, t)
+        self.assertEqual(len(d["blocks"]), 40)
+        self.assertEqual(len(warns), 1)
+        self.assertTrue(warns[0].startswith("lyric_repeats_capped:"))
+        self.assertEqual([b["start"] for b in d["blocks"]], sorted(b["start"] for b in d["blocks"]))
+
+    def test_parse_words(self):
+        ok = json.dumps({"words": [["a", 1, 2.5], ["", 3, 3]]}).encode()
+        self.assertEqual(rw.parse_words(ok), ([("a", 1.0, 2.5), ("", 3.0, 3.0)], None))
+        self.assertEqual(rw.parse_words(b'{"words":null,"reason":"result_missing"}'), (None, "result_missing"))
+        for bad in (b"{", b"[]", b'{"words":null,"reason":"Bad"}', b'{"words":null}', b'{"words":5}',
+                    b'{"words":[["a",1]]}', b'{"words":[["a",NaN,2]]}', b'{"words":[["a",true,2]]}',
+                    b'{"words":[[5,1,2]]}', b'{"words":[["' + b"x" * 201 + b'",1,2]]}', b"\xff",
+                    json.dumps({"words": [["a", 1, 2]] * 20001}).encode()):
+            self.assertEqual(rw.parse_words(bad), (None, "words_invalid"), bad[:40])
+        self.assertEqual(rw.parse_words(b" " * (rw.WORDS_MAX_BYTES + 1)), (None, "words_too_large"))
+
+    def test_structure_debug(self):
+        nov = [None] * 3 + [0.1, 0.5, 0.1, 0.0, 0.05, 0.12, 0.05, 0.0, 0.2, 0.1] + [None] * 3
+        times = [round(0.5 * i, 3) for i in range(len(nov))]
+        d = rw.structure_debug(nov, times, [4], [[1.0, 0.3], [0.3, 1.0]])
+        self.assertEqual(d["novelty"]["times"], times[3:13])
+        self.assertEqual(d["novelty"]["values"], nov[3:13])
+        self.assertEqual((d["kernel_beats"], d["min_gap_beats"], d["novelty_threshold"], d["group_threshold"]),
+                         (16, 8, 0.15, 0.75))
+        self.assertEqual(d["peaks"], [])  # +-8 beats: only index 8 is far enough from both ends, and 0.5 is in reach
+        self.assertEqual(d["section_similarity"], [[1.0, 0.3], [0.3, 1.0]])
+        long = [None] * 3 + [0.0] * 34 + [None] * 3
+        long[10], long[18], long[25] = 0.5, 0.02, 0.1
+        d = rw.structure_debug(long, [0.5 * i for i in range(40)], [10], None)
+        self.assertEqual(d["peaks"], [{"time": 5.0, "value": 0.5, "selected": True},
+                                      {"time": 12.5, "value": 0.1, "selected": False}])  # below threshold kept too
+        self.assertEqual(len(d["novelty"]["times"]), 34)
+        self.assertEqual(rw.novelty_peaks(nov, min_gap=2), [4, 8, 11])
+        self.assertEqual(rw.novelty_peaks(nov, min_gap=2, thresh=0.15), [4, 11])
+        self.assertEqual(rw.pick_boundaries(nov, min_gap=2), [4, 11])
+        d = rw.structure_debug([None] * 4, [0.0, 1.0, 2.0, 3.0], [], None)
+        self.assertEqual((d["novelty"], d["peaks"], d["section_similarity"]), ({"times": [], "values": []}, [], None))
+        # a selected boundary is always kept, then the strongest others up to the cap
+        big = [None] * 8 + [0.01 * (i % 7) if i % 9 else 0.9 for i in range(4000)] + [None] * 8
+        d = rw.structure_debug(big, list(range(len(big))), [8], None)
+        self.assertLessEqual(len(d["peaks"]), rw.SEC_DEBUG_PEAKS)
+        self.assertIn({"time": 8, "value": 0.9, "selected": True}, d["peaks"])
+
+
 class MergeLogicTest(unittest.TestCase):
     """Worker 0.4.2 note merge (pure; the 0.2 s contour median needs numpy and is covered by RealWorkerTest)."""
 
@@ -1493,9 +1858,12 @@ SYNTH_RUN = (60, 62, 64, 65, 67, 69, 71, 72, 71, 69, 67, 65, 64, 62, 60)  # synt
 SYNTH_MELODY = (72, 74, 76, 79, 76, 74, 72, 71, 69, 71, 72, 74, 76, 77, 79, 81)  # synth_audio.MELODY (numpy-free copy)
 
 
-def run_worker(wav, *opts):
+def run_worker(wav, *opts, words=None):
+    """words: bytes for --words-stdin (the option is added), or None (no option, stdin empty)."""
+    if words is not None:
+        opts = opts + ("--words-stdin",)
     p = subprocess.run([ESSENTIA_PY, "-I", WORKER] + list(opts) + [wav], stdout=subprocess.PIPE,
-                       stderr=subprocess.PIPE, timeout=300,
+                       stderr=subprocess.PIPE, timeout=300, input=words or b"",
                        env={"PATH": server.CHILD_ENV_PATH, "HOME": os.path.expanduser("~"), "LANG": "en_US.UTF-8",
                             "TMPDIR": tempfile.gettempdir()})
     assert p.returncode == 0, p.stderr
@@ -1526,7 +1894,12 @@ class RealWorkerTest(unittest.TestCase):
             self.assertEqual((v["sample_rate"], v["chords_reliability"]), (44100, "low_reference"))
             self.assertIn(v["duration"], (30.0, 60.0))
             self.assertEqual(v["tool"]["essentia_version"], "2.1-beta6-dev")
-            self.assertEqual(v["tool"]["version"], "0.4.2")
+            self.assertEqual(v["tool"]["version"], "0.4.3")
+            self.assertEqual(v["lyric_repeats"], {"status": "unavailable", "reason": "no_words_input"})
+            sd = v["structure_debug"]
+            self.assertEqual([p["time"] for p in sd["peaks"] if p["selected"]], [x["start"] for x in v["sections"][1:]])
+            self.assertEqual(len(sd["novelty"]["times"]), max(0, len([b for b in v["beats"]
+                                                                      if 0 < b < v["duration"]]) - 32))
             self.assertEqual(v["melody"]["status"], "done")
             self.assertGreaterEqual(v["melody"]["note_count_raw"], v["melody"]["note_count"])
             self.assertEqual(len(v["melody_notes"]), v["melody"]["note_count"])
@@ -1667,6 +2040,11 @@ class RealWorkerTest(unittest.TestCase):
         self.assertEqual([s["top_chord"] in ("C", "Am", "F", "G") for s in ss], [True, False, True, False])
         self.assertEqual([s["top_chord"] in ("E", "C#m", "A", "B") for s in ss], [False, True, False, True])
         self.assertGreater(min(s["similarity_to_first"] for s in ss), 0.9)
+        sim = v["structure_debug"]["section_similarity"]  # 0.4.3: the full matrix behind the labels
+        self.assertEqual(len(sim), 4)
+        self.assertGreater(min(sim[0][2], sim[1][3]), 0.9)
+        self.assertLess(max(sim[0][1], sim[0][3], sim[1][2]), 0.75)
+        self.assertGreaterEqual(min(p["value"] for p in v["structure_debug"]["peaks"] if p["selected"]), 0.15)
         es = v["energy_summary"]
         b_spans = [(s["start"], s["end"]) for s in ss if s["label"] == "B"]
         for p in es["peaks"][:2]:  # the two loudest windows lie inside B sections
@@ -1815,7 +2193,8 @@ class RealWorkerTest(unittest.TestCase):
         with open(bad, "wb") as f:
             f.write(b"RIFF0000WAVEjunk")
         for args in ([bad], ["rel.wav"], [], ["--tempo-cnn-model", "rel.pb", bad], ["--tempo-cnn-model", bad],
-                     ["--x", "/a.pb", bad]):
+                     ["--x", "/a.pb", bad], ["--words-stdin"], ["--words-stdin", "--words-stdin", bad],
+                     ["--words-stdin", "rel.wav"], [bad, "--words-stdin"]):
             p = subprocess.run([ESSENTIA_PY, "-I", WORKER] + args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                timeout=60)
             self.assertEqual(p.returncode, 1)
@@ -1823,6 +2202,25 @@ class RealWorkerTest(unittest.TestCase):
             lines = p.stderr.decode().strip().splitlines()
             self.assertEqual(len(lines), 1)
             self.assertIn(json.loads(lines[0])["error"]["code"], ("invalid_audio", "invalid_argument"))
+
+    def test_lyric_repeats_from_stdin(self):
+        # the worker computes lyric_repeats from the words on stdin; no/too few words never fail the rest
+        wav = os.path.join(self.dir, "chords.wav")
+        words, end = _song([CHORUS, VERSES[0], CHORUS, VERSES[1], CHORUS], gap=1.0)  # 27.8 s
+        self.assertLess(end, 30.0)
+        words = [list(w) for w in words]
+        v = run_worker(wav, words=json.dumps({"words": words}).encode())
+        self.assertIsNotNone(server.check_rhythm(v))
+        ly = v["lyric_repeats"]
+        self.assertEqual((ly["status"], ly["unit"], [b["group"] for b in ly["blocks"]]), ("done", "char", [0, 0, 0]))
+        self.assertEqual(ly, rw.lyric_repeats([tuple(w) for w in words], v["duration"])[0])
+        for payload, want in ((b'{"words":[]}', {"status": "unavailable", "reason": "no_words"}),
+                              (b'{"words":null,"reason":"result_missing"}',
+                               {"status": "unavailable", "reason": "result_missing"}),
+                              (b"not json", {"status": "unavailable", "reason": "words_invalid"})):
+            v = run_worker(wav, words=payload)
+            self.assertEqual((v["lyric_repeats"], v["melody"]["status"]), (want, "done"))
+            self.assertIsNotNone(server.check_rhythm(v))
 
     def test_end_to_end_through_server(self):
         env = Env()
@@ -1840,7 +2238,15 @@ class RealWorkerTest(unittest.TestCase):
                 self.assertEqual(b["rhythm"]["energy_summary"]["unit"], "dBFS")
                 self.assertEqual(b["rhythm"]["melody"]["status"], "done")
                 self.assertNotIn("melody_notes", b["rhythm"])
+                # the fake ml stores no result file: no words, rhythm done anyway
+                self.assertEqual(b["rhythm"]["lyric_repeats"], {"status": "unavailable", "reason": "result_missing"})
+                self.assertNotIn("structure_debug", b["rhythm"])
                 rid = b["result_id"]
+                with open(os.path.join(env.root, "results-rhythm", rid + ".json")) as f:
+                    stored = json.load(f)
+                self.assertFalse(any(p["selected"] for p in stored["structure_debug"]["peaks"]))  # one section
+                self.assertTrue(all(p["value"] < 0.15 for p in stored["structure_debug"]["peaks"]))
+                self.assertEqual(len(stored["words_sha256"]), 64)
                 st, t = Client(env, h.port).json("GET", "/timeline/%s?layer=energy&limit=200" % rid)
                 self.assertEqual((st, t["total"], len(t["energy"])), (200, 30, 30))
                 st, t = Client(env, h.port).json("GET", "/timeline/%s?layer=melody&limit=200" % rid)

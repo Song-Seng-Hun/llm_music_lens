@@ -909,10 +909,11 @@ def check_rhythm(v):
             if not isinstance(e, dict) or not _num(e.get("bpm"), 0, 1000) or not _num(e.get("share"), 0, 1):
                 return None
         if (not _rhythm_v2_ok(v, dur) or not _rhythm_v21_ok(v) or not _rhythm_v22_ok(v)
-                or not _rhythm_v30_ok(v, dur) or not _rhythm_v40_ok(v, dur)):
+                or not _rhythm_v30_ok(v, dur) or not _rhythm_v40_ok(v, dur) or not _rhythm_v43_ok(v, dur)):
             return None
-        if "worker_sha256" in v and not (isinstance(v["worker_sha256"], str) and RE_HEX64.match(v["worker_sha256"])):
-            return None
+        for k in ("worker_sha256", "words_sha256"):  # server-added identities
+            if k in v and not (isinstance(v[k], str) and RE_HEX64.match(v[k])):
+                return None
     except (TypeError, KeyError, OverflowError):
         return None
     return v
@@ -1285,6 +1286,117 @@ def _rhythm_v40_ok(v, dur):
     return m.get("status") == "done" and _melody_done_ok(m, v, dur, notes)
 
 
+SDEBUG_KEYS = {"kernel_beats", "min_gap_beats", "novelty_threshold", "group_threshold", "novelty", "peaks",
+               "section_similarity"}
+SDEBUG_MAX_PEAKS = 300  # the worker's SEC_DEBUG_PEAKS
+SDEBUG_TOL = 1e-4  # novelty values are rounded to 4 decimals
+LYRIC_KEYS = {"done": {"status", "method", "unit", "n", "blocks", "group_count", "coverage_s", "note"},
+              "unavailable": {"status", "reason"}, "failed": {"status", "code"}}
+LYRIC_UNITS = ("char", "word")
+LYRIC_MAX_BLOCKS = 40
+LYRIC_MIN_BLOCK = 4.0  # s; the worker drops shorter blocks
+LYRIC_BLOCK_TOL = 0.002  # both block ends are rounded to ms
+LYRIC_MAX_WORDS = 20000  # words passed to the worker (char-level Japanese ASR: ~1000-1200 for 3-5 min)
+LYRIC_MAX_TEXT = 200
+ML_RESULT_MAX = 16 * MiB  # ml result file read for its words
+LYRIC_RETRY_REASONS = frozenset(("result_unreadable",))  # the result file could not be read: may work next time
+
+
+def _structure_debug_ok(d, v, dur):
+    """structure_debug (worker 0.4.3, stored file only): exact keys, bounded, novelty times sorted inside the
+    duration with values in -1..1, every peak a novelty point, selected peaks = the section boundaries, similarity
+    a symmetric 0..1 matrix with one row per section (or null)."""
+    if d is None:
+        return True
+    if not (isinstance(d, dict) and set(d) == SDEBUG_KEYS and "sections" in v
+            and _count(d["kernel_beats"], 256) and _count(d["min_gap_beats"], 256)
+            and _num(d["novelty_threshold"], -1, 1) and _num(d["group_threshold"], 0, 1)):
+        return False
+    nv, pk, sim = d["novelty"], d["peaks"], d["section_similarity"]
+    if not (isinstance(nv, dict) and set(nv) == {"times", "values"} and isinstance(nv["times"], list)
+            and isinstance(nv["values"], list) and len(nv["times"]) == len(nv["values"]) <= RHYTHM_MAX_BEATS
+            and all(_num(t, 0, dur) for t in nv["times"]) and all(_num(x, -1, 1) for x in nv["values"])
+            and all(b >= a for a, b in zip(nv["times"], nv["times"][1:]))):
+        return False
+    points = set(zip(nv["times"], nv["values"]))
+    if not isinstance(pk, list) or len(pk) > SDEBUG_MAX_PEAKS:
+        return False
+    prev = -1
+    for p in pk:
+        if not (isinstance(p, dict) and set(p) == {"time", "value", "selected"} and isinstance(p["selected"], bool)
+                and _num(p["time"], 0, dur) and p["time"] > prev and (p["time"], p["value"]) in points
+                and (not p["selected"] or p["value"] >= d["novelty_threshold"] - SDEBUG_TOL)):
+            return False
+        prev = p["time"]
+    if [p["time"] for p in pk if p["selected"]] != [r["start"] for r in v["sections"][1:]]:
+        return False
+    if sim is None:
+        return True
+    n = len(v["sections"])
+    return (isinstance(sim, list) and len(sim) == n
+            and all(isinstance(r, list) and len(r) == n and all(_num(x, 0, 1) for x in r) for r in sim)
+            and all(sim[a][b] == sim[b][a] for a in range(n) for b in range(a)))
+
+
+def _lyric_repeats_ok(d, dur):
+    """lyric_repeats (worker 0.4.3): exact key set per status; done blocks sorted, non-overlapping, inside the
+    duration, >= 4 s, group ids in order of first appearance, coverage = summed block length."""
+    if not isinstance(d, dict) or d.get("status") not in LYRIC_KEYS or set(d) != LYRIC_KEYS[d["status"]]:
+        return False
+    if d["status"] != "done":
+        c = d["reason" if d["status"] == "unavailable" else "code"]
+        return isinstance(c, str) and bool(RE_CODE.match(c))
+    bl = d["blocks"]
+    if not (_short_str(d["method"], 200) and _short_str(d["note"], 200) and d["unit"] in LYRIC_UNITS
+            and _count(d["n"], 64) and d["n"] >= 1 and isinstance(bl, list) and len(bl) <= LYRIC_MAX_BLOCKS
+            and _count(d["group_count"], LYRIC_MAX_BLOCKS) and _num(d["coverage_s"], 0, dur)):
+        return False
+    prev, seen, total = 0, 0, 0.0
+    for b in bl:
+        if not (isinstance(b, dict) and set(b) == {"start", "end", "group"} and _num(b["start"], 0, dur)
+                and _num(b["end"], 0, dur) and b["start"] >= prev
+                and b["end"] - b["start"] >= LYRIC_MIN_BLOCK - LYRIC_BLOCK_TOL
+                and _count(b["group"], LYRIC_MAX_BLOCKS) and b["group"] <= seen):
+            return False
+        seen = max(seen, b["group"] + 1)
+        prev = b["end"]
+        total += b["end"] - b["start"]
+    return d["group_count"] == seen and abs(d["coverage_s"] - total) <= LYRIC_BLOCK_TOL
+
+
+def _rhythm_v43_ok(v, dur):
+    """Fields added by worker 0.4.3 (structure_debug, lyric_repeats); absent in older files, valid when present."""
+    if "structure_debug" in v and not _structure_debug_ok(v["structure_debug"], v, dur):
+        return False
+    return "lyric_repeats" not in v or _lyric_repeats_ok(v["lyric_repeats"], dur)
+
+
+def lyric_words_payload(data, rid):
+    """ml result file bytes (or None when missing) -> the --words-stdin object for the worker: {"words": [[text,
+    start, end], ...]} or {"words": null, "reason": code}. Strict: any malformed word makes the whole list invalid."""
+    if data is None:
+        return {"words": None, "reason": "result_missing"}
+    bad = {"words": None, "reason": "result_invalid"}
+    if len(data) > ML_RESULT_MAX:
+        return bad
+    try:
+        r = loads_rhythm(data)
+    except ValueError:
+        return bad
+    if not isinstance(r, dict) or r.get("result_id") != rid:
+        return bad
+    w = r.get("words", [])
+    if not isinstance(w, list) or len(w) > LYRIC_MAX_WORDS:
+        return bad
+    out = []
+    for x in w:
+        if not (isinstance(x, dict) and isinstance(x.get("text"), str) and len(x["text"]) <= LYRIC_MAX_TEXT
+                and _num(x.get("start"), 0, 700) and _num(x.get("end"), 0, 700)):
+            return bad
+        out.append([x["text"], x["start"], x["end"]])
+    return {"words": out}
+
+
 def confidence_band(c):
     """Bands documented by Essentia BeatTrackerMultiFeature: [0,1) very low, [1,1.5] low, (1.5,3.5] good, >3.5."""
     if c < 1:
@@ -1301,10 +1413,12 @@ TEMPO_CNN_RETRY_CODES = frozenset(("inference_error", "dependency_missing"))
 
 def _rhythm_retry(v):
     """True when a stored file with the current worker must still be recomputed: an optional stage (tempo_cnn or,
-    worker 0.4.0+, melody) ended in an outcome whose cause can change without a worker change."""
-    m = v.get("melody")
-    return _tempo_cnn_retry(v) or (isinstance(m, dict) and m.get("status") == "failed"
-                                   and m.get("code") in MELODY_RETRY_CODES)
+    worker 0.4.0+, melody, or 0.4.3 lyric_repeats) ended in an outcome whose cause can change without a worker
+    change."""
+    m, ly = v.get("melody"), v.get("lyric_repeats")
+    return (_tempo_cnn_retry(v) or (isinstance(m, dict) and m.get("status") == "failed"
+                                    and m.get("code") in MELODY_RETRY_CODES)
+            or (isinstance(ly, dict) and ly.get("status") == "unavailable" and ly.get("reason") in LYRIC_RETRY_REASONS))
 
 
 def _tempo_cnn_retry(v):
@@ -1319,8 +1433,8 @@ def rhythm_summary(v):
     """Compact view for analyze and /report; beats and chord rows stay in the stored file (/timeline).
     Fields from worker 0.2.0 (bpm_alternatives[_note], key_sections, key_change_count, chords_grid) and 0.2.1
     (double_tempo_evidence[_note]) and 0.2.2 (tempo_cnn) and 0.3.0 (energy_summary, sections, sections_method,
-    sections_reliability) and 0.4.0 (melody) are null when the stored file predates them. Energy values and melody
-    notes come only from /timeline."""
+    sections_reliability) and 0.4.0 (melody) and 0.4.3 (lyric_repeats) are null when the stored file predates them.
+    Energy values and melody notes come only from /timeline; structure_debug stays in the stored file."""
     return {"status": "done", "bpm": v["bpm"], "bpm_confidence": v["bpm_confidence"],
             "bpm_confidence_band": confidence_band(v["bpm_confidence"]),
             "bpm_confidence_scale": v.get("bpm_confidence_scale"), "bpm_estimates": v.get("bpm_estimates", []),
@@ -1332,7 +1446,8 @@ def rhythm_summary(v):
             "chords_grid": v.get("chords_grid"), "chords_reliability": v.get("chords_reliability"),
             "energy_summary": v.get("energy_summary"), "sections": v.get("sections"),
             "sections_method": v.get("sections_method"), "sections_reliability": v.get("sections_reliability"),
-            "melody": v.get("melody"), "downbeats": v["downbeats"], "duration": v["duration"], "tool": v["tool"],
+            "melody": v.get("melody"), "lyric_repeats": v.get("lyric_repeats"), "downbeats": v["downbeats"],
+            "duration": v["duration"], "tool": v["tool"],
             "warnings": v["warnings"]}
 
 
@@ -1492,13 +1607,38 @@ class App:
         return {"configured": True, "python_present": os.path.isfile(rh["python"]),
                 "worker_present": os.path.isfile(rh["worker"]), "worker_sha256": self.rhythm_worker_sha256}
 
+    def lyric_words(self, rid):
+        """(--words-stdin bytes, their SHA-256) from the ml result file <root>/results/<rid>.json (read-only)."""
+        invalid = {"words": None, "reason": "result_invalid"}
+        try:
+            fd = os.open(self.cfg["root"] + "/results/" + rid + ".json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            fd, payload = None, lyric_words_payload(None, rid)
+        except OSError as e:  # a symlink (O_NOFOLLOW) is refused for good; other errors may pass on a later run
+            fd, payload = None, invalid if e.errno == errno.ELOOP else {"words": None, "reason": "result_unreadable"}
+        if fd is not None:
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):  # e.g. a directory or FIFO
+                    os.close(fd)
+                    payload = invalid
+                else:
+                    with os.fdopen(fd, "rb") as f:
+                        payload = lyric_words_payload(f.read(ML_RESULT_MAX + 1), rid)
+            except OSError:
+                payload = {"words": None, "reason": "result_unreadable"}
+        b = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+        return b, hashlib.sha256(b).hexdigest()
+
     def run_rhythm(self, job, result_id, wav):
         """Rhythm layer after a successful analyze. Never raises; failure never fails the analyze."""
         if not result_id:
             return {"status": "failed", "code": "no_result_id"}
         state, stored = self.load_rhythm(result_id)
         cur = self.rhythm_worker_sha256
-        if state == "ok" and cur is not None and stored.get("worker_sha256") == cur and not _rhythm_retry(stored):
+        words, words_sha = self.lyric_words(result_id)
+        # reuse needs the same worker file and the same ASR words (a re-run ASR can change them for this result_id)
+        if (state == "ok" and cur is not None and stored.get("worker_sha256") == cur
+                and stored.get("words_sha256") == words_sha and not _rhythm_retry(stored)):
             return dict(rhythm_summary(stored), cache_hit=True, stored=True)
         # absent (worker 0.1.0/0.2.0 files), different or unverifiable worker identity: recompute; the stored file
         # is replaced only after a successful run, so /report and /timeline keep the old one until then
@@ -1521,7 +1661,7 @@ class App:
                 return {"status": "busy", "code": "busy"}
             except OSError:
                 return {"status": "failed", "code": "lock_unavailable"}
-            res = self._spawn_rhythm(rh, wav, lfd, timeout)
+            res = self._spawn_rhythm(rh, wav, lfd, timeout, words)
         finally:
             os.close(lfd)  # the worker shares this lock while it lives; released when both have closed it
         self.log.event("rhythm_exit", id=job.rid, status=res.get("status"), code=res.get("code"))
@@ -1530,6 +1670,7 @@ class App:
         data = res.pop("_data")
         if cur is not None:
             data["worker_sha256"] = cur
+        data["words_sha256"] = words_sha
         try:
             self.store_rhythm(result_id, data)
             stored = True
@@ -1538,11 +1679,14 @@ class App:
             stored = False
         return dict(rhythm_summary(data), cache_hit=False, stored=stored)
 
-    def _spawn_rhythm(self, rh, wav, lock_fd, timeout):
+    def _spawn_rhythm(self, rh, wav, lock_fd, timeout, words):
         lim = self.limits
-        with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        with tempfile.TemporaryFile() as inp, tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+            inp.write(words)  # the ASR words for lyric_repeats, on stdin (no named file)
+            inp.flush()
+            inp.seek(0)
             try:
-                p = subprocess.Popen([rh["python"], "-I", rh["worker"], wav], stdin=subprocess.DEVNULL, stdout=out,
+                p = subprocess.Popen([rh["python"], "-I", rh["worker"], "--words-stdin", wav], stdin=inp, stdout=out,
                                      stderr=err, env=self.child_env(), cwd="/", close_fds=True, pass_fds=(lock_fd,),
                                      shell=False, start_new_session=True)
             except OSError:
@@ -1568,7 +1712,7 @@ class App:
                 v = None
             if v is None:
                 return {"status": "failed", "code": "invalid_output"}
-            for k in ("status", "cache_hit", "stored", "code", "worker_sha256"):  # server-owned fields
+            for k in ("status", "cache_hit", "stored", "code", "worker_sha256", "words_sha256"):  # server-owned
                 v.pop(k, None)
             return {"status": "done", "_data": v}
 
