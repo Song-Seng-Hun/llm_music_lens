@@ -18,6 +18,8 @@ MCP `analyze_music_timing`은 이제 서버에서 음원을 직접 분석해 박
 
 프로젝트 저장소: [Song-Seng-Hun/llm_music_lens](https://github.com/Song-Seng-Hun/llm_music_lens). 소스·테스트·설치 스크립트·라이선스와 서버 실행에 필요한 MIT Beat This 모델(약 9.4MB)을 보관합니다. 다른 연구 모델, 음원, 정답 주석, 실행 로그와 실험 원자료는 커밋하지 않습니다. `evidence/` 및 연구용 `examples/` 링크는 기존 로컬 기록이며 새 clone에는 없습니다. 측정 요약은 [연구 상태와 한계](docs/research-status.md)에 있습니다.
 
+**팀 귀 — Mac LAN API (`lan/`):** Mac의 Music Lens local(0.2.2, Whisper large-v3-turbo)과 리듬 분석 worker(0.4.4: 박·BPM·키·코드·에너지·구간·멜로디 요약, 가사 반복 기반 곡 구조 overview)를 같은 공유기 안의 팀 AI가 서명된 요청으로 쓰는 서버입니다. Python 3.9 표준 라이브러리만 쓰며 이 웹앱과는 별개로 Mac에서 실행됩니다. 설치·API·한계는 [lan/README.md](lan/README.md), Windows 팀용 스킬은 [lan/docs/skill/music-lens-remote/SKILL.md](lan/docs/skill/music-lens-remote/SKILL.md)에 있습니다. 실제 J-pop 8곡으로 확인했으며 영어·한국어 곡은 미검증입니다.
+
 ## 바로 실행
 
 이 폴더의 `Start-MusicLens.cmd`를 실행하고 `http://127.0.0.1:5173/`를 엽니다. 종료는 실행 터미널에서 Ctrl+C. 자동 시작·상시 서비스·방화벽 변경은 없습니다.

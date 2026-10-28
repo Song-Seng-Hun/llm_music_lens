@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- TEMPLATE ONLY. Not installed. The user copies it to ~/Library/LaunchAgents/ after approving an always-on listener. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.music-lens.lan-api</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>-I</string>
+    <string>/Users/songseunghun/tools/music-lens/api/server.py</string>
+    <string>--config</string>
+    <string>/Users/songseunghun/.music-lens/api.json</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+  <!-- SIGTERM requests a 630 s drain; this installed job reports exit timeout 60 despite configured 660.
+       The drain may be interrupted; kill timing and descendant termination are untested. See README Stopping. -->
+  <key>ExitTimeOut</key>
+  <integer>660</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>WorkingDirectory</key>
+  <string>/</string>
+  <key>StandardOutPath</key>
+  <string>/Users/songseunghun/AI-Listen/logs/launchd.out</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/songseunghun/AI-Listen/logs/launchd.err</string>
+</dict>
+</plist>
