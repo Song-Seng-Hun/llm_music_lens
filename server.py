@@ -1186,7 +1186,14 @@ def _sum_ok(*xs):
 
 
 def _melody_done_ok(m, v, dur, notes):
-    if set(m) != MELODY_KEYS or m["reliability"] != "low_reference" or not _short_str(m["method"], 200):
+    keys = set(m)
+    if "note_count_raw" in m:  # worker 0.4.2: count before the vibrato/same-pitch merge, >= note_count
+        r = m["note_count_raw"]
+        if not (_count(r, MELODY_MAX_NOTES * 4) and _count(m.get("note_count"), MELODY_MAX_NOTES * 4)
+                and r >= m["note_count"]):
+            return False
+        keys.discard("note_count_raw")
+    if keys != MELODY_KEYS or m["reliability"] != "low_reference" or not _short_str(m["method"], 200):
         return False
     n = m["note_count"]
     if not (_num(m["voiced_fraction"], 0, 1) and _num(m["voiced_s"], 0, dur) and _count(n, MELODY_MAX_NOTES * 4)

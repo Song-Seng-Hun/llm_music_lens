@@ -408,9 +408,46 @@ balance, which scale degrees it sits on, where it climbs). Not a transcription a
   1024, 20 of 24 notes of a 10 s C3-C4 line, while the same audio resampled to 44.1 kHz with the defaults found
   only 12 of 24; frame 512 split notes of the A4-A5 line (63 for 60). Then `PitchContourSegmentation` (same rate and hop, defaults: minimum note 0.1 s,
   60 cents pitch distance, rms threshold -2) gives notes; `midi` is rounded to the nearest semitone (A4 = 69 =
-  440 Hz, no tuning estimate), `note` is the sharp name (`C#4`, middle C = `C4`).
+  440 Hz, no tuning estimate), `note` is the sharp name (`C#4`, middle C = `C4`). Worker 0.4.2 adds the contour
+  median and the note merge below; every statistic and the stored notes use the merged notes.
+- Note smoothing and merge (worker 0.4.2). Evidence: on 8 real songs (Windows full mixes) 0.4.1 notes averaged
+  0.155-0.248 s, 75-90% touched the next note (gap <= 30 ms) and 23-34% of touching pairs moved +-1 semitone; held
+  sung notes came out as 70/72/70/72 every ~0.1 s (~5 Hz vibrato around 71) or as several same-pitch pieces 20 ms
+  apart. Synthetic held notes with 5.5 Hz vibrato gave 12 pieces (+-50 cents) and 53 pieces (+-100 cents, mean
+  0.096 s) for 4 notes. Steps, all deterministic:
+  1. Before segmentation, the voiced pitch contour is median-filtered in cents over 25 frames (0.2 s), inside
+     each voiced run only (edges padded with the nearest value). 0.2 s is one period of 5 Hz vibrato: the median of
+     a symmetric oscillation over a period is its centre, while a step whose plateau is longer than half the window
+     (0.1 s) keeps its edges. Chosen over merging alone because it removed vibrato that merging could not (+-100
+     cents at 6 Hz rounds to an uneven 67/68 alternation with long pieces), and it left a 0.12 s stepwise run, a
+     mordent and a turn note-for-note unchanged.
+  2. Same-pitch join: consecutive notes with the same `midi` and gap <= 30 ms become one.
+  3. Oscillation join: a run of consecutive notes, every gap <= 30 ms, pitch span <= 2 semitones, with at least
+     2 sign changes between consecutive nonzero pitch moves (the A-B-A-B pattern, 3 alternating moves; the brief's
+     "3 reversals" is read as this pattern, since a +-100 cent held note gave 72-71-70-71-72-71, which has 2 sign
+     changes), where every piece is shorter than 0.2 s except that, in a 2-semitone run, pieces at the middle pitch
+     may last up to 0.5 s (the rounded pitch sits on the centre for most of a +-100 cent cycle). It becomes one note.
+     From each start the longest qualifying run wins, left to right. Its pitch is the duration-weighted **mean**,
+     rounded half up: the median of an even 70/72 alternation is one of the extremes, the mean is the centre 71.
+  4. Same-pitch join again, so a merged vibrato absorbs touching longer notes of its own pitch.
+  Kept intact: monotonic runs, oscillations wider than 2 semitones, one-turn figures (mordent 72-74-72, turn
+  74-72-71-72), alternations with long pieces (77-78-76(1.1 s)-78-76(1.1 s)), and pieces more than 30 ms apart. A
+  trill or neighbour-note figure within 2 semitones with pieces under 0.2 s (72-74-72-74) is merged: at note level
+  it cannot be told from wide vibrato. `melody.note_count_raw` = segmentation output after step 1, before steps
+  2-4 (the server checks it is an integer >= `note_count`; 0.4.0/0.4.1 files have no such field and stay valid).
+  Synthetic results (0.4.1 -> 0.4.2 notes, mean note length): `vibrato50` 12 -> 4 (0.476 -> 1.46 s, all four held
+  notes at the right MIDI); `vibrato100` 53 -> 6 (0.096 -> 0.971 s: the 4 held notes plus two ~0.1 s glide pieces
+  where Melodia bridges the 40 ms rest between notes and the median window straddles both pitches); `ornaments`
+  (0.12 s run, mordent, turn) 22 -> 22, identical; `repeats` (72 x4, 0.15 s rests) 4 separate notes, unchanged;
+  `melody` 60 -> 60, identical; `melody_ab` 125 -> 118 (raw 119; 120 written; mean 0.447 -> 0.475 s, A sections
+  33/32 -> 29 notes for 30 written). Runtime at 600 s unchanged within noise (melody track 9.23-9.24 s vs 9.21-9.23
+  s, loop 8.99-9.00 s vs 8.99 s; 1.13-1.14 GB both). Calibrated on synthetic audio plus the 8-song observation
+  only; how often real melodic trills or quick neighbour-note figures are merged by mistake is unmeasured. Rests
+  shorter than about 0.1 s are bridged by Melodia's contour (a 72 x4 with 50-80 ms rests already came out as
+  1-4 pieces of 72 in 0.4.1), so such re-articulations now become one note.
 - `melody` (summary) on success: `status: "done"`, `method`, `reliability: "low_reference"`, `voiced_fraction`
-  (voiced pitch frames / all frames), `voiced_s`, `note_count`, `notes_per_second` (notes / the summed duration of those
+  (voiced pitch frames / all frames), `voiced_s`, `note_count`, `note_count_raw` (0.4.2, before the merge),
+  `notes_per_second` (notes / the summed duration of those
   notes, i.e. per second of note time, so rests and instrumental gaps do not dilute it; null without notes; same
   definition per section, see below), `range` {`low`, `high`, `p5`, `p95`} each
   `{midi, note}` (low/high plain min/max; p5/p95 duration-weighted), `median_midi` (duration-weighted), `intervals`
@@ -452,13 +489,14 @@ balance, which scale degrees it sits on, where it climbs). Not a transcription a
   0.814 / leap 0.186 / repeat 0 (3 leaps per 16-note cycle), up 0.61, key C major and no scale-degree weight
   outside C major, direction flat. `melody_ab` 60 s (abab form; A melody C4-G4, B melody E5-B5): sections A B A B
   as in 0.3.0, A low 60 / high 67 / median 64 / peak G4, B 76 / 83 / 80 / B5, 2.11-2.40 notes per second of note time,
-  all flat, 125 notes for 120 written (short glide notes at block edges). Silence (5 s) and a 1.5 s click: 0 notes,
+  all flat, 125 notes for 120 written with 0.4.0/0.4.1 (short glide notes at block edges; 118 with 0.4.2). Silence (5 s) and a 1.5 s click: 0 notes,
   `no_melody`. Repeated notes of the same pitch can merge or split (a 3x repeat came out as 2 or 3 notes).
 - Runtime (600 s, same session, 2 runs each): melody track 9.34-9.36 s and 1.13-1.14 GB peak RSS vs worker 0.3.1
   7.51-7.53 s and 1.10-1.11 GB; C-Am-F-G loop 9.10 s and 1.14 GB vs 7.68 s and 1.09-1.10 GB. So the melody layer
   adds about +1.6-1.8 s and +40 MB, far inside the 300 s worker budget.
 - Honest limits: not a transcription; octave errors (a harmonic or subharmonic taken as the pitch) and
-  accompaniment tracking are expected on real mixes; vibrato and slides become several short notes or one long one;
+  accompaniment tracking are expected on real mixes; slides and vibrato faster or wider than the synthetic checks
+  can still become several short notes (0.4.2 smooths and merges the common cases), and real trills may merge;
   no word-to-note alignment; scale degrees inherit the global key estimate. **Untested on real songs.**
 
 Worker 0.4.1 runtime (600 s, 2 runs each, same session): melody track 9.24 s and 1.13-1.14 GB peak RSS vs 0.4.0

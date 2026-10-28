@@ -86,7 +86,26 @@ Choices:
   defaults: min 0.1 s, 60 cents, rms -2) turns the contour into notes; midi is rounded to the nearest semitone (A4 = 69 = 440 Hz).
   Stored notes are capped at MELODY_MAX_NOTES (6000 = 600 s / 0.1 s minimum note length, so never reached by valid
   output; kept as a guard with a warning). notes_per_second = notes / their summed duration, for the song and per
-  section (onset attribution, full note length). Not a transcription: octave errors, split or merged repeated notes.
+  section (onset attribution, full note length).
+  0.4.2 note merge (8 real songs with 0.4.1: mean note 0.155-0.248 s, 75-90% of notes touching the next, vibrato
+  read as 70/72/70/72 every ~0.1 s; synthetic +-100 cent vibrato gave 51 pieces for 4 held notes). Before
+  segmentation the voiced pitch contour is median-filtered in cents over MEL_SMOOTH frames (25 x 8 ms = 0.2 s, one
+  period of 5 Hz vibrato: the median of a symmetric oscillation over a period is its centre, while a step whose
+  plateau is longer than half the window, 0.1 s, keeps its edges), inside each voiced run only (edges padded with
+  the nearest value; unvoiced frames untouched). Synthetic: +-100 cents at 5 Hz 54 pieces -> 4 (exact), at 6 Hz
+  53 -> 7; a 0.12 s stepwise run, a mordent and a turn unchanged. After segmentation: (1) same-pitch join: consecutive notes with the same midi and gap <= MERGE_GAP (30 ms) become one;
+  (2) oscillation join: a run of consecutive notes, every gap <= 30 ms, pitch span <= MERGE_SPAN (2 semitones), with
+  >= MERGE_REVERSALS (2) sign changes between consecutive nonzero pitch moves (A-B-A-B = 3 alternating moves; the
+  spec's "3 reversals" is read as that pattern, since a +-100 cent held note gave 72-71-70-71-72-71, 2 sign changes),
+  where every piece is shorter than MERGE_SHORT (0.2 s) except, in a 2-semitone run, pieces at the middle pitch
+  (shorter than MERGE_CENTRE 0.5 s: the rounded pitch sits on the centre for most of a +-100 cent cycle, and step 1
+  already joined its pieces), becomes one note; from each start the longest qualifying run wins (greedy, left to
+  right); its pitch = duration-weighted MEAN rounded half up (the median of a 70/72 alternation is an extreme, the
+  mean is its centre 71); (3) same-pitch join again, so a merged vibrato absorbs touching longer notes of its own
+  pitch. Monotonic runs, runs spanning more than 2 semitones, figures with one turn (mordent 72-74-72) and long
+  alternations (pieces >= 0.2 s) stay; a trill or neighbour-note figure within 2 semitones with pieces < 0.2 s
+  (72-74-72-74) is merged: at note level it is indistinguishable from wide vibrato.
+  note_count_raw = segmentation output after smoothing, before the merge. Not a transcription: octave errors, split or merged repeated notes.
 """
 import errno
 import hashlib
@@ -100,7 +119,7 @@ import statistics
 import sys
 import wave
 
-TOOL = {"name": "music-lens-rhythm-worker", "version": "0.4.1"}
+TOOL = {"name": "music-lens-rhythm-worker", "version": "0.4.2"}
 SRC_RATE = 16000
 RATE = 44100
 MAX_SECONDS = 600.0
@@ -159,8 +178,16 @@ MELODY_MAX_NOTES = 6000  # 600 s / PitchContourSegmentation's 0.1 s minimum note
 MEL_PHRASE_GAP = 1.0  # s; consecutive notes further apart than this are a phrase break, not an interval
 MEL_DIR_MIN = 2.0  # semitones of fitted change a section needs to be rising/falling
 MEL_DIR_NOTES = 4  # fewer notes in a section: direction null
+MEL_SMOOTH = 25  # pitch frames (0.2 s at hop 8 ms) of the contour median filter, odd
+MERGE_GAP = 0.030  # s; notes this close count as touching (merge rules)
+MERGE_SHORT = 0.2  # s; only pieces shorter than this join an oscillation (5-6 Hz vibrato halves are ~0.1 s)
+MERGE_CENTRE = 0.5  # s; in a 2-semitone oscillation the middle pitch may last this long (the rounded pitch sits
+# there for most of each +-100 cent cycle, and same-pitch pieces join before the oscillation join)
+MERGE_MAX_RUN = 400  # pieces per oscillation window (bounds the work; ~40 s of 0.1 s pieces)
+MERGE_SPAN = 2  # semitones; widest oscillation joined (+-100 cents vibrato reads as -1..+1)
+MERGE_REVERSALS = 2  # sign changes an oscillation needs: A-B-A-B = 3 alternating moves = 2 sign changes
 MEL_METHOD = ("EqualLoudness+PredominantPitchMelodia 16 kHz frame 1024 hop 128 (predominant pitch of the full mix); "
-              "PitchContourSegmentation notes, midi rounded")
+              "0.2 s median f0 (cents); PitchContourSegmentation notes, midi rounded; vibrato/same-pitch merge")
 NOTE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
 PITCH_CLASS = {"C": 0, "C#": 1, "Db": 1, "D": 2, "D#": 3, "Eb": 3, "E": 4, "F": 5, "F#": 6, "Gb": 6, "G": 7,
                "G#": 8, "Ab": 8, "A": 9, "A#": 10, "Bb": 10, "B": 11}
@@ -669,6 +696,64 @@ def melody_direction(notes, min_notes=MEL_DIR_NOTES, thresh=MEL_DIR_MIN):
     return "rising" if change >= thresh else "falling" if change <= -thresh else "flat"
 
 
+def _reversals(midis):
+    """Sign changes between consecutive nonzero pitch moves."""
+    d = [b - a for a, b in zip(midis, midis[1:]) if b != a]
+    return sum(1 for x, y in zip(d, d[1:]) if (x > 0) != (y > 0))
+
+
+def _join(group, midi):
+    return {"start": group[0]["start"], "end": group[-1]["end"], "midi": midi, "note": note_name(midi)}
+
+
+def same_pitch_join(notes, gap=MERGE_GAP):
+    """Consecutive notes with the same midi and gap <= `gap` become one note."""
+    out = []
+    for x in notes:
+        if out and out[-1]["midi"] == x["midi"] and x["start"] - out[-1]["end"] <= gap + 1e-9:
+            out[-1]["end"] = max(out[-1]["end"], x["end"])
+        else:
+            out.append(dict(x))
+    return out
+
+
+def _oscillation_ok(g, short, centre_max, reversals):
+    lo, hi = min(x["midi"] for x in g), max(x["midi"] for x in g)
+    for x in g:
+        d = x["end"] - x["start"]
+        if d >= (centre_max if hi - lo == 2 and x["midi"] == lo + 1 else short):
+            return False
+    return _reversals([x["midi"] for x in g]) >= reversals
+
+
+def merge_notes(notes, gap=MERGE_GAP, short=MERGE_SHORT, centre_max=MERGE_CENTRE, span=MERGE_SPAN,
+                reversals=MERGE_REVERSALS, max_run=MERGE_MAX_RUN):
+    """Same-pitch join, oscillation join, same-pitch join again (see docstring). notes: sorted rows; returns new
+    rows. From each start the longest qualifying window wins (greedy, left to right)."""
+    notes = same_pitch_join(notes, gap)
+    out, i, n = [], 0, len(notes)
+    while i < n:
+        best, lo, hi, j = i, notes[i]["midi"], notes[i]["midi"], i
+        while j + 1 < n and j + 1 - i < max_run:
+            x = notes[j + 1]
+            lo2, hi2 = min(lo, x["midi"]), max(hi, x["midi"])
+            if x["start"] - notes[j]["end"] > gap + 1e-9 or hi2 - lo2 > span:
+                break
+            lo, hi, j = lo2, hi2, j + 1
+            if _oscillation_ok(notes[i:j + 1], short, centre_max, reversals):
+                best = j
+        if best > i:
+            g = notes[i:best + 1]
+            w = sum(y["end"] - y["start"] for y in g)
+            mean = sum(y["midi"] * (y["end"] - y["start"]) for y in g) / w
+            out.append(_join(g, int(math.floor(mean + 0.5))))
+            i = best + 1
+        else:
+            out.append(notes[i])
+            i += 1
+    return same_pitch_join(out, gap)
+
+
 def notes_per_second(notes):
     """len(notes) / summed note duration (s), 3 decimals; None without notes."""
     t = sum(n["end"] - n["start"] for n in notes)
@@ -718,6 +803,23 @@ def melody_summary(notes, voiced, hop_s, n_frames, tonic, scale, sections):
             "sections": secs}
 
 
+def smooth_pitch(pitch, w=MEL_SMOOTH):
+    """Median of the pitch in cents over w frames centred on each voiced frame, inside each voiced run (runs of
+    frames > 0); runs are edge-padded with their nearest value. Unvoiced frames (<= 0) stay as they are."""
+    import numpy as np
+    from numpy.lib.stride_tricks import sliding_window_view
+    p = np.asarray(pitch, dtype=np.float64)
+    out = p.copy()
+    v = p > 0
+    edges = np.flatnonzero(np.diff(np.concatenate(([0], v.astype(np.int8), [0]))))
+    h = w // 2
+    for a, b in zip(edges[::2], edges[1::2]):
+        c = 1200.0 * np.log2(p[a:b] / 440.0)
+        c = np.median(sliding_window_view(np.pad(c, h, mode="edge"), w), axis=1)
+        out[a:b] = 440.0 * 2.0 ** (c / 1200.0)
+    return out
+
+
 def melody(x16, duration, tonic, scale, sections):
     """(melody dict, notes, warnings) for the 16 kHz source; never raises (failure -> status failed, no notes)."""
     try:
@@ -734,7 +836,7 @@ def melody(x16, duration, tonic, scale, sections):
         notes = []
         if voiced:
             on, du, mi = es.PitchContourSegmentation(sampleRate=SRC_RATE, hopSize=MEL_HOP)(
-                np.ascontiguousarray(pitch, dtype=np.float32), a)
+                np.ascontiguousarray(smooth_pitch(pitch), dtype=np.float32), a)
             for o, d, m in zip(on, du, mi):
                 o, d, m = float(o), float(d), float(m)
                 if not (math.isfinite(o) and math.isfinite(d) and math.isfinite(m)):
@@ -743,10 +845,13 @@ def melody(x16, duration, tonic, scale, sections):
                 if e > s and 0 <= mm <= 127:
                     notes.append({"start": s, "end": e, "midi": mm, "note": note_name(mm)})
         notes.sort(key=lambda n: (n["start"], n["end"]))
+        raw = len(notes)
+        notes = merge_notes(notes)
         warns = []
         if not notes:
             warns.append("no_melody: no pitched note was found")
         summary = melody_summary(notes, voiced, hop_s, len(pitch), tonic, scale, sections)
+        summary["note_count_raw"] = raw
         if summary["scale_degrees"] is None and notes:
             warns.append("melody_scale_degrees_unavailable: key tonic not recognized")
         if len(notes) > MELODY_MAX_NOTES:

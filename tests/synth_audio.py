@@ -12,6 +12,11 @@ KIND: click (120 BPM click track), chords (C - Am - F - G, 2 s each, with a soft
       melody_ab (abab plus a melody: A blocks carry MELODY_LOW (C4..G4, C major), B blocks MELODY_HIGH (E5..B5,
       E major), 0.5 s per note; best with SECONDS = 60),
       silence (digital silence),
+      vibrato50 / vibrato100 (0.5 s rest, then held notes VIBRATO_NOTES of 1.5 s with 40 ms rests, sung-like 5.5 Hz
+      vibrato of +-50 / +-100 cents; over soft chords; best with SECONDS = 7),
+      ornaments (0.5 s rest, a fast stepwise run of 0.12 s notes up C4..C5 and down again, a rest, a mordent
+      72-74-72 (0.12, 0.12, 0.6 s), a rest, a turn 74-72-71-72 (0.12 s each) + 72 held 0.5 s; touching notes, no vibrato),
+      repeats (0.5 s rest, then 72 four times: 0.4 s each with 0.15 s rests; Melodia bridges rests up to ~80 ms),
       silent_edges (10 s of digital silence, then melody_ab, then 20 s of digital silence; SECONDS is the total, best
       90 = 10 + 60 + 20)
 """
@@ -110,6 +115,29 @@ def melody_line(n, notes, note_seconds=0.5, gain=0.15, offset=0):
     return out
 
 
+VIBRATO_NOTES = (74, 72, 69, 71)  # with 67 first, Melodia left the +-50 cent note unvoiced (before any merge)
+RUN = (60, 62, 64, 65, 67, 69, 71, 72, 71, 69, 67, 65, 64, 62, 60)
+
+
+def glide_line(n, events, depth=0.0, rate=5.5, gain=0.15, start=0.5):
+    """events: [(midi or None, seconds)] played back to back from `start` s; a harmonic tone (6 partials) per note
+    with optional sinusoidal vibrato (`depth` cents at `rate` Hz), 10 ms fades; None = rest."""
+    out = np.zeros(n, dtype=np.float64)
+    s = int(start * RATE)
+    for midi, dur in events:
+        m = int(round(dur * RATE))
+        if midi is not None and s < n:
+            t = np.arange(m) / RATE
+            f = 440.0 * 2 ** ((midi - 69) / 12.0 + depth * np.sin(2 * np.pi * rate * t) / 1200.0)
+            ph = 2 * np.pi * np.cumsum(f) / RATE
+            env = np.clip(np.minimum(t / 0.01, (dur - t) / 0.01), 0.0, 1.0)
+            y = sum(0.6 ** k * np.sin((k + 1) * ph) for k in range(6)) * env * gain
+            k = min(m, n - s)
+            out[s:s + k] += y[:k]
+        s += m
+    return out
+
+
 def main(kind, seconds, path):
     n = int(float(seconds) * RATE)
     if kind == "silent_edges":
@@ -153,6 +181,17 @@ def main(kind, seconds, path):
             else:
                 parts.append(chords(m, progression=E_MAJOR, partials=BRIGHT, gain=0.045) + melody_line(m, MELODY_HIGH))
         y = np.concatenate(parts) + clicks(n, gain=0.1)
+    elif kind in ("vibrato50", "vibrato100"):
+        ev = []
+        for midi in VIBRATO_NOTES:
+            ev += [(midi, 1.46), (None, 0.04)]
+        y = chords(n, gain=0.02) + glide_line(n, ev, depth=50.0 if kind == "vibrato50" else 100.0)
+    elif kind == "ornaments":
+        ev = [(m, 0.12) for m in RUN] + [(None, 0.5), (72, 0.12), (74, 0.12), (72, 0.6), (None, 0.5),
+                                         (74, 0.12), (72, 0.12), (71, 0.12), (72, 0.62)]
+        y = chords(n, gain=0.02) + glide_line(n, ev)
+    elif kind == "repeats":
+        y = chords(n, gain=0.02) + glide_line(n, [(72, 0.4), (None, 0.15)] * 4)
     elif kind == "silence":
         y = np.zeros(n)
     else:

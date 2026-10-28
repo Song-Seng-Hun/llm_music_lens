@@ -560,6 +560,19 @@ class RhythmAnalyzeTest(RhythmBase):
             self.fw.write(stdout=out)
             self.assert_rhythm_failed("failed", "invalid_output")
 
+    def test_v42_note_count_raw(self):
+        for raw in (7, 50):
+            v = json.loads(json.dumps(dict(RHYTHM_OUT_V40, melody=dict(MELODY, note_count_raw=raw))))
+            self.assertIs(server.check_rhythm(v), v, raw)
+        empty = rw.melody_summary([], [], 0.008, 750, "C", "major", SECTIONS)
+        v = json.loads(json.dumps(dict(RHYTHM_OUT_V40, melody=dict(empty, note_count_raw=0), melody_notes=[])))
+        self.assertIs(server.check_rhythm(v), v)
+        for raw in (6, -1, 7.0, True, None, "7", 10 ** 6):
+            v = json.loads(json.dumps(dict(RHYTHM_OUT_V40, melody=dict(MELODY, note_count_raw=raw))))
+            self.assertIsNone(server.check_rhythm(v), raw)
+        v = json.loads(json.dumps(dict(RHYTHM_OUT_V40, melody=dict(MELODY_FAILED, note_count_raw=0), melody_notes=[])))
+        self.assertIsNone(server.check_rhythm(v))  # done only
+
     def test_v40_boundary_note_density(self):
         # review F1: a note is attributed to the section holding its onset; its density counts the note's own full
         # length, so a note straddling a section edge (or a section whose only notes start near its end) stays valid
@@ -1336,6 +1349,61 @@ class StructureLogicTest(unittest.TestCase):
         self.assertEqual(rw._segment_similarity([0.0] * 12, a, z, z), 0.5)  # silent chroma: cosine 0
 
 
+def _seq(pairs, t0=0.0, gap=0.008):
+    """[(midi, seconds)] -> touching note rows (gap s between pieces)."""
+    out, t = [], t0
+    for m, d in pairs:
+        out.append(_n(round(t, 3), round(t + d, 3), m))
+        t += d + gap
+    return out
+
+
+class MergeLogicTest(unittest.TestCase):
+    """Worker 0.4.2 note merge (pure; the 0.2 s contour median needs numpy and is covered by RealWorkerTest)."""
+
+    def midis(self, notes):
+        return [x["midi"] for x in rw.merge_notes(notes)]
+
+    def test_oscillation_joins(self):
+        # real-song shapes from 0.4.1 (8 songs): 70/72 every ~0.1 s around 71; 64/66 pieces around 65
+        self.assertEqual(self.midis(_seq([(70, 0.1), (72, 0.1)] * 6)), [71])  # mean 71, not an extreme
+        self.assertEqual(self.midis(_seq([(m, 0.12) for m in (65, 64, 66, 64, 66, 64, 66, 64)])), [65])
+        m = rw.merge_notes(_seq([(70, 0.1), (71, 0.1)] * 3))
+        self.assertEqual((len(m), m[0]["midi"], m[0]["note"]), (1, 71, "B4"))  # mean 70.5 rounds half up
+        self.assertEqual((m[0]["start"], m[0]["end"]), (0.0, 0.64))
+        # 2-semitone run: middle-pitch pieces may be long (< 0.5 s), the excursions must be short
+        self.assertEqual(self.midis(_seq([(72, 0.1), (71, 0.33), (70, 0.09), (71, 0.34), (72, 0.09), (71, 0.4)])),
+                         [71])
+        self.assertEqual(self.midis(_seq([(72, 0.1), (71, 0.6), (70, 0.09), (71, 0.34), (72, 0.09)])),
+                         [72, 71, 70, 71, 72])  # centre piece 0.6 s: not vibrato
+        # A-B-A-B = 2 sign changes is enough; one turn (A-B-A) is not
+        self.assertEqual(self.midis(_seq([(72, 0.1), (74, 0.1), (72, 0.1), (74, 0.1)])), [73])  # trill: merged
+        self.assertEqual(self.midis(_seq([(72, 0.1), (74, 0.1), (72, 0.6)])), [72, 74, 72])  # mordent
+        # a merged vibrato absorbs touching notes of its own pitch (same-pitch join afterwards)
+        self.assertEqual(self.midis(_seq([(71, 0.6)] + [(70, 0.1), (72, 0.1)] * 3 + [(71, 0.8)])), [71])
+
+    def test_kept_intact(self):
+        for pairs in ([(m, 0.12) for m in (60, 62, 64, 65, 67, 69, 71, 72, 71, 69, 67, 65, 64, 62, 60)],  # fast run
+                      [(74, 0.12), (72, 0.12), (71, 0.12), (72, 0.6)],  # turn: one sign change
+                      [(77, 0.15), (78, 0.15), (76, 1.1), (78, 0.15), (76, 1.1), (78, 0.15)],  # long alternation
+                      [(72, 0.1), (75, 0.1), (72, 0.1), (75, 0.1)],  # oscillation wider than 2 semitones
+                      [(60, 0.1), (61, 0.1), (62, 0.1), (61, 0.1)]):  # rises then turns once
+            notes = _seq(pairs)
+            self.assertEqual(rw.merge_notes(notes), notes, pairs)
+        # pieces further apart than 30 ms are not touching
+        self.assertEqual(self.midis(_seq([(70, 0.1), (72, 0.1)] * 4, gap=0.04)), [70, 72] * 4)
+
+    def test_same_pitch_join(self):
+        m = rw.merge_notes([_n(0.0, 0.5, 72), _n(0.52, 0.9, 72), _n(0.93, 1.2, 72), _n(1.3, 1.6, 72)])
+        self.assertEqual([(x["start"], x["end"]) for x in m], [(0.0, 1.2), (1.3, 1.6)])  # 20, 30 ms join; 100 ms not
+        self.assertEqual(rw.merge_notes([_n(0.0, 0.5, 72), _n(0.531, 0.9, 72)])[1]["start"], 0.531)  # 31 ms
+        self.assertEqual(rw.merge_notes([]), [])
+        self.assertEqual(rw.merge_notes(MELODY_NOTES), MELODY_NOTES[:4] + [_n(2.0, 3.0, 72), MELODY_NOTES[6]])
+        src = [_n(0.0, 0.5, 72), _n(0.51, 0.9, 72)]
+        rw.merge_notes(src)
+        self.assertEqual(src[0]["end"], 0.5)  # input rows untouched
+
+
 class MelodyLogicTest(unittest.TestCase):
     """Pure helpers of worker 0.4.0 (note names, intervals, direction, summary); no numpy needed."""
 
@@ -1385,6 +1453,7 @@ class MelodyLogicTest(unittest.TestCase):
 
 
 MODEL_PRESENT = os.path.isfile(rw.TEMPO_CNN_MODEL)
+SYNTH_RUN = (60, 62, 64, 65, 67, 69, 71, 72, 71, 69, 67, 65, 64, 62, 60)  # synth_audio.RUN
 SYNTH_MELODY = (72, 74, 76, 79, 76, 74, 72, 71, 69, 71, 72, 74, 76, 77, 79, 81)  # synth_audio.MELODY (numpy-free copy)
 
 
@@ -1421,8 +1490,9 @@ class RealWorkerTest(unittest.TestCase):
             self.assertEqual((v["sample_rate"], v["chords_reliability"]), (44100, "low_reference"))
             self.assertIn(v["duration"], (30.0, 60.0))
             self.assertEqual(v["tool"]["essentia_version"], "2.1-beta6-dev")
-            self.assertEqual(v["tool"]["version"], "0.4.1")
+            self.assertEqual(v["tool"]["version"], "0.4.2")
             self.assertEqual(v["melody"]["status"], "done")
+            self.assertGreaterEqual(v["melody"]["note_count_raw"], v["melody"]["note_count"])
             self.assertEqual(len(v["melody_notes"]), v["melody"]["note_count"])
             e = v["energy"]
             self.assertEqual((e["unit"], e["step_s"], len(e["values"])), ("dBFS", 1.0, int(v["duration"])))
@@ -1594,7 +1664,8 @@ class RealWorkerTest(unittest.TestCase):
 
     def test_melody_sections_b_higher(self):
         # measured (worker 0.4.0): A 60-67 (median 64, peak G4), B 76-83 (median 80, peak B5), all flat; 2.11-2.40
-        # notes per second of note time; 125 notes for 120 written (a few short glide notes at block edges)
+        # notes per second of note time; 125 notes for 120 written with 0.4.1, 118 with 0.4.2 (raw 119; the contour
+        # median removed most short glide notes at block edges)
         v = self.out["melody_ab"]
         ms = v["melody"]["sections"]
         self.assertEqual([(s["label"], s["start"], s["end"]) for s in ms],
@@ -1611,6 +1682,36 @@ class RealWorkerTest(unittest.TestCase):
         b = min(s["median_midi"] for s in ms if s["label"] == "B")
         self.assertGreaterEqual(b - a, 12)
         self.assertEqual(sum(s["note_count"] for s in ms), v["melody"]["note_count"])
+
+    def test_vibrato_merges(self):
+        # measured (worker 0.4.2, 5.5 Hz vibrato, held notes 74 72 69 71 of 1.46 s): +-50 cents 0.4.1 12 notes ->
+        # 4 (raw 4); +-100 cents 0.4.1 53 notes (mean 0.096 s) -> 6 (raw 6): the 4 held notes plus two ~0.1 s
+        # glide pieces (73, 71) where Melodia bridges the 40 ms rest between notes
+        for kind in ("vibrato50", "vibrato100"):
+            wav = os.path.join(self.dir, kind + ".wav")
+            subprocess.run([ESSENTIA_PY, "-I", SYNTH, kind, "7", wav], check=True, timeout=120)
+            v = run_worker(wav)
+            self.assertIsNotNone(server.check_rhythm(v))
+            ns = v["melody_notes"]
+            held = [x for x in ns if x["end"] - x["start"] >= 1.2]
+            self.assertEqual([x["midi"] for x in held], [74, 72, 69, 71], (kind, ns))
+            self.assertTrue(all(x["end"] - x["start"] < 0.15 for x in ns if x not in held), (kind, ns))
+            self.assertLessEqual(len(ns) - len(held), 3, kind)  # at most one glide piece per transition
+            for a, b in zip(held, held[1:]):
+                self.assertLess(b["start"] - a["end"], 0.2)
+
+    def test_runs_ornaments_and_repeats_kept(self):
+        wav = os.path.join(self.dir, "ornaments.wav")
+        subprocess.run([ESSENTIA_PY, "-I", SYNTH, "ornaments", "6", wav], check=True, timeout=120)
+        m = run_worker(wav)
+        written = list(SYNTH_RUN) + [72, 74, 72, 74, 72, 71, 72]
+        self.assertEqual([x["midi"] for x in m["melody_notes"]], written)  # nothing merged, nothing lost
+        self.assertEqual(m["melody"]["note_count_raw"], len(written))
+        wav = os.path.join(self.dir, "repeats.wav")
+        subprocess.run([ESSENTIA_PY, "-I", SYNTH, "repeats", "3", wav], check=True, timeout=120)
+        ns = run_worker(wav)["melody_notes"]
+        self.assertEqual([x["midi"] for x in ns], [72] * 4, ns)  # 0.15 s rests: four notes, not one
+        self.assertTrue(all(b["start"] - a["end"] > 0.03 for a, b in zip(ns, ns[1:])))
 
     def test_melody_silence_and_short(self):
         for kind, secs in (("silence", "5"), ("click", "1.5"), ("chords", "1.2")):
