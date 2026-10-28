@@ -608,7 +608,10 @@ Why lyric repeats are the backbone: on the 8 real songs (stored 0.4.3 `structure
      neighbours) the previous segment (the next one at the song start), shortest first, ties earliest; the receiver
      keeps its kind and group, so a repeat can absorb a gap under 4 s (repeat edges then differ from the block
      edges). While more than 40 segments remain, the shortest non-repeat segment joins by the same rule. Adjacent
-     non-repeat pieces of the same kind then join while the result stays <= 40 s.
+     non-repeat pieces of the same kind then join while the result stays <= 40 s;
+  5. a repeat with more than half of its 1 s windows below `silence_db` (ASR text over a silent tail or fade, not a
+     chorus candidate) becomes `silence` with `group: null`, is counted in `dropped_repeats` instead of
+     `repeat_groups`, and joins an adjacent silence piece (<= 40 s).
 - `source: "audio"` when lyric repeats are unavailable, failed or empty: the stored `sections`, kind `section` (with
   its `label` letter) or `silence` (label `silence`), made contiguous. No repeats and no sections (no beats):
   `{status: "failed", code: "no_structure"}`.
@@ -616,12 +619,14 @@ Why lyric repeats are the backbone: on the 8 real songs (stored 0.4.3 `structure
   their payload hash equals the stored `words_sha256` (the words the repeats came from); otherwise (result file
   gone, changed by an ASR re-run, malformed) `words` is null on every segment. Only counts are returned, never text.
 - Output: `{status: "done", source, method, reliability: "low_reference", segment_count, repeat_groups: [{group,
-  count, seconds}], segments, notes}`; at most 40 segments, contiguous 0..duration (times 3 decimals). Each segment
+  count, seconds}], dropped_repeats, segments, notes}`; at most 40 segments, contiguous 0..duration (times 3 decimals). Each segment
   `{start, end, kind, group (repeat only, else null), label (audio only, else null), energy: {mean_db, rel_db,
-  rank}, chords: {top, changes_per_min}, melody, words}`:
+  rank}, quiet, chords: {top, changes_per_min}, melody, words}`:
   - `energy.mean_db`: mean of the 1 s values whose midpoint lies in the segment, leaving out values below
     `silence_db` unless the segment is silence or holds only such values; `rel_db` = mean_db minus the song median of
     the non-silent values; `rank` 1 = loudest among non-silence segments (ties earliest), null for silence;
+  - `quiet`: true only for a repeat with `rel_db <= -12` (heuristic, not calibrated: far below the -2.4..+1.2 dB
+    of the plausible chorus repeats on the 8 songs, e.g. a repeat over a fade), else false;
   - `chords.top`: up to 3 `{label, share}` by time inside the segment (share of the segment length, ties by first
     appearance); `changes_per_min`: chord label changes strictly inside the segment per minute;
   - `melody` (null on every segment when the melody is missing or failed): `{note_count, low, high, median_midi,
@@ -632,8 +637,9 @@ Why lyric repeats are the backbone: on the 8 real songs (stored 0.4.3 `structure
   failing the server's own strict shape check `{..., code: "invalid_overview"}`; the rest of the summary and the
   report are unchanged.
 - Offline check (8 stored songs, read-only): one result predates 0.4.3 -> null; one has `too_little_text` -> audio
-  source, 7 sections all `A`; the other 7 gave 6-15 segments with 2-5 repeats each (1-2 groups); repeat `rel_db`
-  -2.4..+1.2 dB except two hallucination-like repeats over a fading/silent tail (-23, -107 dB); repeat
+  source, 7 sections all `A`; the other 7 gave 6-14 segments with 2-4 repeats each (1-2 groups); repeat `rel_db`
+  -2.4..+1.2 dB except two hallucination-like repeats over a fading/silent tail of one song: the -107 dB one (mostly
+  silent) is dropped to `silence` (`dropped_repeats: 1`), the -23 dB one stays a repeat with `quiet: true`; repeat
   `rel_semitones` -4..+12.
 - Honest limits: `repeat` = repeated ASR text, a chorus/hook candidate, not a verified chorus; verse and pre-chorus
   are not distinguished (both `vocal`); everything depends on the ASR (missed lines turn into `instrumental`,

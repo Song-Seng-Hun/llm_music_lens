@@ -1471,8 +1471,10 @@ OV_WORDLESS_RUN = 8.0  # s of consecutive 1 s windows touched by no ASR word tha
 OV_VOCAL_FRACTION = 0.25  # share of a piece's 1 s windows touched by a word (or, without words, by a melody note)
 OV_SILENCE_DB = -60.0  # the worker's SILENCE_DB, used when energy_summary carries no silence_db
 OV_TOP_CHORDS = 3
-OV_KEYS = {"status", "source", "method", "reliability", "segment_count", "repeat_groups", "segments", "notes"}
-OV_SEG_KEYS = {"start", "end", "kind", "group", "label", "energy", "chords", "melody", "words"}
+OV_QUIET_DB = -12.0  # heuristic: a repeat this far below the song median is flagged quiet (likely not a chorus)
+OV_KEYS = {"status", "source", "method", "reliability", "segment_count", "repeat_groups", "dropped_repeats",
+           "segments", "notes"}
+OV_SEG_KEYS = {"start", "end", "kind", "group", "label", "energy", "quiet", "chords", "melody", "words"}
 OV_KINDS = {"lyric": ("repeat", "vocal", "instrumental", "silence", "gap"), "audio": ("section", "silence")}
 OV_VOCAL_BY = ("words", "melody", "none")
 OV_METHOD_LYRIC = ("lyric_repeats blocks; gaps: silence if >half 1 s windows < silence_db, else vocal if >=25%% "
@@ -1480,8 +1482,8 @@ OV_METHOD_LYRIC = ("lyric_repeats blocks; gaps: silence if >half 1 s windows < s
 OV_METHOD = {"lyric": {b: OV_METHOD_LYRIC % {"words": "ASR words", "melody": "melody notes",
                                              "none": "none (gap)"}[b] for b in OV_VOCAL_BY},
              "audio": "audio sections (Foote novelty, chroma+MFCC); lyric repeats unavailable or empty"}
-OV_NOTES = ("estimate: repeat = repeated ASR text (chorus/hook candidate), verse/pre-chorus not distinguished, "
-            "depends on ASR; audio sections near chance vs lyric edges on 8 songs")
+OV_NOTES = ("estimate: repeat = repeated ASR text (chorus/hook candidate; quiet = <=-12 dB rel), verse/pre-chorus "
+            "not distinguished, depends on ASR; audio sections near chance vs lyric edges on 8 songs")
 
 
 def _ov_wquantile(pairs, q=0.5):
@@ -1547,6 +1549,7 @@ class _Ov:
         self.touched = self._touched([(max(s, 0.0), max(s, e)) for s, e in self.words] if self.words is not None
                                      else [(s, e) for s, e, _ in self.notes])
         self.chords = sorted((c["start"], c["end"], c["label"]) for c in v["chords"])
+        self.dropped = 0  # repeats turned into silence
 
     def _touched(self, spans):
         n, out = len(self.values), [False] * len(self.values)
@@ -1573,7 +1576,16 @@ class _Ov:
             t = e
         if self.dur > t + 1e-9:
             segs += self.gap(t, self.dur)
-        return self.merge(segs)
+        segs = self.merge(segs)
+        for x in segs:  # a mostly silent repeat (ASR text over a silent tail or fade) is no chorus candidate
+            if x["kind"] == "repeat" and self.mostly_silent(x["start"], x["end"]):
+                x["kind"], x["group"] = "silence", None
+                self.dropped += 1
+        return _ov_coalesce(segs)
+
+    def mostly_silent(self, a, b):
+        idx = self.windows(a, b)
+        return bool(idx) and 2 * sum(self.silent[i] for i in idx) > len(idx)
 
     def gap(self, a, b):
         cuts = {a, b}
@@ -1597,9 +1609,9 @@ class _Ov:
         return _ov_coalesce(out)
 
     def classify(self, a, b):
-        idx = self.windows(a, b)
-        if idx and 2 * sum(self.silent[i] for i in idx) > len(idx):
+        if self.mostly_silent(a, b):
             return "silence"
+        idx = self.windows(a, b)
         if self.vocal_by == "none":
             return "gap"
         frac = sum(self.touched[i] for i in idx) / len(idx) if idx else 0.0
@@ -1705,11 +1717,10 @@ class _Ov:
         for s in segs:
             a, b = s["start"], s["end"]
             mean = self.energy(a, b, s["kind"])
+            rel = None if mean is None or median is None else round(mean - median, 2)
             out.append({"start": round(a, 3), "end": round(b, 3), "kind": s["kind"], "group": s["group"],
-                        "label": s["label"],
-                        "energy": {"mean_db": mean,
-                                   "rel_db": None if mean is None or median is None else round(mean - median, 2),
-                                   "rank": None},
+                        "label": s["label"], "energy": {"mean_db": mean, "rel_db": rel, "rank": None},
+                        "quiet": s["kind"] == "repeat" and rel is not None and rel <= OV_QUIET_DB,
                         "chords": self.chord_info(a, b), "melody": self.melody_info(a, b), "words": self.words_info(a, b)})
         ranked = sorted((k for k, s in enumerate(out) if s["kind"] != "silence" and s["energy"]["mean_db"] is not None),
                         key=lambda k: (-out[k]["energy"]["mean_db"], k))
@@ -1724,7 +1735,7 @@ class _Ov:
                 "segment_count": len(out),
                 "repeat_groups": [{"group": g, "count": groups[g][0], "seconds": round(groups[g][1], 3)}
                                   for g in sorted(groups)],
-                "segments": out, "notes": OV_NOTES}
+                "dropped_repeats": self.dropped, "segments": out, "notes": OV_NOTES}
 
 
 def overview_words(payload, sha, v):
@@ -1791,6 +1802,8 @@ def overview_ok(o, dur):
         if not (isinstance(e, dict) and set(e) == {"mean_db", "rel_db", "rank"} and _opt_num(e["mean_db"], *ENERGY_DB)
                 and _opt_num(e["rel_db"], -120, 120) and (e["mean_db"] is not None or e["rel_db"] is None)):
             return False
+        if s["quiet"] is not (s["kind"] == "repeat" and e["rel_db"] is not None and e["rel_db"] <= OV_QUIET_DB):
+            return False
         if s["kind"] == "silence" or e["mean_db"] is None:
             if e["rank"] is not None:
                 return False
@@ -1824,6 +1837,8 @@ def overview_ok(o, dur):
         if s["kind"] == "repeat":
             c0, t0 = groups.get(s["group"], (0, 0.0))
             groups[s["group"]] = (c0 + 1, t0 + s["end"] - s["start"])
+    if not (_int(o["dropped_repeats"], 0, LYRIC_MAX_BLOCKS) and (o["source"] == "lyric" or o["dropped_repeats"] == 0)):
+        return False
     if abs(t - round(dur, 3)) > 0.001 or sorted(ranks) != list(range(1, len(ranks) + 1)):
         return False
     rg = o["repeat_groups"]

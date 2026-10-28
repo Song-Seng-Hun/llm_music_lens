@@ -94,8 +94,8 @@ def backbone():
 
 def assert_shape(t, o, dur):
     """Independent strict check of a done overview: exact keys, contiguity, caps, ranks, groups."""
-    t.assertEqual(set(o), {"status", "source", "method", "reliability", "segment_count", "repeat_groups", "segments",
-                           "notes"})
+    t.assertEqual(set(o), {"status", "source", "method", "reliability", "segment_count", "repeat_groups",
+                           "dropped_repeats", "segments", "notes"})
     t.assertEqual((o["status"], o["reliability"]), ("done", "low_reference"))
     segs = o["segments"]
     t.assertTrue(1 <= len(segs) <= 40)
@@ -105,7 +105,10 @@ def assert_shape(t, o, dur):
     for a, b in zip(segs, segs[1:]):
         t.assertEqual(a["end"], b["start"])
     for s in segs:
-        t.assertEqual(set(s), {"start", "end", "kind", "group", "label", "energy", "chords", "melody", "words"})
+        t.assertEqual(set(s), {"start", "end", "kind", "group", "label", "energy", "quiet", "chords", "melody",
+                               "words"})
+        t.assertIs(s["quiet"], s["kind"] == "repeat" and s["energy"]["rel_db"] is not None
+                   and s["energy"]["rel_db"] <= -12)
         t.assertLess(s["start"], s["end"])
         t.assertEqual(set(s["energy"]), {"mean_db", "rel_db", "rank"})
         t.assertEqual(set(s["chords"]), {"top", "changes_per_min"})
@@ -168,6 +171,27 @@ class OverviewLogicTest(unittest.TestCase):
         self.assertEqual(server.rhythm_overview(v, words), o)  # deterministic
         self.assertEqual(json.dumps(server.rhythm_overview(copy.deepcopy(v), copy.deepcopy(words))), json.dumps(o))
 
+    def test_silent_and_quiet_repeats(self):
+        # hallucinated repeat over a silent tail (90-100) next to a silent gap (85-90): silence, group null, counted
+        # in dropped_repeats, joined with the neighbouring silence; a repeat 14 dB under the median is quiet
+        vals = [VERSE] * 20 + [LOUD] * 10 + [VERSE] * 20 + [VERSE - 14] * 10 + [VERSE] * 25 + [SIL] * 15
+        v = stored(100.0, vals, [(20.0, 30.0, 0), (50.0, 60.0, 0), (90.0, 100.0, 0)])
+        o = server.rhythm_overview(v, _words(0, 85) + _words(90, 100))
+        assert_shape(self, o, 100.0)
+        self.assertEqual([(k, g, a, b) for k, g, a, b in seq(o)],
+                         [("vocal", None, 0.0, 20.0), ("repeat", 0, 20.0, 30.0), ("vocal", None, 30.0, 50.0),
+                          ("repeat", 0, 50.0, 60.0), ("vocal", None, 60.0, 85.0), ("silence", None, 85.0, 100.0)])
+        self.assertEqual((o["dropped_repeats"], o["repeat_groups"]), (1, [{"group": 0, "count": 2, "seconds": 20.0}]))
+        self.assertEqual([s["quiet"] for s in o["segments"]], [False, False, False, True, False, False])
+        self.assertEqual(o["segments"][3]["energy"]["rel_db"], -14.0)
+        self.assertEqual(o["segments"][5]["words"], {"count": 34})  # the dropped repeat's words stay counted
+        # every repeat silent: no repeat left, still source lyric
+        v = stored(30.0, [SIL] * 30, [(5.0, 25.0, 0)])
+        o = server.rhythm_overview(v, _words(5, 25))
+        assert_shape(self, o, 30.0)
+        self.assertEqual((seq(o), o["dropped_repeats"], o["repeat_groups"], o["source"]),
+                         ([("silence", None, 0.0, 30.0)], 1, [], "lyric"))
+
     def test_long_gap_split_at_sections(self):
         vals = [VERSE] * 150
         v = stored(150.0, vals, [(100.0, 110.0, 0)], bounds=(30.0, 55.0, 80.0, 102.0))
@@ -214,7 +238,7 @@ class OverviewLogicTest(unittest.TestCase):
             v = stored(70.0, vals, [], bounds=(10.0, 40.0), lyric=lyric)
             o = server.rhythm_overview(v, None)
             assert_shape(self, o, 70.0)
-            self.assertEqual((o["source"], o["repeat_groups"]), ("audio", []))
+            self.assertEqual((o["source"], o["repeat_groups"], o["dropped_repeats"]), ("audio", [], 0))
             self.assertEqual([(s["kind"], s["label"], s["start"], s["end"]) for s in o["segments"]],
                              [("silence", "silence", 0.0, 10.0), ("section", "A", 10.0, 40.0),
                               ("section", "B", 40.0, 70.0)])
@@ -307,6 +331,7 @@ class OverviewLogicTest(unittest.TestCase):
                                "changes_per_min": 1.0}),
                segs(2, chords={"top": [{"label": "C", "share": 1.5}], "changes_per_min": 1.0}),
                segs(2, melody=dict(o["segments"][2]["melody"], low=80)), segs(0, melody=None),
+               segs(2, quiet=True), segs(0, quiet=None), dict(o, dropped_repeats=-1), dict(o, dropped_repeats=True),
                segs(0, melody=dict(s0["melody"], low=60)), segs(1, words=None), segs(1, words={"count": -1}),
                {"status": "failed"}, {"status": "failed", "code": "Bad"}, {"status": "done"}, None]
         for b in bad:
