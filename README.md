@@ -171,7 +171,7 @@ API:
 `very_low` [0, 1), `low` [1, 1.5], `good` (1.5, 3.5] (Essentia: about 80% AMLt), `excellent` above 3.5. It is
 Essentia's guide, not a calibration on the team's music.
 
-Worker output (worker 0.3.0): `bpm`, `bpm_confidence` (RhythmExtractor2013 multifeature, native 0..~5.32,
+Worker output (worker 0.3.1): `bpm`, `bpm_confidence` (RhythmExtractor2013 multifeature, native 0..~5.32,
 uncalibrated), `bpm_estimates` (top 5 shares), `bpm_alternatives` (`[bpm/2, bpm*2]`, 2 decimals, only values within
 40..300; empty when bpm is 0) with `bpm_alternatives_note`, `double_tempo_evidence` with
 `double_tempo_evidence_note` (diagnostic, see below), `tempo_cnn` (learned estimate, see below), `beats` (s, ms rounding),
@@ -182,7 +182,7 @@ count before the beat vote, stored file only), `chords_reliability: "low_referen
 resampled from 16 kHz because RhythmExtractor2013 assumes 44.1 kHz), `duration`, `tool` (name, version,
 `essentia_version`), `warnings` (`short_audio` < 10 s, `near_silent`, `no_beats`, `low_bpm_confidence` < 1.5,
 `low_key_strength` < 0.5, `key_changes` when there is more than one key section, `no_chords`,
-`double_tempo_evidence_unavailable`, `no_sections`, `sections_single`), `energy`, `energy_summary`, `sections`,
+`double_tempo_evidence_unavailable`, `no_sections`, `sections_single`, `tempo_cnn_patch_count_mismatch`), `energy`, `energy_summary`, `sections`,
 `sections_method`, `sections_reliability: "low_reference"` (see "Energy and sections" below). Audio under 1 s is
 refused (`too_short`).
 
@@ -259,7 +259,21 @@ the same file: 6.3 s, 0.99 GB).
   sum to 1, and 30 + argmax equals TempoCNN's local BPM in every patch, so class i = 30 + i BPM (30..285; the json
   text says "the last one ... 286", which is one off for 256 classes); TempoCNN's own `localTempoProbabilities` is
   only each patch's maximum, not the distribution. The worker re-checks the argmax relation on every run
-  (`inconsistent_output`). Plus `model`, `model_sha256`, `note` ("learned estimate, uncalibrated on team songs;
+  (`inconsistent_output`). Worker 0.3.1 (after one real song, ~87 BPM, ~4 min, came back `inconsistent_output`
+  with 0.2.2 while 7 others were done; that audio could not be re-run here): both calls now get `batchSize` 64,
+  `patchHopSize` 128 and `lastPatchMode` "discard" explicitly. Measured on synthetic audio 12-600 s: the patch
+  counts already matched at every length (39 patches for 240-241 s, 99 for 600 s), but the predictor's default
+  `batchSize` 16 (TempoCNN's is 64) changed the softmax by up to 6e-7, while 64 reproduced TempoCNN's per-patch
+  maxima exactly; a near-tie between two classes could therefore flip the argmax (the likely cause, unproven). A
+  patch also counts as consistent when its local BPM's class probability is within 1e-6 of the row maximum (about
+  2x the observed batch noise, far below the 3-decimal `top` probabilities). `inconsistent_output` now carries
+  `detail`: `{code: "class_count_mismatch", row, classes}`, `{code: "patch_count_mismatch", local, predictions}`
+  (difference above one), `{code: "argmax_mismatch", patch, local_bpm, argmax_bpm, prob_gap|null}` (first failing
+  patch; `prob_gap` = row maximum minus the local BPM's class probability, null when that BPM has no class) or
+  `{code: "global_out_of_range", bpm}`. Files without `detail` stay valid. Patch counts differing by exactly one
+  (never observed, kept as a guard) give `done` over the shared leading patches (both start at frame 0 with the same
+  hop) plus warning `tempo_cnn_patch_count_mismatch`; `local_count` and the local BPM fields still use all of
+  TempoCNN's patches. Plus `model`, `model_sha256`, `note` ("learned estimate, uncalibrated on team songs;
   compare with bpm and bpm_alternatives"). Synthetic numbers (worker 0.2.2; `bpm` / `tempo_cnn.bpm` / top 3): click
   120 30 s 120.0 / 120 / 120 .817, 121 .171, 161 .003; C-Am-F-G loop 30 s 120.0 / 120 / 120 .742, 121 .244, 60 .003;
   modulation 60 s 120.02 / 120 / 120 .786, 121 .2, 116 .003; kick100 100.04 / 100 / 100 .813, 150 .125, 149 .018;
@@ -331,7 +345,7 @@ not a transcription. There are no downbeats and no named parts.
   15 s edge; the C-Am-F-G loop (30 s and 600 s), the click and kick tracks gave one section A; the C major ->
   D major modulation track (same timbre) gave A 0-27.98 / B 27.98-60 (true change at 30 s). 600 s runtime is
   unchanged within noise (worker 0.3.0 7.73-7.86 s and 1.09-1.12 GB peak RSS vs 0.2.2 7.71-7.78 s and 1.10 GB on
-  the same file, same session).
+  the same file, same session; worker 0.3.1 with TempoCNN batch 64: 7.70-7.71 s, 1.09-1.10 GB).
 
 ## Runtime layout (production)
 

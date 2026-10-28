@@ -44,6 +44,14 @@ Choices:
   class i = 30 + i BPM (30..285; the model json says "last ... 286"), while TempoCNN's localTempoProbabilities is
   only the per-patch maximum (shape (patches,)), so `top` comes from the mean of the softmax rows. The worker
   re-checks that argmax relation on every run. Any exception -> {"status":"failed","code"}; never fails the worker.
+  0.3.1: both calls get batchSize 64, patchHopSize 128, lastPatchMode "discard" explicitly. Measured (2026-10-28,
+  synthetic 12-600 s): patch counts already matched at every length with the shared defaults, but the predictor's
+  default batchSize 16 (TempoCNN: 64) changed softmax values by up to 6e-7, while batchSize 64 reproduced TempoCNN's
+  per-patch maxima exactly, so a near-tie could flip the argmax (likely cause of one real-song inconsistent_output).
+  A patch whose local BPM class is within 1e-6 of the row maximum (about 2x the observed batch noise, far below the
+  3-decimal probabilities reported) counts as consistent. inconsistent_output now carries `detail` (class_count_
+  mismatch, patch_count_mismatch, argmax_mismatch, global_out_of_range); a patch count off by exactly one (not seen,
+  kept as a guard) uses the shared patches plus warning tempo_cnn_patch_count_mismatch.
   Residual: the file could change between hashing and the Essentia load (same trust as the worker file itself).
 - energy (0.3.0): RMS dBFS of the 16 kHz source per 1 s window (floor -120). Plain dBFS rather than Essentia Loudness
   (Stevens power law, unitless): a reproducible unit; not perceptual (unweighted, not LUFS). energy_summary: 3 loudest
@@ -66,7 +74,7 @@ import statistics
 import sys
 import wave
 
-TOOL = {"name": "music-lens-rhythm-worker", "version": "0.3.0"}
+TOOL = {"name": "music-lens-rhythm-worker", "version": "0.3.1"}
 SRC_RATE = 16000
 RATE = 44100
 MAX_SECONDS = 600.0
@@ -101,6 +109,10 @@ TEMPO_CNN_CLASSES = 256
 TEMPO_CNN_MIN_BPM = 30  # class i = 30 + i BPM
 TEMPO_CNN_MAX_BYTES = 64 * 1024 * 1024
 TEMPO_CNN_TOP = 3
+TEMPO_CNN_BATCH = 64  # TempoCNN's default; the predictor's default is 16 (see tempo_cnn notes in the docstring)
+TEMPO_CNN_PATCH_HOP = 128  # both algorithms' default, passed explicitly so the patching matches by construction
+TEMPO_CNN_LAST_PATCH = "discard"
+TEMPO_CNN_TIE = 1e-6  # a patch is consistent when its local BPM class is within this of the row maximum
 TEMPO_CNN_NOTE = "learned estimate, uncalibrated on team songs; compare with bpm and bpm_alternatives"
 ENERGY_UNIT = "dBFS"
 ENERGY_STEP = 1.0  # s; one RMS value per non-overlapping 1 s window of the 16 kHz source
@@ -313,32 +325,57 @@ def verify_model(path, expected=TEMPO_CNN_SHA256, cap=TEMPO_CNN_MAX_BYTES):
     return None if h.hexdigest() == expected else "sha256_mismatch"
 
 
+def _tc_fail(**detail):
+    return {"status": "failed", "code": "inconsistent_output", "detail": detail}
+
+
 def tempo_cnn_summary(global_bpm, local_bpms, preds, sha256=TEMPO_CNN_SHA256):
     """global_bpm: TempoCNN global BPM; local_bpms: its per-patch BPMs; preds: TensorflowPredictTempoCNN softmax rows
-    (lists of TEMPO_CNN_CLASSES floats) for the same audio. Plain lists in, the tempo_cnn dict out."""
-    n = len(local_bpms)
+    (lists of TEMPO_CNN_CLASSES floats) for the same audio. Plain lists in, the tempo_cnn dict out.
+    inconsistent_output carries a bounded `detail` naming the failed check. Patch counts differing by exactly one
+    use the shared leading patches (both algorithms start at frame 0 with the same hop, so an extra patch is the last
+    one) and add "_warning" (popped by the caller); a larger difference fails. A patch is consistent when its local
+    BPM is 30 + argmax, or when that BPM's class probability is within TEMPO_CNN_TIE of the row maximum (near ties
+    and float noise between the two TensorFlow runs)."""
+    n, m = len(local_bpms), len(preds)
     if n == 0:
         return {"status": "failed", "code": "too_short"}
     nums = [global_bpm] + list(local_bpms) + [p for row in preds for p in row]
     if not all(math.isfinite(float(x)) for x in nums):
         return {"status": "failed", "code": "non_finite"}
-    if len(preds) != n or any(len(row) != TEMPO_CNN_CLASSES for row in preds):
-        return {"status": "failed", "code": "inconsistent_output"}
+    for i, row in enumerate(preds):
+        if len(row) != TEMPO_CNN_CLASSES:
+            return _tc_fail(code="class_count_mismatch", row=i, classes=len(row))
+    k = min(n, m)
+    if abs(n - m) > 1 or k == 0:
+        return _tc_fail(code="patch_count_mismatch", local=n, predictions=m)
     hi = TEMPO_CNN_MIN_BPM + TEMPO_CNN_CLASSES - 1
-    for b, row in zip(local_bpms, preds):
-        if abs(float(b) - (TEMPO_CNN_MIN_BPM + max(range(len(row)), key=row.__getitem__))) > 0.5:
-            return {"status": "failed", "code": "inconsistent_output"}
+    for i, (b, row) in enumerate(zip(local_bpms[:k], preds[:k])):
+        best = max(range(len(row)), key=row.__getitem__)
+        if abs(float(b) - (TEMPO_CNN_MIN_BPM + best)) <= 0.5:
+            continue
+        c = int(round(float(b))) - TEMPO_CNN_MIN_BPM
+        gap = row[best] - row[c] if 0 <= c < len(row) and abs(float(b) - round(float(b))) <= 0.5 else None
+        if gap is not None and gap <= TEMPO_CNN_TIE:
+            continue
+        return _tc_fail(code="argmax_mismatch", patch=i, local_bpm=round(float(b), 2),
+                        argmax_bpm=float(TEMPO_CNN_MIN_BPM + best),
+                        prob_gap=None if gap is None else round(min(1.0, max(0.0, gap)), 6))
     if not TEMPO_CNN_MIN_BPM <= global_bpm <= hi:
-        return {"status": "failed", "code": "inconsistent_output"}
-    mean = [sum(col) / float(n) for col in zip(*preds)]
+        return _tc_fail(code="global_out_of_range", bpm=round(min(1e6, max(-1e6, float(global_bpm))), 2))
+    mean = [sum(col) / float(k) for col in zip(*preds[:k])]
     top = sorted(range(len(mean)), key=lambda i: (-mean[i], i))[:TEMPO_CNN_TOP]
     loc = [float(b) for b in local_bpms]
-    return {"status": "done", "model": TEMPO_CNN_NAME, "model_sha256": sha256, "bpm": round(float(global_bpm), 2),
-            "local_bpm_median": round(statistics.median(loc), 2), "local_bpm_min": round(min(loc), 2),
-            "local_bpm_max": round(max(loc), 2), "local_count": n,
-            "top": [{"bpm": float(TEMPO_CNN_MIN_BPM + i), "prob": round(min(1.0, max(0.0, mean[i])), 3)}
-                    for i in top],
-            "note": TEMPO_CNN_NOTE}
+    out = {"status": "done", "model": TEMPO_CNN_NAME, "model_sha256": sha256, "bpm": round(float(global_bpm), 2),
+           "local_bpm_median": round(statistics.median(loc), 2), "local_bpm_min": round(min(loc), 2),
+           "local_bpm_max": round(max(loc), 2), "local_count": n,
+           "top": [{"bpm": float(TEMPO_CNN_MIN_BPM + i), "prob": round(min(1.0, max(0.0, mean[i])), 3)}
+                   for i in top],
+           "note": TEMPO_CNN_NOTE}
+    if n != m:
+        out["_warning"] = ("tempo_cnn_patch_count_mismatch: TempoCNN %d patches, predictions %d; top uses the first %d"
+                           % (n, m, k))
+    return out
 
 
 def tempo_cnn(x16, model):
@@ -351,8 +388,10 @@ def tempo_cnn(x16, model):
         import numpy as np
         a = es.Resample(inputSampleRate=SRC_RATE, outputSampleRate=TEMPO_CNN_RATE, quality=1)(x16)
         a = np.ascontiguousarray(a, dtype=np.float32)
-        g, local, _ = es.TempoCNN(graphFilename=model, aggregationMethod="majority")(a)
-        preds = np.asarray(es.TensorflowPredictTempoCNN(graphFilename=model)(a), dtype=np.float64)
+        patching = dict(graphFilename=model, batchSize=TEMPO_CNN_BATCH, patchHopSize=TEMPO_CNN_PATCH_HOP,
+                        lastPatchMode=TEMPO_CNN_LAST_PATCH)
+        g, local, _ = es.TempoCNN(aggregationMethod="majority", **patching)(a)
+        preds = np.asarray(es.TensorflowPredictTempoCNN(**patching)(a), dtype=np.float64)
         rows = preds.tolist() if preds.size else []
         return tempo_cnn_summary(float(g), [float(b) for b in local], rows)
     except Exception as e:  # missing TensorFlow algorithms, graph load or inference error
@@ -599,6 +638,8 @@ def analyze(path, model=TEMPO_CNN_MODEL):
     if dte_warn:
         warnings.append(dte_warn)
     tc = tempo_cnn(x16, model)
+    if "_warning" in tc:
+        warnings.append(tc.pop("_warning"))
 
     tonic, scale, kstrength = es.KeyExtractor(profileType=KEY_PROFILE, sampleRate=RATE, frameSize=FRAME,
                                               hopSize=HOP)(audio)

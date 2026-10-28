@@ -996,14 +996,44 @@ TC_KEYS = {"done": {"status", "model", "model_sha256", "bpm", "local_bpm_median"
 TC_BPM = (30, 300)
 TC_MAX_LOCAL = 10000  # worker 0.2.2: one patch per ~5.9 s, ~100 for 600 s
 RE_CODE = re.compile(r"\A[a-z][a-z0-9_]{0,63}\Z")  # e.g. sha256_mismatch
+# worker 0.3.1: failed/inconsistent_output may carry a detail naming the failed check (exact key set per check)
+TC_DETAIL_KEYS = {"class_count_mismatch": {"code", "row", "classes"},
+                  "patch_count_mismatch": {"code", "local", "predictions"},
+                  "argmax_mismatch": {"code", "patch", "local_bpm", "argmax_bpm", "prob_gap"},
+                  "global_out_of_range": {"code", "bpm"}}
+
+
+def _count(x, hi=TC_MAX_LOCAL):
+    return isinstance(x, int) and not isinstance(x, bool) and 0 <= x <= hi
+
+
+def _tc_detail_ok(d):
+    if not isinstance(d, dict) or d.get("code") not in TC_DETAIL_KEYS or set(d) != TC_DETAIL_KEYS[d["code"]]:
+        return False
+    c = d["code"]
+    if c == "class_count_mismatch":
+        return _count(d["row"]) and _count(d["classes"], 100000)
+    if c == "patch_count_mismatch":
+        return _count(d["local"]) and _count(d["predictions"])
+    if c == "argmax_mismatch":
+        return (_count(d["patch"]) and _num(d["local_bpm"], -1e6, 1e6) and _num(d["argmax_bpm"], *TC_BPM)
+                and _opt_num(d["prob_gap"], 0, 1))
+    return _num(d["bpm"], -1e6, 1e6)
 
 
 def _rhythm_v22_ok(v):
-    """tempo_cnn (worker 0.2.2); absent in older files, valid when present. Exact key set per status."""
+    """tempo_cnn (worker 0.2.2); absent in older files, valid when present. Exact key set per status; a failed
+    inconsistent_output may add `detail` (worker 0.3.1)."""
     if "tempo_cnn" not in v:
         return True
     d = v["tempo_cnn"]
-    if not isinstance(d, dict) or d.get("status") not in TC_KEYS or set(d) != TC_KEYS[d["status"]]:
+    if not isinstance(d, dict) or d.get("status") not in TC_KEYS:
+        return False
+    if d["status"] == "failed" and "detail" in d:  # 0.3.1; older files have no detail and stay valid
+        if d.get("code") != "inconsistent_output" or set(d) != {"status", "code", "detail"}:
+            return False
+        return _tc_detail_ok(d["detail"])
+    if set(d) != TC_KEYS[d["status"]]:
         return False
     if d["status"] != "done":
         c = d["reason" if d["status"] == "unavailable" else "code"]

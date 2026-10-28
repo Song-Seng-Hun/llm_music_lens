@@ -149,6 +149,19 @@ def bad_v22():
     d = dict(TC_DONE)
     del d["top"]
     out.append(json.dumps(dict(RHYTHM_OUT_V22, tempo_cnn=d)))
+    det = {"code": "argmax_mismatch", "patch": 3, "local_bpm": 87.0, "argmax_bpm": 88.0, "prob_gap": 0.01}
+    for d in (dict(det, prob_gap=1.5), dict(det, prob_gap=float("nan")), dict(det, patch=-1), dict(det, patch=1.0),
+              dict(det, argmax_bpm=500.0), dict(det, extra=1), {"code": "argmax_mismatch"}, {"code": "other"},
+              {"code": "patch_count_mismatch", "local": 40, "predictions": True},
+              {"code": "patch_count_mismatch", "local": 10 ** 6, "predictions": 1},
+              {"code": "class_count_mismatch", "row": 0, "classes": -1}, {"code": "global_out_of_range", "bpm": 1e9},
+              {"code": "global_out_of_range", "bpm": "x"}, None, [1], "argmax_mismatch"):
+        out.append(json.dumps(dict(RHYTHM_OUT_V22, tempo_cnn={"status": "failed", "code": "inconsistent_output",
+                                                               "detail": d})))
+    for tc in ({"status": "failed", "code": "inference_error", "detail": det},  # detail only on inconsistent_output
+               {"status": "done", "detail": det}, {"status": "unavailable", "reason": "model_missing", "detail": det},
+               {"status": "failed", "code": "inconsistent_output", "detail": det, "extra": 1}):
+        out.append(json.dumps(dict(RHYTHM_OUT_V22, tempo_cnn=tc)))
     for tc in (None, [1], "done", {}, {"status": "unavailable"}, dict(TC_UNAVAILABLE, code="x"),
                {"status": "unavailable", "reason": "Model missing"}, {"status": "unavailable", "reason": ""},
                {"status": "unavailable", "reason": "x" * 65},
@@ -944,10 +957,38 @@ class WorkerLogicTest(unittest.TestCase):
         bad_row = row(90)
         bad_row[3] = float("inf")
         self.assertEqual(rw.tempo_cnn_summary(120.0, [120.0], [bad_row])["code"], "non_finite")
-        for g, loc, pr in ((120.0, [120.0], [row(90)[:255]]), (120.0, [120.0, 120.0], [row(90)]),
-                           (120.0, [121.0], [row(90)]),  # local BPM disagrees with 30 + argmax
-                           (0.0, [120.0], [row(90)]), (290.0, [120.0], [row(90)])):
-            self.assertEqual(rw.tempo_cnn_summary(g, loc, pr), {"status": "failed", "code": "inconsistent_output"})
+        fail = lambda **d: {"status": "failed", "code": "inconsistent_output", "detail": d}
+        for g, loc, pr, want in (
+                (120.0, [120.0], [row(90)[:255]], fail(code="class_count_mismatch", row=0, classes=255)),
+                (120.0, [120.0] * 3, [row(90)], fail(code="patch_count_mismatch", local=3, predictions=1)),
+                (120.0, [120.0], [row(90)] * 3, fail(code="patch_count_mismatch", local=1, predictions=3)),
+                (120.0, [121.0], [row(90)],  # local BPM disagrees with 30 + argmax: class 91 has 0, max 0.8
+                 fail(code="argmax_mismatch", patch=0, local_bpm=121.0, argmax_bpm=120.0, prob_gap=0.8)),
+                (120.0, [120.0, 300.0], [row(90)] * 2,  # 300 BPM has no class
+                 fail(code="argmax_mismatch", patch=1, local_bpm=300.0, argmax_bpm=120.0, prob_gap=None)),
+                (0.0, [120.0], [row(90)], fail(code="global_out_of_range", bpm=0.0)),
+                (290.0, [120.0], [row(90)], fail(code="global_out_of_range", bpm=290.0))):
+            d = rw.tempo_cnn_summary(g, loc, pr)
+            self.assertEqual(d, want)
+            v = json.loads(json.dumps(dict(RHYTHM_OUT_V22, tempo_cnn=d)))
+            self.assertIs(server.check_rhythm(v), v, d)
+        # near tie: the local BPM's class is within 1e-6 of the row maximum (float noise between two TF runs) -> done
+        tie = row(90, 0.5, 91)
+        tie[91] = 0.5 - 5e-7
+        d = rw.tempo_cnn_summary(121.0, [121.0], [tie])
+        self.assertEqual((d["status"], d["bpm"], d["top"][0]["bpm"]), ("done", 121.0, 120.0))
+        tie[91] = 0.5 - 2e-6  # beyond the tolerance: a real mismatch
+        self.assertEqual(rw.tempo_cnn_summary(121.0, [121.0], [tie])["detail"]["code"], "argmax_mismatch")
+        # patch counts off by exactly one: the shared leading patches, plus a warning for the caller
+        d = rw.tempo_cnn_summary(120.0, [120.0, 120.0], [row(90)])
+        self.assertEqual((d["status"], d["local_count"], d["top"][0]), ("done", 2, {"bpm": 120.0, "prob": 0.8}))
+        self.assertEqual(d.pop("_warning"),
+                         "tempo_cnn_patch_count_mismatch: TempoCNN 2 patches, predictions 1; top uses the first 1")
+        self.assertEqual(set(d), server.TC_KEYS["done"])
+        d = rw.tempo_cnn_summary(120.0, [120.0], [row(90), row(200)])  # the extra prediction row is ignored
+        self.assertEqual((d["status"], d["top"][0]["bpm"]), ("done", 120.0))
+        self.assertIn("_warning", d)
+        self.assertNotIn("_warning", rw.tempo_cnn_summary(120.0, [120.0], [row(90)]))
         for out in ({"status": "failed", "code": "too_short"}, {"status": "unavailable", "reason": "sha256_mismatch"}):
             v = json.loads(json.dumps(dict(RHYTHM_OUT_V21, tempo_cnn=out)))
             self.assertIs(server.check_rhythm(v), v)
@@ -1087,7 +1128,7 @@ class RealWorkerTest(unittest.TestCase):
             self.assertEqual((v["sample_rate"], v["chords_reliability"]), (44100, "low_reference"))
             self.assertIn(v["duration"], (30.0, 60.0))
             self.assertEqual(v["tool"]["essentia_version"], "2.1-beta6-dev")
-            self.assertEqual(v["tool"]["version"], "0.3.0")
+            self.assertEqual(v["tool"]["version"], "0.3.1")
             e = v["energy"]
             self.assertEqual((e["unit"], e["step_s"], len(e["values"])), ("dBFS", 1.0, int(v["duration"])))
             self.assertEqual(v["energy_summary"]["window_s"], 8.0)
@@ -1140,6 +1181,20 @@ class RealWorkerTest(unittest.TestCase):
             self.assertTrue(v["chords"])
             ref = dict(self.out["click"], tempo_cnn=v["tempo_cnn"])
             self.assertEqual(v, ref)  # everything else identical to the run with the model
+
+    @unittest.skipUnless(MODEL_PRESENT, "TempoCNN model missing")
+    def test_tempo_cnn_long_patching(self):
+        # 241 s (an odd length, ~4 min like the real song that failed): counts and argmax agree with the aligned
+        # batch/patch parameters, so the result is done with no patch-count warning
+        wav = os.path.join(self.dir, "chords241.wav")
+        subprocess.run([ESSENTIA_PY, "-I", SYNTH, "chords", "241", wav], check=True, timeout=120)
+        v = run_worker(wav)
+        tc = v["tempo_cnn"]
+        self.assertEqual(tc["status"], "done", tc)
+        self.assertEqual(tc["local_count"], 39)  # measured: 39 patches for 240-241 s
+        self.assertAlmostEqual(tc["bpm"], 120.0, delta=2.0)
+        self.assertFalse(any(w.startswith("tempo_cnn_patch_count_mismatch") for w in v["warnings"]))
+        self.assertIsNotNone(server.check_rhythm(v))
 
     @unittest.skipUnless(MODEL_PRESENT, "TempoCNN model missing")
     def test_tempo_cnn_short_audio_and_copy(self):
