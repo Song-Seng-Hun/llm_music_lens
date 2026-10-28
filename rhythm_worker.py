@@ -53,6 +53,20 @@ Choices:
   mismatch, patch_count_mismatch, argmax_mismatch, global_out_of_range); a patch count off by exactly one (not seen,
   kept as a guard) uses the shared patches plus warning tempo_cnn_patch_count_mismatch.
   Residual: the file could change between hashing and the Essentia load (same trust as the worker file itself).
+  0.4.1: one source only. A real song (274 s, ~21 s near-silent tail) failed argmax_mismatch on its last patch with
+  a real probability gap of 0.08, and a synthetic track with a 20 s silent tail reproduced it (gap 0.04): TempoCNN
+  and TensorflowPredictTempoCNN disagree on near-silent patches, so the 0.3.1 batch-size explanation was wrong.
+  TempoCNN is no longer called. Everything comes from TensorflowPredictTempoCNN's per-patch softmax: local BPM = 30 +
+  argmax per patch; global bpm = the most frequent local BPM (Essentia documents TempoCNN's global as an aggregation
+  of localTempo, recommending "majority" voting), ties: higher mean probability, then lower BPM; top = mean softmax.
+  A patch (frames 1024/hop 512 at 11025 Hz, 256 frames, patch hop 128 frames: start 5.944 i s, length 11.935 s) is
+  excluded first (`silent_patches`) when more than half of the 1 s energy windows in its span are below SILENCE_DB
+  (the sections rule). A plain patch-RMS rule was tried first and kept a patch of 10 s silence + 2 s music (its RMS
+  is the music's minus ~8 dB), which voted 30 BPM. All excluded -> failed no_audible_patches.
+- silence (0.4.1): SILENCE_DB -60 dBFS (RMS per 1 s energy window; quiet room tone and dithered digital silence sit
+  far below it, soft music above). A section with more than half of its energy windows (by midpoint) below it is
+  labelled "silence": it takes no letter, is no grouping reference, similarity_to_first null. energy_summary peaks and
+  quietest consider only windows with no value below it; silence_s counts the seconds below it.
 - energy (0.3.0): RMS dBFS of the 16 kHz source per 1 s window (floor -120). Plain dBFS rather than Essentia Loudness
   (Stevens power law, unitless): a reproducible unit; not perceptual (unweighted, not LUFS). energy_summary: 3 loudest
   non-overlapping 8 s windows (~4 bars at 120 BPM, one phrase) and the quietest one, plain means of the dB values.
@@ -68,8 +82,8 @@ Choices:
   independent, maxFrequency is set to the 8 kHz Nyquist (the default 20 kHz is above it) and the salience range is the
   default 55 Hz..1760 Hz with minFrequency 80 Hz. Measured on synthetic lines (2026-10-28): 16 kHz direct (frame 1024 or
   2048) recovered every note of a 0.5 s line at MIDI 69-81, and 20 of 24 at MIDI 48-60 where the same audio
-  resampled to 44.1 kHz with the defaults gave 12; frameSize 512 split notes. PitchContourSegmentation (same hop, defaults: min 0.1 s,
-  60 cents, rms -2) turns the contour into notes; midi is rounded to the nearest semitone (A4 = 69 = 440 Hz).
+  resampled to 44.1 kHz with the defaults gave 12; frameSize 512 split notes. PitchContourSegmentation (same hop,
+  defaults: min 0.1 s, 60 cents, rms -2) turns the contour into notes; midi is rounded to the nearest semitone (A4 = 69 = 440 Hz).
   Stored notes are capped at MELODY_MAX_NOTES (6000 = 600 s / 0.1 s minimum note length, so never reached by valid
   output; kept as a guard with a warning). Not a transcription: octave errors, split or merged repeated notes.
 """
@@ -85,7 +99,7 @@ import statistics
 import sys
 import wave
 
-TOOL = {"name": "music-lens-rhythm-worker", "version": "0.4.0"}
+TOOL = {"name": "music-lens-rhythm-worker", "version": "0.4.1"}
 SRC_RATE = 16000
 RATE = 44100
 MAX_SECONDS = 600.0
@@ -123,7 +137,7 @@ TEMPO_CNN_TOP = 3
 TEMPO_CNN_BATCH = 64  # TempoCNN's default; the predictor's default is 16 (see tempo_cnn notes in the docstring)
 TEMPO_CNN_PATCH_HOP = 128  # both algorithms' default, passed explicitly so the patching matches by construction
 TEMPO_CNN_LAST_PATCH = "discard"
-TEMPO_CNN_TIE = 1e-6  # a patch is consistent when its local BPM class is within this of the row maximum
+TC_FRAME_HOP, TC_PATCH_FRAMES, TC_FRAME = 512, 256, 1024  # TensorflowInputTempoCNN at 11025 Hz (fixed in Essentia)
 TEMPO_CNN_NOTE = "learned estimate, uncalibrated on team songs; compare with bpm and bpm_alternatives"
 ENERGY_UNIT = "dBFS"
 ENERGY_STEP = 1.0  # s; one RMS value per non-overlapping 1 s window of the 16 kHz source
@@ -131,6 +145,8 @@ ENERGY_FLOOR = -120.0  # dB; digital silence and anything quieter
 ENERGY_MIN_TAIL = 0.5  # s; a last partial window shorter than this is dropped
 ENERGY_WINDOW = 8  # s (values) per summary window: ~4 bars at 120 BPM, one phrase
 ENERGY_PEAKS = 3
+SILENCE_DB = -60.0  # dBFS; an energy window below this counts as silence (sections, energy_summary)
+SILENCE_LABEL = "silence"
 SEC_KERNEL = 16  # beats per checkerboard half (~4 bars of 4/4): a 4-bar loop sits inside one half
 SEC_MIN = 8  # beats; minimum section length and peak-picking neighbourhood (~2 bars)
 SEC_NOVELTY_MIN = 0.15  # absolute Foote novelty (-1..1 scale) a boundary needs
@@ -347,60 +363,47 @@ def verify_model(path, expected=TEMPO_CNN_SHA256, cap=TEMPO_CNN_MAX_BYTES):
     return None if h.hexdigest() == expected else "sha256_mismatch"
 
 
-def _tc_fail(**detail):
-    return {"status": "failed", "code": "inconsistent_output", "detail": detail}
-
-
-def tempo_cnn_summary(global_bpm, local_bpms, preds, sha256=TEMPO_CNN_SHA256):
-    """global_bpm: TempoCNN global BPM; local_bpms: its per-patch BPMs; preds: TensorflowPredictTempoCNN softmax rows
-    (lists of TEMPO_CNN_CLASSES floats) for the same audio. Plain lists in, the tempo_cnn dict out.
-    inconsistent_output carries a bounded `detail` naming the failed check. Patch counts differing by exactly one
-    use the shared leading patches (both algorithms start at frame 0 with the same hop, so an extra patch is the last
-    one) and add "_warning" (popped by the caller); a larger difference fails. A patch is consistent when its local
-    BPM is 30 + argmax, or when that BPM's class probability is within TEMPO_CNN_TIE of the row maximum (near ties
-    and float noise between the two TensorFlow runs)."""
-    n, m = len(local_bpms), len(preds)
-    if n == 0:
+def tempo_cnn_summary(preds, patch_silent, sha256=TEMPO_CNN_SHA256):
+    """preds: TensorflowPredictTempoCNN softmax rows (lists of TEMPO_CNN_CLASSES floats); patch_silent: one bool per
+    row (True = excluded as near-silent). Local BPM = 30 + argmax per audible patch; bpm =
+    the most frequent local BPM (ties: higher mean probability, then lower BPM); top = mean softmax of the audible
+    patches. Plain lists in, the tempo_cnn dict out."""
+    if not preds:
         return {"status": "failed", "code": "too_short"}
-    nums = [global_bpm] + list(local_bpms) + [p for row in preds for p in row]
-    if not all(math.isfinite(float(x)) for x in nums):
+    if not all(math.isfinite(float(x)) for row in preds for x in row):
         return {"status": "failed", "code": "non_finite"}
     for i, row in enumerate(preds):
         if len(row) != TEMPO_CNN_CLASSES:
-            return _tc_fail(code="class_count_mismatch", row=i, classes=len(row))
-    k = min(n, m)
-    if abs(n - m) > 1 or k == 0:
-        return _tc_fail(code="patch_count_mismatch", local=n, predictions=m)
-    hi = TEMPO_CNN_MIN_BPM + TEMPO_CNN_CLASSES - 1
-    for i, (b, row) in enumerate(zip(local_bpms[:k], preds[:k])):
-        best = max(range(len(row)), key=row.__getitem__)
-        if abs(float(b) - (TEMPO_CNN_MIN_BPM + best)) <= 0.5:
-            continue
-        c = int(round(float(b))) - TEMPO_CNN_MIN_BPM
-        gap = row[best] - row[c] if 0 <= c < len(row) and abs(float(b) - round(float(b))) <= 0.5 else None
-        if gap is not None and gap <= TEMPO_CNN_TIE:
-            continue
-        return _tc_fail(code="argmax_mismatch", patch=i, local_bpm=round(float(b), 2),
-                        argmax_bpm=float(TEMPO_CNN_MIN_BPM + best),
-                        prob_gap=None if gap is None else round(min(1.0, max(0.0, gap)), 6))
-    if not TEMPO_CNN_MIN_BPM <= global_bpm <= hi:
-        return _tc_fail(code="global_out_of_range", bpm=round(min(1e6, max(-1e6, float(global_bpm))), 2))
-    mean = [sum(col) / float(k) for col in zip(*preds[:k])]
+            return {"status": "failed", "code": "inconsistent_output",
+                    "detail": {"code": "class_count_mismatch", "row": i, "classes": len(row)}}
+    rows = [row for row, quiet in zip(preds, patch_silent) if not quiet]
+    silent = len(preds) - len(rows)
+    if not rows:
+        return {"status": "failed", "code": "no_audible_patches"}
+    k = float(len(rows))
+    mean = [sum(col) / k for col in zip(*rows)]
+    local = [max(range(len(row)), key=lambda i, r=row: (r[i], -i)) for row in rows]  # argmax, ties: lower class
+    votes = {}
+    for c in local:
+        votes[c] = votes.get(c, 0) + 1
+    best = max(votes, key=lambda c: (votes[c], mean[c], -c))
     top = sorted(range(len(mean)), key=lambda i: (-mean[i], i))[:TEMPO_CNN_TOP]
-    loc = [float(b) for b in local_bpms]
-    out = {"status": "done", "model": TEMPO_CNN_NAME, "model_sha256": sha256, "bpm": round(float(global_bpm), 2),
-           "local_bpm_median": round(statistics.median(loc), 2), "local_bpm_min": round(min(loc), 2),
-           "local_bpm_max": round(max(loc), 2), "local_count": n,
-           "top": [{"bpm": float(TEMPO_CNN_MIN_BPM + i), "prob": round(min(1.0, max(0.0, mean[i])), 3)}
-                   for i in top],
-           "note": TEMPO_CNN_NOTE}
-    if n != m:
-        out["_warning"] = ("tempo_cnn_patch_count_mismatch: TempoCNN %d patches, predictions %d; top uses the first %d"
-                           % (n, m, k))
-    return out
+    loc = [float(TEMPO_CNN_MIN_BPM + c) for c in local]
+    return {"status": "done", "model": TEMPO_CNN_NAME, "model_sha256": sha256, "bpm": float(TEMPO_CNN_MIN_BPM + best),
+            "local_bpm_median": round(statistics.median(loc), 2), "local_bpm_min": min(loc),
+            "local_bpm_max": max(loc), "local_count": len(rows), "silent_patches": silent,
+            "top": [{"bpm": float(TEMPO_CNN_MIN_BPM + i), "prob": round(min(1.0, max(0.0, mean[i])), 3)}
+                    for i in top],
+            "note": TEMPO_CNN_NOTE}
 
 
-def tempo_cnn(x16, model):
+def patch_span(i):
+    """(start, end) in s of TempoCNN patch i (see docstring)."""
+    a = i * TEMPO_CNN_PATCH_HOP * TC_FRAME_HOP / float(TEMPO_CNN_RATE)
+    return a, a + ((TC_PATCH_FRAMES - 1) * TC_FRAME_HOP + TC_FRAME) / float(TEMPO_CNN_RATE)
+
+
+def tempo_cnn(x16, model, energy):
     """tempo_cnn dict for the 16 kHz source; never raises."""
     reason = verify_model(model)
     if reason:
@@ -410,12 +413,11 @@ def tempo_cnn(x16, model):
         import numpy as np
         a = es.Resample(inputSampleRate=SRC_RATE, outputSampleRate=TEMPO_CNN_RATE, quality=1)(x16)
         a = np.ascontiguousarray(a, dtype=np.float32)
-        patching = dict(graphFilename=model, batchSize=TEMPO_CNN_BATCH, patchHopSize=TEMPO_CNN_PATCH_HOP,
-                        lastPatchMode=TEMPO_CNN_LAST_PATCH)
-        g, local, _ = es.TempoCNN(aggregationMethod="majority", **patching)(a)
-        preds = np.asarray(es.TensorflowPredictTempoCNN(**patching)(a), dtype=np.float64)
+        preds = np.asarray(es.TensorflowPredictTempoCNN(graphFilename=model, batchSize=TEMPO_CNN_BATCH,
+                                                        patchHopSize=TEMPO_CNN_PATCH_HOP,
+                                                        lastPatchMode=TEMPO_CNN_LAST_PATCH)(a), dtype=np.float64)
         rows = preds.tolist() if preds.size else []
-        return tempo_cnn_summary(float(g), [float(b) for b in local], rows)
+        return tempo_cnn_summary(rows, [section_silent(energy, *patch_span(i)) for i in range(len(rows))])
     except Exception as e:  # missing TensorFlow algorithms, graph load or inference error
         return {"status": "failed", "code": "dependency_missing" if isinstance(e, (ImportError, AttributeError))
                 else "inference_error"}
@@ -449,12 +451,16 @@ def _window_means(values, w):
     return out, w
 
 
-def energy_summary(values, duration, step=ENERGY_STEP, w=ENERGY_WINDOW):
+def energy_summary(values, duration, step=ENERGY_STEP, w=ENERGY_WINDOW, floor=SILENCE_DB):
     """min/max/median of the values, the ENERGY_PEAKS loudest non-overlapping windows of w values (greedy by mean,
-    ties earliest) and the quietest window (ties earliest). Window means are plain means of the dB values."""
+    ties earliest) and the quietest window (ties earliest), both among windows holding no value below `floor` (no
+    such window: peaks [] and quietest None). Window means are plain means of the dB values. silence_s = seconds of
+    values below `floor`."""
     if not values:
         return None
     wins, w = _window_means(values, w)
+    wins = [(i, m) for i, m in wins if min(values[i:i + w]) >= floor]
+    silence_s = round(min(duration, sum(1 for x in values if x < floor) * step), 3)
     span = lambda i, m: {"start": r3(i * step), "end": r3(min((i + w) * step, duration)), "mean": round(m, 2)}
     peaks = []
     for i, m in sorted(wins, key=lambda x: (-x[1], x[0])):
@@ -462,10 +468,10 @@ def energy_summary(values, duration, step=ENERGY_STEP, w=ENERGY_WINDOW):
             peaks.append((i, m))
             if len(peaks) == ENERGY_PEAKS:
                 break
-    qi, qm = min(wins, key=lambda x: (x[1], x[0]))
+    quiet = min(wins, key=lambda x: (x[1], x[0])) if wins else None
     return {"unit": ENERGY_UNIT, "window_s": w * step, "min": min(values), "max": max(values),
             "median": round(statistics.median(values), 2), "peaks": [span(i, m) for i, m in peaks],
-            "quietest": span(qi, qm)}
+            "quietest": span(*quiet) if quiet else None, "silence_db": floor, "silence_s": silence_s}
 
 
 def pick_boundaries(nov, min_gap=SEC_MIN, thresh=SEC_NOVELTY_MIN, cap=SEC_MAX - 1):
@@ -520,6 +526,15 @@ def top_chord(chords, start, end):
     if not acc:
         return None
     return max(acc.items(), key=lambda kv: (round(kv[1][0], 6), kv[1][1]))[0]
+
+
+def section_silent(values, start, end, step=ENERGY_STEP, floor=SILENCE_DB):
+    """True when more than half of the energy values whose window midpoint lies in [start, end) (else the window
+    holding the midpoint) are below `floor`."""
+    sel = [v for i, v in enumerate(values) if start <= (i + 0.5) * step < end]
+    if not sel:
+        sel = [values[min(len(values) - 1, int(((start + end) / 2.0) // step))]]
+    return sum(1 for v in sel if v < floor) * 2 > len(sel)
 
 
 def section_energy(values, start, end, step=ENERGY_STEP):
@@ -581,11 +596,17 @@ def structure(chroma, mfcc, frame_times, beats, duration, energy, chords):
         idx = [0] + cut + [nb]
         cm = [C[a:b].mean(axis=0).tolist() for a, b in zip(idx[:-1], idx[1:])]
         zm = [Z[a:b].mean(axis=0).tolist() for a, b in zip(idx[:-1], idx[1:])]
-    if len(sections) == 1:
-        labels = [("A", 1.0)]
+    silent = [section_silent(energy, s, e) for s, e in sections]
+    keep = [k for k in range(len(sections)) if not silent[k]]  # silence takes no letter and is no reference
+    if len(keep) == 1:
+        sub = [("A", 1.0)]
+    elif keep:
+        sim = [[_segment_similarity(cm[a], cm[b], zm[a], zm[b]) for b in keep] for a in keep]
+        sub = assign_labels(sim)
     else:
-        sim = [[_segment_similarity(cm[a], cm[b], zm[a], zm[b]) for b in range(len(cm))] for a in range(len(cm))]
-        labels = assign_labels(sim)
+        sub = []
+    it = iter(sub)
+    labels = [(SILENCE_LABEL, None) if silent[k] else next(it) for k in range(len(sections))]
     out = []
     for (s, e), (lab, sf) in zip(sections, labels):
         out.append({"start": r3(s), "end": r3(e), "label": lab, "energy_mean": section_energy(energy, s, e),
@@ -798,9 +819,8 @@ def analyze(path, model=TEMPO_CNN_MODEL):
     dte, dte_warn = double_tempo_evidence(onset_envelope(audio), ONSET_HOP / float(RATE), beats)
     if dte_warn:
         warnings.append(dte_warn)
-    tc = tempo_cnn(x16, model)
-    if "_warning" in tc:
-        warnings.append(tc.pop("_warning"))
+    energy = energy_values(x16, duration)
+    tc = tempo_cnn(x16, model, energy)
 
     tonic, scale, kstrength = es.KeyExtractor(profileType=KEY_PROFILE, sampleRate=RATE, frameSize=FRAME,
                                               hopSize=HOP)(audio)
@@ -853,7 +873,6 @@ def analyze(path, model=TEMPO_CNN_MODEL):
     if not chords:
         warnings.append("no_chords: no chord segment was produced")
 
-    energy = energy_values(x16, duration)
     step = HOP / float(RATE)
     sections, sec_warn = structure(np.array(pcps, dtype=np.float64).reshape(-1, 12),
                                    np.array(mfccs, dtype=np.float64).reshape(-1, 12),

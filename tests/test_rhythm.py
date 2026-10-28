@@ -218,6 +218,29 @@ def bad_v30():
     return out
 
 
+SECTIONS_SILENCE = [dict(SECTIONS[0], label="silence", similarity_to_first=None, energy_mean=-120.0),
+                    dict(SECTIONS[1], label="A"), dict(SECTIONS[2], label="silence", similarity_to_first=None)]
+ENERGY_SUMMARY_V41 = dict(ENERGY_SUMMARY, silence_db=-60.0, silence_s=0.0)
+
+
+def bad_v41():
+    """Worker-0.4.1 silence labels and energy_summary fields that must be refused."""
+    out = []
+    ss, es = SECTIONS_SILENCE, ENERGY_SUMMARY_V41
+    for sec in ([dict(ss[0], similarity_to_first=1.0)] + ss[1:], [ss[0], dict(ss[1], label="B"), ss[2]],
+                [dict(ss[0], label="Silence")] + ss[1:], [dict(ss[0], label="silent")] + ss[1:],
+                [ss[0], dict(ss[1], similarity_to_first=None), ss[2]], [dict(ss[0], end=3.0)] + ss[1:]):
+        out.append(json.dumps(dict(RHYTHM_OUT_V30, sections=sec)))
+    for over in ({"silence_s": -1.0}, {"silence_s": 100.0}, {"silence_s": None}, {"silence_db": 5.0},
+                 {"quietest": None}, {"peaks": [], "quietest": es["quietest"]}, {"silence_db": -60.0, "extra": 1},
+                 {"silence_db": -20.0}):  # peaks/quietest below the threshold are impossible
+        out.append(json.dumps(dict(RHYTHM_OUT_V30, energy_summary=dict(es, **over))))
+    es_old = {k: x for k, x in es.items() if k != "silence_s"}
+    out.append(json.dumps(dict(RHYTHM_OUT_V30, energy_summary=es_old)))  # both new keys or neither
+    out.append(json.dumps(dict(RHYTHM_OUT_V30, energy_summary=dict(ENERGY_SUMMARY, peaks=[]))))  # old shape needs one
+    return out
+
+
 def _n(start, end, midi):
     return {"start": start, "end": end, "midi": midi, "note": rw.note_name(midi)}
 
@@ -518,6 +541,25 @@ class RhythmAnalyzeTest(RhythmBase):
                                                 "high": None, "median_midi": None, "notes_per_second": None,
                                                 "peak": None, "direction": None})
 
+    def test_v41_silence_fields(self):
+        for over in ({"sections": SECTIONS_SILENCE}, {"energy_summary": ENERGY_SUMMARY_V41},
+                     {"sections": [dict(s, label="silence", similarity_to_first=None) for s in SECTIONS]},
+                     {"energy_summary": dict(ENERGY_SUMMARY_V41, peaks=[], quietest=None, silence_s=6.0)}):
+            self.fw.write(stdout=json.dumps(dict(RHYTHM_OUT_V30, **over)))
+            if os.path.exists(self.rhythm_file()):
+                os.unlink(self.rhythm_file())  # else the stored file is a cache hit
+            r = self.c.json("POST", AR, WAV)[1]["rhythm"]
+            self.assertEqual((r["status"], r["cache_hit"]), ("done", False), (over, r))
+            k = list(over)[0]
+            self.assertEqual(r[k], over[k])
+        m = rw.melody_summary(MELODY_NOTES, MELODY_VOICED, 0.008, 750, "C", "major", SECTIONS_SILENCE)
+        v = json.loads(json.dumps(dict(RHYTHM_OUT_V40, sections=SECTIONS_SILENCE, melody=m)))
+        self.assertIs(server.check_rhythm(v), v)  # melody rows aligned to silence sections too
+        os.unlink(self.rhythm_file())  # a valid stored file would be a cache hit
+        for out in bad_v41():
+            self.fw.write(stdout=out)
+            self.assert_rhythm_failed("failed", "invalid_output")
+
     def test_v40_invalid_output(self):
         for out in bad_v40():
             self.fw.write(stdout=out)
@@ -803,7 +845,7 @@ class RhythmReadTest(RhythmBase):
         with open(self.rhythm_file(), "w") as f:
             f.write(json.dumps(RHYTHM_OUT_V40))
         self.assertEqual(self.c.json("GET", "/report/" + RID64)[1]["rhythm"]["melody"], MELODY)
-        for bad in bad_v2() + bad_v21() + bad_v22() + bad_v30() + bad_v40():
+        for bad in bad_v2() + bad_v21() + bad_v22() + bad_v30() + bad_v40() + bad_v41():
             with open(self.rhythm_file(), "w") as f:
                 f.write(bad)
             st, b = self.c.json("GET", "/report/" + RID64)
@@ -1057,9 +1099,9 @@ class WorkerLogicTest(unittest.TestCase):
                 r[rest] = 1.0 - p
             return r
         preds = [row(90, 0.8, 91), row(90, 0.6, 120), row(91, 0.7, 90), row(90, 0.9, 0)]
-        d = rw.tempo_cnn_summary(120.0, [120.0, 120.0, 121.0, 120.0], preds)
-        self.assertEqual(set(d), server.TC_KEYS["done"])
-        self.assertEqual((d["status"], d["bpm"], d["local_count"]), ("done", 120.0, 4))
+        d = rw.tempo_cnn_summary(preds, [False] * 4)
+        self.assertEqual(set(d), server.TC_KEYS["done"] | {"silent_patches"})
+        self.assertEqual((d["status"], d["bpm"], d["local_count"], d["silent_patches"]), ("done", 120.0, 4, 0))
         self.assertEqual((d["local_bpm_min"], d["local_bpm_median"], d["local_bpm_max"]), (120.0, 120.0, 121.0))
         # mean over the 4 rows: class 90 (120 BPM) (0.8+0.6+0.3+0.9)/4, class 91 (0.2+0.7)/4, class 120 0.4/4, ...
         self.assertEqual(d["top"], [{"bpm": 120.0, "prob": 0.65}, {"bpm": 121.0, "prob": 0.225},
@@ -1067,52 +1109,50 @@ class WorkerLogicTest(unittest.TestCase):
         self.assertEqual(d["model_sha256"], rw.TEMPO_CNN_SHA256)
         v = json.loads(json.dumps(dict(RHYTHM_OUT_V21, tempo_cnn=d)))
         self.assertIs(server.check_rhythm(v), v)
+        # near-silent patches are excluded before everything else (a silent last patch voted 161 on a real song)
+        d = rw.tempo_cnn_summary(preds + [row(131), row(131)], [True, False, False, False, True, True])
+        self.assertEqual((d["bpm"], d["local_count"], d["silent_patches"]), (120.0, 3, 3))
+        self.assertEqual(d["top"][0], {"bpm": 120.0, "prob": round((0.6 + 0.3 + 0.9) / 3, 3)})
+        self.assertEqual(rw.tempo_cnn_summary([row(90)] * 2, [True, True]),
+                         {"status": "failed", "code": "no_audible_patches"})
+        # majority of the per-patch argmax; ties: higher mean probability, then lower BPM
+        d = rw.tempo_cnn_summary([row(90, 0.6), row(91, 0.9), row(91, 0.5), row(90, 0.6)], [False] * 4)
+        self.assertEqual(d["bpm"], 121.0)  # 2 votes each; class 91 mean 0.35 > class 90 mean 0.3
+        d = rw.tempo_cnn_summary([row(91, 0.6), row(90, 0.6)], [False] * 2)
+        self.assertEqual(d["bpm"], 120.0)  # full tie: lower BPM
+        d = rw.tempo_cnn_summary([row(90, 0.5, 91)], [False])
+        self.assertEqual(d["bpm"], 120.0)  # argmax tie inside a row: lower class
         # class index -> BPM: index 0 = 30, index 255 = 285; ties in the mean go to the lower class
-        d = rw.tempo_cnn_summary(285.0, [285.0], [row(255, 0.6, 0)])
+        d = rw.tempo_cnn_summary([row(255, 0.6, 0)], [False])
         self.assertEqual(d["top"], [{"bpm": 285.0, "prob": 0.6}, {"bpm": 30.0, "prob": 0.4}, {"bpm": 31.0, "prob": 0.0}])
-        d = rw.tempo_cnn_summary(30.0, [30.0, 285.0], [row(0, 0.6, 255), row(255, 0.6, 0)])
+        d = rw.tempo_cnn_summary([row(0, 0.6, 255), row(255, 0.6, 0)], [False] * 2)
         self.assertEqual(d["top"], [{"bpm": 30.0, "prob": 0.5}, {"bpm": 285.0, "prob": 0.5}, {"bpm": 31.0, "prob": 0.0}])
         self.assertEqual((d["local_bpm_min"], d["local_bpm_median"], d["local_bpm_max"]), (30.0, 157.5, 285.0))
-        self.assertEqual(rw.tempo_cnn_summary(0.0, [], []), {"status": "failed", "code": "too_short"})
-        self.assertEqual(rw.tempo_cnn_summary(float("nan"), [120.0], [row(90)]), {"status": "failed", "code": "non_finite"})
+        self.assertEqual(rw.tempo_cnn_summary([], []), {"status": "failed", "code": "too_short"})
         bad_row = row(90)
         bad_row[3] = float("inf")
-        self.assertEqual(rw.tempo_cnn_summary(120.0, [120.0], [bad_row])["code"], "non_finite")
-        fail = lambda **d: {"status": "failed", "code": "inconsistent_output", "detail": d}
-        for g, loc, pr, want in (
-                (120.0, [120.0], [row(90)[:255]], fail(code="class_count_mismatch", row=0, classes=255)),
-                (120.0, [120.0] * 3, [row(90)], fail(code="patch_count_mismatch", local=3, predictions=1)),
-                (120.0, [120.0], [row(90)] * 3, fail(code="patch_count_mismatch", local=1, predictions=3)),
-                (120.0, [121.0], [row(90)],  # local BPM disagrees with 30 + argmax: class 91 has 0, max 0.8
-                 fail(code="argmax_mismatch", patch=0, local_bpm=121.0, argmax_bpm=120.0, prob_gap=0.8)),
-                (120.0, [120.0, 300.0], [row(90)] * 2,  # 300 BPM has no class
-                 fail(code="argmax_mismatch", patch=1, local_bpm=300.0, argmax_bpm=120.0, prob_gap=None)),
-                (0.0, [120.0], [row(90)], fail(code="global_out_of_range", bpm=0.0)),
-                (290.0, [120.0], [row(90)], fail(code="global_out_of_range", bpm=290.0))):
-            d = rw.tempo_cnn_summary(g, loc, pr)
-            self.assertEqual(d, want)
-            v = json.loads(json.dumps(dict(RHYTHM_OUT_V22, tempo_cnn=d)))
-            self.assertIs(server.check_rhythm(v), v, d)
-        # near tie: the local BPM's class is within 1e-6 of the row maximum (float noise between two TF runs) -> done
-        tie = row(90, 0.5, 91)
-        tie[91] = 0.5 - 5e-7
-        d = rw.tempo_cnn_summary(121.0, [121.0], [tie])
-        self.assertEqual((d["status"], d["bpm"], d["top"][0]["bpm"]), ("done", 121.0, 120.0))
-        tie[91] = 0.5 - 2e-6  # beyond the tolerance: a real mismatch
-        self.assertEqual(rw.tempo_cnn_summary(121.0, [121.0], [tie])["detail"]["code"], "argmax_mismatch")
-        # patch counts off by exactly one: the shared leading patches, plus a warning for the caller
-        d = rw.tempo_cnn_summary(120.0, [120.0, 120.0], [row(90)])
-        self.assertEqual((d["status"], d["local_count"], d["top"][0]), ("done", 2, {"bpm": 120.0, "prob": 0.8}))
-        self.assertEqual(d.pop("_warning"),
-                         "tempo_cnn_patch_count_mismatch: TempoCNN 2 patches, predictions 1; top uses the first 1")
-        self.assertEqual(set(d), server.TC_KEYS["done"])
-        d = rw.tempo_cnn_summary(120.0, [120.0], [row(90), row(200)])  # the extra prediction row is ignored
-        self.assertEqual((d["status"], d["top"][0]["bpm"]), ("done", 120.0))
-        self.assertIn("_warning", d)
-        self.assertNotIn("_warning", rw.tempo_cnn_summary(120.0, [120.0], [row(90)]))
-        for out in ({"status": "failed", "code": "too_short"}, {"status": "unavailable", "reason": "sha256_mismatch"}):
+        self.assertEqual(rw.tempo_cnn_summary([bad_row], [False]), {"status": "failed", "code": "non_finite"})
+        d = rw.tempo_cnn_summary([row(90)[:255]], [False])
+        self.assertEqual(d, {"status": "failed", "code": "inconsistent_output",
+                             "detail": {"code": "class_count_mismatch", "row": 0, "classes": 255}})
+        for out in (d, {"status": "failed", "code": "too_short"}, {"status": "failed", "code": "no_audible_patches"},
+                    {"status": "unavailable", "reason": "sha256_mismatch"},
+                    # 0.3.1 files: TempoCNN vs predictor details and done without silent_patches stay valid
+                    {"status": "failed", "code": "inconsistent_output",
+                     "detail": {"code": "argmax_mismatch", "patch": 44, "local_bpm": 160.0, "argmax_bpm": 161.0,
+                                "prob_gap": 0.080054}}, TC_DONE):
             v = json.loads(json.dumps(dict(RHYTHM_OUT_V21, tempo_cnn=out)))
             self.assertIs(server.check_rhythm(v), v)
+        for bad in (-1, 1.0, True, None, 10 ** 6):
+            v = json.loads(json.dumps(dict(RHYTHM_OUT_V21, tempo_cnn=dict(TC_DONE, silent_patches=bad))))
+            self.assertIsNone(server.check_rhythm(v), bad)
+        v = json.loads(json.dumps(dict(RHYTHM_OUT_V21, tempo_cnn=dict(TC_FAILED, silent_patches=0))))
+        self.assertIsNone(server.check_rhythm(v))  # only on done
+
+    def test_patch_span(self):
+        a, b = rw.patch_span(0)
+        self.assertEqual((a, round(b, 3)), (0.0, 11.935))
+        self.assertEqual(round(rw.patch_span(44)[0], 2), 261.55)  # the real song's failing last patch (274 s)
 
     def test_beat_chords_vote_and_merge(self):
         step = 0.05
@@ -1173,6 +1213,32 @@ class StructureLogicTest(unittest.TestCase):
         self.assertEqual((es["window_s"], es["peaks"], es["quietest"]),
                          (3.0, [{"start": 0.0, "end": 2.7, "mean": -20.0}], {"start": 0.0, "end": 2.7, "mean": -20.0}))
         self.assertIsNone(rw.energy_summary([], 1.0))
+        self.assertEqual((es["silence_db"], es["silence_s"]), (-60.0, 0.0))
+
+    def test_energy_summary_skips_silence(self):
+        vals = [-120.0] * 10 + [-20.0] * 8 + [-30.0] * 8 + [-90.0] * 3 + [-25.0] * 9 + [-120.0] * 20
+        es = rw.energy_summary(vals, 58.0)
+        self.assertEqual((es["min"], es["silence_s"]), (-120.0, 33.0))  # min still shows the silence
+        self.assertEqual([(p["start"], p["end"], p["mean"]) for p in es["peaks"]],
+                         [(10.0, 18.0, -20.0), (29.0, 37.0, -25.0), (18.0, 26.0, -30.0)])
+        self.assertEqual(es["quietest"], {"start": 18.0, "end": 26.0, "mean": -30.0})  # not 0-8 at -120
+        v = json.loads(json.dumps(dict(RHYTHM_OUT_V30, energy_summary=rw.energy_summary(ENERGY["values"], 6.0))))
+        self.assertIs(server.check_rhythm(v), v)
+        es = rw.energy_summary([-120.0] * 30, 30.0)  # everything silent: no window to rank
+        self.assertEqual((es["peaks"], es["quietest"], es["silence_s"], es["median"]), ([], None, 30.0, -120.0))
+        v = json.loads(json.dumps(dict(RHYTHM_OUT_V30, energy=dict(ENERGY, values=[-120.0] * 6),
+                                       energy_summary=rw.energy_summary([-120.0] * 6, 6.0))))
+        self.assertIs(server.check_rhythm(v), v)
+        es = rw.energy_summary([-20.0, -70.0, -20.0], 3.0)  # short audio: one window, holding a silent value
+        self.assertEqual((es["peaks"], es["quietest"], es["silence_s"]), ([], None, 1.0))
+
+    def test_section_silent(self):
+        vals = [-120.0] * 5 + [-20.0] * 5
+        self.assertTrue(rw.section_silent(vals, 0.0, 5.0))
+        self.assertFalse(rw.section_silent(vals, 4.0, 10.0))
+        self.assertFalse(rw.section_silent(vals, 0.0, 10.0))  # exactly half: not more than half
+        self.assertTrue(rw.section_silent(vals, 0.0, 7.0))
+        self.assertTrue(rw.section_silent(vals, 2.2, 2.4))  # no midpoint inside: the window holding the middle
 
     def test_pick_boundaries(self):
         nov = [None] * 4 + [0.1, 0.2, 0.5, 0.2, 0.1, 0.16, 0.3, 0.1] + [0.05] * 8 + [None] * 4
@@ -1297,7 +1363,7 @@ class RealWorkerTest(unittest.TestCase):
             self.assertEqual((v["sample_rate"], v["chords_reliability"]), (44100, "low_reference"))
             self.assertIn(v["duration"], (30.0, 60.0))
             self.assertEqual(v["tool"]["essentia_version"], "2.1-beta6-dev")
-            self.assertEqual(v["tool"]["version"], "0.4.0")
+            self.assertEqual(v["tool"]["version"], "0.4.1")
             self.assertEqual(v["melody"]["status"], "done")
             self.assertEqual(len(v["melody_notes"]), v["melody"]["note_count"])
             e = v["energy"]
@@ -1500,6 +1566,47 @@ class RealWorkerTest(unittest.TestCase):
                 self.assertEqual((m["note_count"], m["voiced_fraction"], m["range"], m["scale_degrees"],
                                   v["melody_notes"]), (0, 0.0, None, None, []), kind)
                 self.assertIn("no_melody: no pitched note was found", v["warnings"])
+
+    def test_silent_edges(self):
+        # measured (worker 0.4.1): sections silence 0-9.96, A B A B, silence 69.97-90 (worker 0.4.0 labelled both
+        # silent ends A, the music B/C); tempo_cnn 120 with 4 of 14 patches excluded (0.4.0, same tempo code as 0.3.1:
+        # inconsistent_output, argmax_mismatch on the last patch, inside the silent tail); quietest 10-18 at -17.37
+        # instead of -120
+        wav = os.path.join(self.dir, "silent_edges.wav")
+        subprocess.run([ESSENTIA_PY, "-I", SYNTH, "silent_edges", "90", wav], check=True, timeout=120)
+        v = run_worker(wav)
+        self.assertIsNotNone(server.check_rhythm(v))
+        ss = v["sections"]
+        self.assertEqual([s["label"] for s in ss], ["silence", "A", "B", "A", "B", "silence"], ss)
+        self.assertAlmostEqual(ss[0]["end"], 10.0, delta=1.0)
+        self.assertAlmostEqual(ss[-1]["start"], 70.0, delta=1.0)
+        self.assertEqual((ss[0]["similarity_to_first"], ss[-1]["similarity_to_first"]), (None, None))
+        es = v["energy_summary"]
+        self.assertEqual((es["silence_s"], es["min"]), (30.0, -120.0))
+        self.assertGreater(es["quietest"]["mean"], -60.0)
+        self.assertTrue(10.0 <= es["quietest"]["start"] and es["quietest"]["end"] <= 70.0, es["quietest"])
+        for p in es["peaks"]:
+            self.assertTrue(10.0 <= p["start"] and p["end"] <= 70.0, p)
+        self.assertEqual([s["label"] for s in v["melody"]["sections"]], [s["label"] for s in ss])
+        self.assertEqual((v["melody"]["sections"][0]["note_count"], v["melody"]["sections"][-1]["note_count"]), (0, 0))
+        if MODEL_PRESENT:
+            tc = v["tempo_cnn"]
+            self.assertEqual(tc["status"], "done", tc)
+            self.assertAlmostEqual(tc["bpm"], 120.0, delta=2.0)
+            self.assertEqual((tc["local_count"] + tc["silent_patches"], tc["silent_patches"]), (14, 4))
+            self.assertGreaterEqual(tc["local_bpm_min"], 110.0)  # no vote from a silent patch
+
+    def test_all_silent(self):
+        wav = os.path.join(self.dir, "silence30.wav")
+        subprocess.run([ESSENTIA_PY, "-I", SYNTH, "silence", "30", wav], check=True, timeout=120)
+        v = run_worker(wav)
+        self.assertIsNotNone(server.check_rhythm(v))
+        self.assertEqual([s["label"] for s in v["sections"]], ["silence"])
+        es = v["energy_summary"]
+        self.assertEqual((es["peaks"], es["quietest"], es["silence_s"]), ([], None, 30.0))
+        self.assertEqual(v["melody"]["note_count"], 0)
+        if MODEL_PRESENT:
+            self.assertEqual(v["tempo_cnn"], {"status": "failed", "code": "no_audible_patches"})
 
     def test_sections_single_texture(self):
         # one loop, one texture: no boundary (interior novelty stays <= ~0.12, threshold 0.15)

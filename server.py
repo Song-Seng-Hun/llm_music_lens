@@ -1033,7 +1033,12 @@ def _rhythm_v22_ok(v):
         if d.get("code") != "inconsistent_output" or set(d) != {"status", "code", "detail"}:
             return False
         return _tc_detail_ok(d["detail"])
-    if set(d) != TC_KEYS[d["status"]]:
+    keys = set(d)
+    if d["status"] == "done" and "silent_patches" in d:  # worker 0.4.1: patches excluded as near-silent
+        if not _count(d["silent_patches"]):
+            return False
+        keys.discard("silent_patches")
+    if keys != TC_KEYS[d["status"]]:
         return False
     if d["status"] != "done":
         c = d["reason" if d["status"] == "unavailable" else "code"]
@@ -1053,6 +1058,8 @@ ENERGY_DB = (-120, 0)  # dBFS: the worker's floor and digital full scale
 ENERGY_MAX_VALUES = 601
 SECTIONS_MAX = 40
 RE_SECTION_LABEL = re.compile(r"\A[A-Z]{1,2}\Z")
+SILENCE_LABEL = "silence"  # worker 0.4.1: a mostly silent section; takes no letter
+ENERGY_SUMMARY_SILENCE_KEYS = {"silence_db", "silence_s"}  # worker 0.4.1
 SPAN_KEYS = {"start", "end", "mean"}
 SECTION_KEYS = {"start", "end", "label", "energy_mean", "top_chord", "similarity_to_first"}
 ENERGY_SUMMARY_KEYS = {"unit", "window_s", "min", "max", "median", "peaks", "quietest"}
@@ -1081,13 +1088,21 @@ def _rhythm_v30_ok(v, dur):
     if "energy_summary" in v:
         es = v["energy_summary"]
         if es is not None:
-            if not (isinstance(es, dict) and set(es) == ENERGY_SUMMARY_KEYS and _short_str(es["unit"], 16)
+            # 0.4.1 adds silence_db/silence_s; peaks and quietest then skip silent windows and may be empty/null
+            new = isinstance(es, dict) and set(es) == ENERGY_SUMMARY_KEYS | ENERGY_SUMMARY_SILENCE_KEYS
+            if not (isinstance(es, dict) and (new or set(es) == ENERGY_SUMMARY_KEYS) and _short_str(es["unit"], 16)
                     and _num(es["window_s"], 0.01, 600) and all(_num(es[k], *ENERGY_DB) for k in ("min", "max", "median"))
                     and es["min"] <= es["median"] <= es["max"] and isinstance(es["peaks"], list)
-                    and 1 <= len(es["peaks"]) <= 3):
+                    and (0 if new else 1) <= len(es["peaks"]) <= 3):
+                return False
+            if new and not (_num(es["silence_db"], *ENERGY_DB) and _num(es["silence_s"], 0, dur)
+                            and (es["quietest"] is None) == (not es["peaks"])):
                 return False
             lo, hi = es["min"] - 0.01, es["max"] + 0.01
-            if not (all(_span_ok(p, dur, lo, hi) for p in es["peaks"]) and _span_ok(es["quietest"], dur, lo, hi)):
+            if new:
+                lo = max(lo, es["silence_db"] - 0.01)  # windows holding a value below the threshold are skipped
+            if not (all(_span_ok(p, dur, lo, hi) for p in es["peaks"])
+                    and ((new and es["quietest"] is None) or _span_ok(es["quietest"], dur, lo, hi))):
                 return False
             pk = es["peaks"]
             if any(b["mean"] > a["mean"] for a, b in zip(pk, pk[1:])):  # loudest first
@@ -1103,9 +1118,16 @@ def _rhythm_v30_ok(v, dur):
         for r in ss:
             if not (isinstance(r, dict) and set(r) == SECTION_KEYS and _num(r["start"], 0, dur)
                     and _num(r["end"], 0, dur) and r["start"] < r["end"] and r["start"] >= prev_end
-                    and isinstance(r["label"], str) and RE_SECTION_LABEL.match(r["label"])
-                    and _num(r["energy_mean"], *ENERGY_DB) and _num(r["similarity_to_first"], 0, 1)
+                    and _num(r["energy_mean"], *ENERGY_DB)
                     and (r["top_chord"] is None or _short_str(r["top_chord"], 16))):
+                return False
+            if r["label"] == SILENCE_LABEL:  # 0.4.1: no letter, no similarity; letter order skips it
+                if r["similarity_to_first"] is not None:
+                    return False
+                prev_end = r["end"]
+                continue
+            if not (isinstance(r["label"], str) and RE_SECTION_LABEL.match(r["label"])
+                    and _num(r["similarity_to_first"], 0, 1)):
                 return False
             k = _label_index(r["label"])
             if k > seen:  # labels are letters in order of first appearance: a new one is the next letter
@@ -1274,7 +1296,8 @@ def rhythm_summary(v):
             "chords_grid": v.get("chords_grid"), "chords_reliability": v.get("chords_reliability"),
             "energy_summary": v.get("energy_summary"), "sections": v.get("sections"),
             "sections_method": v.get("sections_method"), "sections_reliability": v.get("sections_reliability"),
-            "melody": v.get("melody"), "downbeats": v["downbeats"], "duration": v["duration"], "tool": v["tool"], "warnings": v["warnings"]}
+            "melody": v.get("melody"), "downbeats": v["downbeats"], "duration": v["duration"], "tool": v["tool"],
+            "warnings": v["warnings"]}
 
 
 def rhythm_page(rid, v, layer, start, end, cursor, limit):

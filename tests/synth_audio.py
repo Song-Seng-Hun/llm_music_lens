@@ -11,8 +11,11 @@ KIND: click (120 BPM click track), chords (C - Am - F - G, 2 s each, with a soft
       chords),
       melody_ab (abab plus a melody: A blocks carry MELODY_LOW (C4..G4, C major), B blocks MELODY_HIGH (E5..B5,
       E major), 0.5 s per note; best with SECONDS = 60),
-      silence (digital silence)
+      silence (digital silence),
+      silent_edges (10 s of digital silence, then melody_ab, then 20 s of digital silence; SECONDS is the total, best
+      90 = 10 + 60 + 20)
 """
+import os
 import sys
 import wave
 
@@ -109,6 +112,15 @@ def melody_line(n, notes, note_seconds=0.5, gain=0.15, offset=0):
 
 def main(kind, seconds, path):
     n = int(float(seconds) * RATE)
+    if kind == "silent_edges":
+        head, tail = 10 * RATE, 20 * RATE
+        body = os.path.join(os.path.dirname(path), ".body-" + os.path.basename(path))
+        main("melody_ab", (n - head - tail) / float(RATE), body)
+        with wave.open(body, "rb") as w:
+            mid = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2")
+        os.unlink(body)
+        write(path, np.concatenate([np.zeros(head, "<i2"), mid, np.zeros(tail, "<i2")]))
+        return
     if kind == "click":
         y = clicks(n)
     elif kind in ("chords", "mix"):
@@ -146,12 +158,15 @@ def main(kind, seconds, path):
     else:
         raise SystemExit("unknown kind")
     y = np.clip(y, -0.99, 0.99)
-    pcm = (y * 32767).astype("<i2").tobytes()
+    write(path, (y * 32767).astype("<i2"))
+
+
+def write(path, pcm):
     with wave.open(path, "wb") as w:
         w.setnchannels(1)
         w.setsampwidth(2)
         w.setframerate(RATE)
-        w.writeframes(pcm)
+        w.writeframes(pcm.tobytes())
 
 
 if __name__ == "__main__":

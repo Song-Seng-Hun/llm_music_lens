@@ -134,7 +134,7 @@ API:
   failed re-run leaves the old file in place. A stored file with the current worker is also recomputed when its
   optional `tempo_cnn` is `unavailable` (any reason, e.g. model restored later) or `failed` with `inference_error` /
   `dependency_missing`, since those causes can change without a worker change; deterministic `too_short`,
-  `non_finite` and `inconsistent_output` stay cached. While the model stays missing, every rhythm request therefore
+  `non_finite`, `inconsistent_output` and (0.4.1) `no_audible_patches` stay cached. While the model stays missing, every rhythm request therefore
   reruns the worker (about 15 s for a 4 min song). Only the worker file is tracked: a changed Essentia python with the same
   worker file is not detected (restart is needed after editing the worker in place). If the worker file cannot be
   read at start, its hash is null and nothing is reused (every rhythm request recomputes); that alone does not make
@@ -176,7 +176,7 @@ API:
 `very_low` [0, 1), `low` [1, 1.5], `good` (1.5, 3.5] (Essentia: about 80% AMLt), `excellent` above 3.5. It is
 Essentia's guide, not a calibration on the team's music.
 
-Worker output (worker 0.4.0): `bpm`, `bpm_confidence` (RhythmExtractor2013 multifeature, native 0..~5.32,
+Worker output (worker 0.4.1): `bpm`, `bpm_confidence` (RhythmExtractor2013 multifeature, native 0..~5.32,
 uncalibrated), `bpm_estimates` (top 5 shares), `bpm_alternatives` (`[bpm/2, bpm*2]`, 2 decimals, only values within
 40..300; empty when bpm is 0) with `bpm_alternatives_note`, `double_tempo_evidence` with
 `double_tempo_evidence_note` (diagnostic, see below), `tempo_cnn` (learned estimate, see below), `beats` (s, ms rounding),
@@ -187,7 +187,8 @@ count before the beat vote, stored file only), `chords_reliability: "low_referen
 resampled from 16 kHz because RhythmExtractor2013 assumes 44.1 kHz), `duration`, `tool` (name, version,
 `essentia_version`), `warnings` (`short_audio` < 10 s, `near_silent`, `no_beats`, `low_bpm_confidence` < 1.5,
 `low_key_strength` < 0.5, `key_changes` when there is more than one key section, `no_chords`,
-`double_tempo_evidence_unavailable`, `no_sections`, `sections_single`, `tempo_cnn_patch_count_mismatch`, `no_melody`, `melody_failed`, `melody_scale_degrees_unavailable`,
+`double_tempo_evidence_unavailable`, `no_sections`, `sections_single`, `tempo_cnn_patch_count_mismatch` (0.3.1-0.4.0
+only), `no_melody`, `melody_failed`, `melody_scale_degrees_unavailable`,
 `melody_notes_capped`), `energy`, `energy_summary`, `sections`, `sections_method`, `sections_reliability:
 "low_reference"` (see "Energy and sections" below), `melody` and `melody_notes` (see "Melody features" below). Audio under 1 s is
 refused (`too_short`).
@@ -286,6 +287,25 @@ the same file: 6.3 s, 0.99 GB).
   kick100mid (effective 200 BPM pulse) 100.04 / 100 / 100 .863, 101 .025, 99 .014; 600 s loop 120.0 / 120 (local
   120-121, 99 patches). So on the midpoint-kick track the model also chose 100, not 200: it is not a fix for the
   halving above by itself. Real songs: not measured; the team will compare it on the same 8 songs.
+- `tempo_cnn` in worker 0.4.1: one source, near-silent patches excluded. Evidence: a real song (274 s, about 21 s of
+  near-silence at the end) came back `inconsistent_output` / `argmax_mismatch` on patch 44 (local 160, argmax 161,
+  `prob_gap` 0.08), and the synthetic `silent_edges` track (10 s silence, 60 s music, 20 s silence) reproduced it
+  with 0.4.0 (patch 13, the last one, inside the silent tail; local 161, argmax 155, gap 0.04). So TempoCNN and
+  `TensorflowPredictTempoCNN` disagree for real on near-silent input; the 0.3.1 batch-size explanation was wrong.
+  0.4.1 no longer calls `TempoCNN`. Everything comes from the predictor's per-patch softmax (same model, `batchSize`
+  64, `patchHopSize` 128, `lastPatchMode` discard): local BPM = 30 + argmax per patch (ties: lower class); `bpm` =
+  the most frequent local BPM (Essentia documents TempoCNN's global tempo as an aggregation of `localTempo` and
+  recommends majority voting; that is what 0.4.1 does itself), ties by higher mean probability, then lower BPM;
+  `top` = mean softmax as before. First, each patch whose span (start 5.944 i s, length 11.935 s: 256 frames of
+  1024 samples, hop 512, at 11025 Hz, patch hop 128 frames) has more than half of its 1 s energy windows below
+  -60 dBFS (the sections rule below) is excluded; `silent_patches` counts them and `local_count` is the audible
+  patches. A patch-RMS rule was tried first and kept the patch of 10 s silence + 2 s music, which voted 30 BPM. All
+  patches excluded: `{"status":"failed","code":"no_audible_patches"}` (deterministic, cached). The cross-call
+  consistency failures (`patch_count_mismatch`, `argmax_mismatch`, `global_out_of_range`) can no longer occur;
+  stored 0.3.1/0.4.0 files with those `detail`s stay valid, and so do `done` rows without `silent_patches`. On every
+  audible synthetic track (click, kick100, kick100mid 30 s, abab 60 s, chords 241 s, C-Am-F-G loop and melody 600 s)
+  0.4.1 gives the same `bpm`, `top` and `local_count` as 0.3.1/0.4.0; on `silent_edges` it gives 120 with 4 of 14
+  patches excluded (local 120-121). Real songs: not re-measured.
 - Key sections are a DSP estimate on nominal 20 s windows (a final tail under 10 s is merged, so the last window can
   approach 30 s). Window resolution is not a measured error bound: a boundary lands on a window edge, and a window
   straddling a change can report a blended or third key. Synthetic test: C major 0-30 s then
@@ -310,11 +330,15 @@ not a transcription. There are no downbeats and no named parts.
   (Stevens power law, unitless) because dBFS is a plain, reproducible unit agents can compare across songs of the
   same master; it is not perceptual loudness (no K/A weighting: bass-heavy passages read louder than they sound,
   and it is not LUFS).
-- `energy_summary` `{unit, window_s: 8, min, max, median, peaks, quietest}`: `peaks` = the 3 loudest
+- `energy_summary` `{unit, window_s: 8, min, max, median, peaks, quietest, silence_db, silence_s}`
+  (`silence_db`/`silence_s` from worker 0.4.1): `peaks` = the 3 loudest
   non-overlapping 8 s windows (`{start, end, mean}`, plain mean of the dB values, sliding in 1 s steps, chosen
   greedily, loudest first, ties earliest), `quietest` = the lowest 8 s window. 8 s is about 4 bars at 120 BPM, one
   phrase: long enough to ignore single hits, short enough to sit inside one section. Audio under 8 s uses one
-  window of everything.
+  window of everything. Worker 0.4.1: peaks and quietest consider only windows with no value below `silence_db`
+  (-60 dBFS), so a silent intro or tail is no longer the "quietest" part (the real 274 s song gave quietest
+  257-265 at -120 with 0.3.1); `silence_s` = seconds of 1 s values below it, and `min` still shows the floor. No
+  window without silence (all silent, or audio under 8 s holding a silent second): `peaks: []`, `quietest: null`.
 - `sections` `[{start, end, label, energy_mean, top_chord, similarity_to_first}]`, contiguous from 0 to
   `duration`, at most 40. Method (`sections_method` states it in short form):
   1. Beat-synchronous features: per beat interval the mean 12-bin HPCP chroma (the chord path's frames, frame
@@ -339,13 +363,23 @@ not a transcription. There are no downbeats and no named parts.
      similarity (1.0 for a group's first section).
   5. `energy_mean`: mean of the energy values whose window midpoint lies in the section; `top_chord`: the beat-grid
      chord label with the most time inside the section (ties: earliest), null when no chord overlaps.
+  6. Silence (worker 0.4.1): a section with more than half of its 1 s energy windows (by midpoint) below -60 dBFS
+     gets `label: "silence"` and `similarity_to_first: null`; it takes no letter and is no grouping reference, so
+     letters A, B, ... count only audible sections (worker 0.4.0, same sections code as 0.3.x, labelled the silent intro and tail of `silent_edges` with
+     one letter, A, and the music B and C). -60 dBFS is far below soft music (synthetic soft loops sit near -26 dBFS) and
+     far above digital silence (-120 floor); room tone and fades are not calibrated. Boundaries are unchanged
+     (same novelty, threshold 0.15, grouping 0.75): silence gets its own section only where the novelty finds a
+     boundary (16 beat intervals of context needed; on `silent_edges` the tracker kept placing beats through the
+     silence and the boundaries fell within 0.04 s of the true edges). A shorter silent head or tail stays inside its
+     neighbour. All silent with a beat grid: every section is `silence`.
   No beats: `sections: []` and warning `no_sections`. Fewer than 32 beat intervals: one section `A` and warning
   `sections_single`. Deterministic (fixed parameters, no random state).
 - Honest limits: labels are similarity groups, not verse/chorus/bridge, and two different parts with the same
   chords and timbre get one letter; a part that differs only in melody or lyrics is invisible to these features.
   Boundaries sit on beat times and need 16 beat intervals of context at both ends (about 8 s at 120 BPM, about
   5 s at 200 BPM). A section whose beats carry no chroma (silence, very quiet or peak-free material) gets chroma
-  similarity 0, so even an identical repeat scores at most 0.5 and receives a new letter. Untested on real songs; `sections_reliability:
+  similarity 0, so even an identical repeat scores at most 0.5 and receives a new letter (unless it is quiet enough to
+  be `silence`, 0.4.1). Untested on real songs; `sections_reliability:
   "low_reference"`. Synthetic results (worker 0.3.0): A-B-A-B in 15 s blocks (A = C-Am-F-G with 3 soft partials,
   B = E-C#m-A-B with 8 sawtooth-like partials at about +8 dB, soft 120 BPM pulse) gave A 0-15, B 15-30, A 30-45,
   B 45-60 (boundaries exactly on the block edges), energy_mean A -26.68 / B -18.77 dB, similarity_to_first >=
@@ -416,6 +450,10 @@ balance, which scale degrees it sits on, where it climbs). Not a transcription a
 - Honest limits: not a transcription; octave errors (a harmonic or subharmonic taken as the pitch) and
   accompaniment tracking are expected on real mixes; vibrato and slides become several short notes or one long one;
   no word-to-note alignment; scale degrees inherit the global key estimate. **Untested on real songs.**
+
+Worker 0.4.1 runtime (600 s, 2 runs each, same session): melody track 9.24 s and 1.13-1.14 GB peak RSS vs 0.4.0
+9.33-9.35 s and 1.14 GB; C-Am-F-G loop 8.98-9.02 s vs 9.11-9.13 s (the second TempoCNN call is gone). Stored file
++54 B (`silence_db`, `silence_s`, `silent_patches`).
 
 ## Runtime layout (production)
 
