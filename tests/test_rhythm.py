@@ -1574,7 +1574,7 @@ VERSES = ("あさのひかりがまどをてらすころ", "かぜがふいて�
 
 
 class LyricLogicTest(unittest.TestCase):
-    """lyric_repeats (worker 0.4.3): pure Python on ASR words; output checked by the server validator too."""
+    """lyric_repeats (worker 0.4.3, approximate matching 0.4.4): pure Python on ASR words; output checked by the server validator too."""
 
     def check(self, d, dur):
         self.assertTrue(server._lyric_repeats_ok(json.loads(json.dumps(d)), dur + 0.5), d)
@@ -1761,6 +1761,67 @@ class LyricLogicTest(unittest.TestCase):
         self.assertIn({"time": 8, "value": 0.9, "selected": True}, d["peaks"])
 
 
+class LyricApproxTest(unittest.TestCase):
+    """lyric_repeats 0.4.4: katakana fold and approximate 10-char windows (char units only)."""
+
+    def check(self, d, dur):
+        self.assertTrue(server._lyric_repeats_ok(json.loads(json.dumps(d)), dur + 0.5), d)
+
+    def test_misspelled_chorus_found_edges_trimmed(self):
+        # one char changed every 5: no exact 8-gram survives, the 10-char windows within 2 edits do
+        bad = "きみのなまえをよんでいるよずっと"
+        bad = bad[:4] + "ば" + bad[5:9] + "た" + bad[10:14] + "し" + bad[15:]
+        words, end = _song([VERSES[0], CHORUS, VERSES[1], VERSES[2], bad])
+        d, warns = rw.lyric_repeats(words, end)
+        self.check(d, end)
+        self.assertEqual((d["status"], warns, d["group_count"]), ("done", [], 1))
+        self.assertEqual(len(d["blocks"]), 2)
+        starts = [w[1] for w in words if w[0] == "き" and words[words.index(w) + 1][0] == "み"]
+        self.assertEqual([b["start"] for b in d["blocks"]], starts)  # trimmed: the verse before is not covered
+        rw_prev = rw.LYRIC_APPROX_K
+        try:
+            rw.LYRIC_APPROX_K = 0  # exact windows only: nothing matches
+            self.assertEqual(rw.lyric_repeats(words, end)[0]["blocks"], [])
+        finally:
+            rw.LYRIC_APPROX_K = rw_prev
+
+    def test_katakana_fold(self):
+        self.assertEqual(rw.kana_fold("ラララ ヴァンパイア ゃ"), "ららら ゔぁんぱいあ ゃ")
+        words, end = _song([VERSES[0], CHORUS, VERSES[1], VERSES[2], rw.kana_fold(CHORUS).translate(
+            {ord(c): ord(c) + 0x60 for c in "きみのなまえをよんでいるよずっと"})])
+        d, _ = rw.lyric_repeats(words, end)
+        self.assertEqual(len(d["blocks"]), 2)  # the same chorus in katakana matches
+
+    def test_close_windows_not_paired(self):
+        # the same misspelled line within 15 s is a doubled line, not a repeat
+        bad = CHORUS[:6] + "x" + CHORUS[7:]
+        words, end = _song([CHORUS, bad, VERSES[0], VERSES[1]], gap=0.5)
+        self.assertEqual(rw.lyric_repeats(words, end)[0]["blocks"], [])
+
+    def test_pairs_capped_and_frequent_seeds_skipped(self):
+        units = rw.lyric_units(_song([VERSES[0], CHORUS, VERSES[1], VERSES[2], CHORUS])[0], 60.0)[0]
+        prev = rw.LYRIC_APPROX_MAX_CHECKS
+        try:
+            rw.LYRIC_APPROX_MAX_CHECKS = 3
+            pairs, capped = rw.lyric_approx_pairs(units)
+            self.assertTrue(capped)
+            self.assertLessEqual(len(pairs), 3)
+            words, end = _song([VERSES[0], CHORUS, VERSES[1], VERSES[2], CHORUS])
+            self.assertEqual(rw.lyric_repeats(words, end)[1], ["lyric_repeats_approx_capped: 3 window checks"])
+        finally:
+            rw.LYRIC_APPROX_MAX_CHECKS = prev
+        # a seed repeated more than LYRIC_APPROX_SEED_MAX times gives no approximate pair
+        filler = [(c, 0.2 * i, 0.2 * i + 0.18) for i, c in enumerate("らららら" * 70)]
+        self.assertEqual(rw.lyric_approx_pairs(filler), ([], False))
+        # bounded on a hard input: 12000 chars over 4 letters stops at the check cap
+        import random
+        rnd = random.Random(1)
+        words = [(rnd.choice("あいうえ"), i * 0.05, i * 0.05 + 0.05) for i in range(12000)]
+        d, warns = rw.lyric_repeats(words, 600.0)
+        self.check(d, 600.0)
+        self.assertEqual(warns, ["lyric_repeats_approx_capped: %d window checks" % rw.LYRIC_APPROX_MAX_CHECKS])
+
+
 class MergeLogicTest(unittest.TestCase):
     """Worker 0.4.2 note merge (pure; the 0.2 s contour median needs numpy and is covered by RealWorkerTest)."""
 
@@ -1932,7 +1993,7 @@ class RealWorkerTest(unittest.TestCase):
             self.assertEqual((v["sample_rate"], v["chords_reliability"]), (44100, "low_reference"))
             self.assertIn(v["duration"], (30.0, 60.0))
             self.assertEqual(v["tool"]["essentia_version"], "2.1-beta6-dev")
-            self.assertEqual(v["tool"]["version"], "0.4.3")
+            self.assertEqual(v["tool"]["version"], "0.4.4")
             self.assertEqual(v["lyric_repeats"], {"status": "unavailable", "reason": "no_words_input"})
             sd = v["structure_debug"]
             self.assertEqual([p["time"] for p in sd["peaks"] if p["selected"]], [x["start"] for x in v["sections"][1:]])

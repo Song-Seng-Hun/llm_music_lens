@@ -134,6 +134,13 @@ Choices:
   0, 1, ... in order of first appearance). At most LYRIC_MAX_BLOCKS (40) blocks (the longest; warning
   lyric_repeats_capped). Fewer than LYRIC_MIN_CHARS (50) normalized characters: unavailable too_little_text (no
   word at all: no_words). Independent of sections; clients compare. Untested on real English or Korean songs.
+  0.4.4 (char units only): katakana is folded to hiragana, and besides exact 8-grams, LYRIC_APPROX_W (10) char
+  windows within LYRIC_APPROX_K (2) edits whose starts are >= 15 s apart count as a repeat pair, trimmed at both ends
+  while the chars at the same offset differ (candidates share a
+  4-char seed; seeds seen > 64 times skipped; at most 200,000 checks, else warning lyric_repeats_approx_capped).
+  Reason: Whisper large-v3-turbo misspells a chorus differently each time, so exact 8-grams found only 36% of the
+  repeated reference-lyric characters on 7 J-pop songs; this rule found 65% at precision 0.97 (scratch check
+  2026-10-28, j-lyric references; tuned on those 7 songs only).
 """
 import errno
 import hashlib
@@ -149,7 +156,7 @@ import sys
 import unicodedata
 import wave
 
-TOOL = {"name": "music-lens-rhythm-worker", "version": "0.4.3"}
+TOOL = {"name": "music-lens-rhythm-worker", "version": "0.4.4"}
 SRC_RATE = 16000
 RATE = 44100
 MAX_SECONDS = 600.0
@@ -232,9 +239,14 @@ LYRIC_JOIN = 3.0  # s; covered units closer than this join one block
 LYRIC_MIN_BLOCK = 4.0  # s; shorter blocks are dropped
 LYRIC_MIN_CHARS = 50  # normalized characters below which lyric_repeats is unavailable
 LYRIC_MAX_BLOCKS = 40
+LYRIC_APPROX_W = 10  # chars; char units also match windows this long within LYRIC_APPROX_K edits (0.4.4)
+LYRIC_APPROX_K = 2
+LYRIC_APPROX_SEED = 4  # chars; a window pair is checked only when both contain the same 4-char seed
+LYRIC_APPROX_SEED_MAX = 64  # seeds occurring more often than this are skipped (filler such as "lalala")
+LYRIC_APPROX_MAX_CHECKS = 200000  # window-pair edit-distance checks per song; beyond: warning, matching stops
 RE_REASON = re.compile(r"\A[a-z][a-z0-9_]{0,63}\Z")  # the server's code pattern
-LYRIC_METHOD = ("NFKC lowercase, letters/digits/marks only; char 8-gram (word 4-gram for space-delimited words) "
-                "repeats >= 15 s apart; covered units joined within 3 s; blocks >= 4 s; groups share an n-gram")
+LYRIC_METHOD = ("NFKC lowercase, letters/digits/marks, katakana as hiragana; char 8-gram or 10-char window within "
+                "2 edits (word 4-gram) repeats >= 15 s apart; joined within 3 s; blocks >= 4 s; groups share a repeat")
 LYRIC_NOTE = "repeated ASR text, likely chorus/hook; not verified, depends on ASR quality"
 SEC_METHOD = ("beat-sync HPCP12+MFCC2-13(z) cosine SSM; Foote checkerboard 2x16 beats (full kernel only), "
               "novelty>=0.15, min 8 beats; groups: segment-mean similarity>=0.75 to the group's first segment")
@@ -754,6 +766,60 @@ def _parse_words(data):
     return out, None
 
 
+def kana_fold(text):
+    """Katakana U+30A1-U+30F6 -> hiragana (same sound, so one ASR writing a line in katakana still matches)."""
+    return "".join(chr(ord(c) - 0x60) if "\u30a1" <= c <= "\u30f6" else c for c in text)
+
+
+def _within_edits(a, b, k):
+    """Levenshtein distance of strings a, b <= k (row minimum cut-off)."""
+    prev = list(range(len(b) + 1))
+    for i in range(1, len(a) + 1):
+        cur = [i] + [0] * len(b)
+        for j in range(1, len(b) + 1):
+            cur[j] = min(prev[j - 1] + (a[i - 1] != b[j - 1]), prev[j] + 1, cur[j - 1] + 1)
+        if min(cur) > k:
+            return False
+        prev = cur
+    return prev[-1] <= k
+
+
+def lyric_approx_pairs(units):
+    """Char units -> ([(i, j, m)] matched spans: LYRIC_APPROX_W-char windows within LYRIC_APPROX_K edits whose
+    starts are >= LYRIC_SPREAD apart, trimmed at both ends while the chars at the same offset differ (so a window
+    reaching past a chorus edge does not cover the neighbouring line), i, j = trimmed starts, m = length; capped flag). Candidates share a LYRIC_APPROX_SEED-char seed at the same
+    offset (every offset 0..W-SEED); seeds occurring > LYRIC_APPROX_SEED_MAX times are skipped. Deterministic:
+    seeds in first-occurrence order, pairs in index order."""
+    s = "".join(u[0] for u in units)
+    w, n = LYRIC_APPROX_W, len(s)
+    idx = {}
+    for i in range(n - LYRIC_APPROX_SEED + 1):
+        idx.setdefault(s[i:i + LYRIC_APPROX_SEED], []).append(i)
+    seen, out, checks = set(), [], 0
+    for ps in idx.values():
+        if len(ps) < 2 or len(ps) > LYRIC_APPROX_SEED_MAX:
+            continue
+        for x in range(len(ps)):
+            for y in range(x + 1, len(ps)):
+                for off in range(w - LYRIC_APPROX_SEED + 1):
+                    i, j = ps[x] - off, ps[y] - off
+                    if i < 0 or j + w > n or (i, j) in seen or units[j][1] - units[i][1] < LYRIC_SPREAD:
+                        continue
+                    if checks >= LYRIC_APPROX_MAX_CHECKS:
+                        return out, True
+                    seen.add((i, j))
+                    checks += 1
+                    if _within_edits(s[i:i + w], s[j:j + w], LYRIC_APPROX_K):
+                        a, b = 0, w
+                        while a < b and s[i + a] != s[j + a]:
+                            a += 1
+                        while b > a and s[i + b - 1] != s[j + b - 1]:
+                            b -= 1
+                        if b > a:
+                            out.append((i + a, j + a, b - a))
+    return out, False
+
+
 def lyric_units(words, duration):
     """(units [(unit, t0, t1)], unit kind, normalized char count). Words sorted by start (stable), clamped to
     [0, duration]; empty normalized words dropped. Char units split their word span evenly."""
@@ -769,6 +835,7 @@ def lyric_units(words, duration):
         return toks, kind, nchar
     units = []
     for t, a, b in toks:
+        t = kana_fold(t)
         d = (b - a) / len(t)
         units += [(c, a + d * k, a + d * (k + 1)) for k, c in enumerate(t)]
     return units, kind, nchar
@@ -787,15 +854,21 @@ def lyric_repeats(words, duration, reason=None):
     pos = {}
     for i in range(len(units) - n + 1):
         pos.setdefault(tuple(u[0] for u in units[i:i + n]), []).append(i)
-    reps = []  # occurrence start lists of the repeated n-grams
-    covered = [False] * len(units)
+    reps = []  # (occurrence starts, length) of the repeats: exact n-grams, then approximate char windows
     for ps in pos.values():
         ts = [units[p][1] for p in ps]
-        if len(ps) < 2 or max(ts) - min(ts) < LYRIC_SPREAD:
-            continue
-        reps.append(ps)
+        if len(ps) >= 2 and max(ts) - min(ts) >= LYRIC_SPREAD:
+            reps.append((ps, n))
+    warns = []
+    if kind == "char":
+        pairs, capped = lyric_approx_pairs(units)
+        reps += [([i, j], m) for i, j, m in pairs]
+        if capped:
+            warns.append("lyric_repeats_approx_capped: %d window checks" % LYRIC_APPROX_MAX_CHECKS)
+    covered = [False] * len(units)
+    for ps, m in reps:
         for p in ps:
-            for k in range(p, p + n):
+            for k in range(p, p + m):
                 covered[k] = True
     blocks, of = [], [None] * len(units)  # [start, end], unit index -> block index
     for i, cv in enumerate(covered):
@@ -808,7 +881,6 @@ def lyric_repeats(words, duration, reason=None):
             blocks.append([a, b])
         of[i] = len(blocks) - 1
     kept = [k for k, (a, b) in enumerate(blocks) if b - a >= LYRIC_MIN_BLOCK]
-    warns = []
     if len(kept) > LYRIC_MAX_BLOCKS:
         warns.append("lyric_repeats_capped: %d blocks, the %d longest kept" % (len(kept), LYRIC_MAX_BLOCKS))
         kept = sorted(sorted(kept, key=lambda k: (-(blocks[k][1] - blocks[k][0]), k))[:LYRIC_MAX_BLOCKS])
@@ -820,10 +892,10 @@ def lyric_repeats(words, duration, reason=None):
             parent[k] = parent[parent[k]]
             k = parent[k]
         return k
-    for ps in reps:
+    for ps, m in reps:
         # every retained block touched by any unit of any occurrence (an occurrence split by a >3 s pause
         # spans several blocks)
-        bs = sorted({of[k] for p in ps for k in range(p, p + n) if of[k] in kset})
+        bs = sorted({of[k] for p in ps for k in range(p, p + m) if of[k] in kset})
         for k in bs[1:]:
             ra, rb = root(bs[0]), root(k)
             if ra != rb:
