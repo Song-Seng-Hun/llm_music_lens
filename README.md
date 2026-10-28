@@ -337,7 +337,9 @@ not a transcription. There are no downbeats and no named parts.
   `sections_single`. Deterministic (fixed parameters, no random state).
 - Honest limits: labels are similarity groups, not verse/chorus/bridge, and two different parts with the same
   chords and timbre get one letter; a part that differs only in melody or lyrics is invisible to these features.
-  Boundaries sit on beat times, never within 8 s of the ends. Untested on real songs; `sections_reliability:
+  Boundaries sit on beat times and need 16 beat intervals of context at both ends (about 8 s at 120 BPM, about
+  5 s at 200 BPM). A section whose beats carry no chroma (silence, very quiet or peak-free material) gets chroma
+  similarity 0, so even an identical repeat scores at most 0.5 and receives a new letter. Untested on real songs; `sections_reliability:
   "low_reference"`. Synthetic results (worker 0.3.0): A-B-A-B in 15 s blocks (A = C-Am-F-G with 3 soft partials,
   B = E-C#m-A-B with 8 sawtooth-like partials at about +8 dB, soft 120 BPM pulse) gave A 0-15, B 15-30, A 30-45,
   B 45-60 (boundaries exactly on the block edges), energy_mean A -26.68 / B -18.77 dB, similarity_to_first >=
