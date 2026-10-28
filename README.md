@@ -197,7 +197,7 @@ resampled from 16 kHz because RhythmExtractor2013 assumes 44.1 kHz), `duration`,
 `low_key_strength` < 0.5, `key_changes` when there is more than one key section, `no_chords`,
 `double_tempo_evidence_unavailable`, `no_sections`, `sections_single`, `tempo_cnn_patch_count_mismatch` (0.3.1-0.4.0
 only), `no_melody`, `melody_failed`, `melody_scale_degrees_unavailable`,
-`melody_notes_capped`, `lyric_repeats_capped` (0.4.3)), `energy`, `energy_summary`, `sections`, `sections_method`, `sections_reliability:
+`melody_notes_capped`, `lyric_repeats_capped` (0.4.3), `lyric_repeats_approx_capped` (0.4.4)), `energy`, `energy_summary`, `sections`, `sections_method`, `sections_reliability:
 "low_reference"` (see "Energy and sections" below), `melody` and `melody_notes` (see "Melody features" below), and (worker 0.4.3) `structure_debug` (stored file only, see
 "Energy and sections") and `lyric_repeats` (see "Lyric repeats"). Audio under 1 s is refused (`too_short`).
 
@@ -533,7 +533,7 @@ Worker 0.4.1 runtime (600 s, 2 runs each, same session): melody track 9.24 s and
 9.33-9.35 s and 1.14 GB; C-Am-F-G loop 8.98-9.02 s vs 9.11-9.13 s (the second TempoCNN call is gone). Stored file
 +54 B (`silence_db`, `silence_s`, `silent_patches`).
 
-### Lyric repeats (worker 0.4.3)
+### Lyric repeats (worker 0.4.3, approximate matching 0.4.4)
 
 Purpose: where the words repeat (likely chorus or hook), independent of the audio sections. Evidence: on the team's 8
 real songs (worker 0.4.2) repeated-lyric blocks often started or ended 10-60 s away from any section boundary, and one
@@ -562,6 +562,17 @@ repeats are reported on their own and clients compare the two.
   occurrence split by a pause longer than 3 s links all its blocks; group ids 0, 1, ... in order of first
   appearance). A group can have one block
   when the repetition lies inside it (a long block holding a line sung twice >= 15 s apart).
+- Approximate matching (worker 0.4.4, char units only): katakana is folded to hiragana before matching, and besides
+  exact 8-grams, two **10-character windows within 2 edits** (Levenshtein) whose starts are >= 15 s apart count as
+  one repeat, trimmed at both ends while the characters at the same offset differ, so a window reaching past a
+  chorus edge does not cover the next line. Candidates must share a 4-character seed at the same offset; a seed
+  seen more than 64 times is skipped (filler such as "lalala", still caught by the exact 8-grams), and at most
+  200,000 window checks run per song (then warning `lyric_repeats_approx_capped` and matching stops; a 12,000-char
+  random 4-letter input reaches the cap in about 3 s). Why: Whisper large-v3-turbo (Music Lens local 0.2.2)
+  misspells a chorus differently each time, so on 7 team songs scored against reference lyrics from j-lyric
+  (repeats = exact 8-grams of the reference text, ASR chars aligned by Levenshtein; scratch check 2026-10-28, numbers
+  only), exact 8-grams found 36% of the repeated reference characters at precision 0.99, this rule 65% at 0.97.
+  Tuned on those 7 songs only. Word mode (English, Korean) is unchanged.
 - Output (summary and stored file): `done` `{status, method, unit: "char"|"word", n, blocks: [{start, end, group}],
   group_count, coverage_s, note}`: blocks sorted, non-overlapping, inside the duration, at most 40 (more: the 40
   longest, warning `lyric_repeats_capped`); `coverage_s` = summed block length. `unavailable` `{status, reason}`:
