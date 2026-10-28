@@ -1,6 +1,6 @@
 ---
 name: music-lens-remote
-description: "Listen to an audio file from the Windows PC through the Mac's Music Lens LAN API: word timings (Whisper) plus optional voice emotion or music-mood windows and beat/BPM/key/chord estimates. Use when a Windows team AI needs to hear audio (\"들어봐\", \"가사 타이밍\", \"노래 분위기\", \"BPM\", \"코드 진행\"). Not for pitch, VAD, separation, diarization or forced alignment. On the Mac itself use skill music-lens."
+description: "Listen to an audio file from the Windows PC through the Mac's Music Lens LAN API: word timings (Whisper) plus optional voice emotion or music-mood windows and beat/BPM/key/chord, energy, section and melody-feature estimates. Use when a Windows team AI needs to hear audio (\"들어봐\", \"가사 타이밍\", \"노래 분위기\", \"BPM\", \"코드 진행\"). Not for note-exact transcription, VAD, separation, diarization or forced alignment. On the Mac itself use skill music-lens."
 ---
 
 # music-lens-remote (Windows client)
