@@ -1380,9 +1380,14 @@ def lyric_words_payload(data, rid):
     if len(data) > ML_RESULT_MAX:
         return bad
     try:
-        r = loads_rhythm(data)
-    except ValueError:
+        return _lyric_words_payload(data, rid)
+    except (ValueError, TypeError, OverflowError, RecursionError):  # bad JSON, nesting too deep, huge numbers
         return bad
+
+
+def _lyric_words_payload(data, rid):
+    bad = {"words": None, "reason": "result_invalid"}
+    r = loads_rhythm(data)
     if not isinstance(r, dict) or r.get("result_id") != rid:
         return bad
     w = r.get("words", [])

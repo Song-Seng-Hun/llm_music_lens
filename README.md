@@ -553,7 +553,9 @@ repeats are reported on their own and clients compare the two.
   common pairs recur outside refrains. Every n-gram occurring at least twice with its occurrence starts spread over
   >= **15 s** marks all units of every occurrence covered (a line doubled within 15 s is not a repeat); covered units
   closer than **3 s** join into one block; blocks shorter than **4 s** are dropped; blocks that share any repeated
-  n-gram form one group (union-find; group ids 0, 1, ... in order of first appearance). A group can have one block
+  n-gram form one group (union-find over every retained block touched by any unit of any occurrence, so an
+  occurrence split by a pause longer than 3 s links all its blocks; group ids 0, 1, ... in order of first
+  appearance). A group can have one block
   when the repetition lies inside it (a long block holding a line sung twice >= 15 s apart).
 - Output (summary and stored file): `done` `{status, method, unit: "char"|"word", n, blocks: [{start, end, group}],
   group_count, coverage_s, note}`: blocks sorted, non-overlapping, inside the duration, at most 40 (more: the 40

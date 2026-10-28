@@ -129,7 +129,8 @@ Choices:
   n-gram is LYRIC_N_WORD (4) words, since 8 letters are only ~1.5 English words and common pairs ("iloveyou")
   recur outside refrains. Every n-gram occurring >= 2 times with its occurrence starts spread >= LYRIC_SPREAD (15 s)
   marks all units of every occurrence covered; covered units closer than LYRIC_JOIN (3 s) join into blocks; blocks
-  shorter than LYRIC_MIN_BLOCK (4 s) are dropped; blocks sharing a repeated n-gram are one group (union-find; ids
+  shorter than LYRIC_MIN_BLOCK (4 s) are dropped; blocks sharing a repeated n-gram are one group (union-find over
+  every retained block touched by any unit of any occurrence, also when a >3 s pause splits it; ids
   0, 1, ... in order of first appearance). At most LYRIC_MAX_BLOCKS (40) blocks (the longest; warning
   lyric_repeats_capped). Fewer than LYRIC_MIN_CHARS (50) normalized characters: unavailable too_little_text (no
   word at all: no_words). Independent of sections; clients compare. Untested on real English or Korean songs.
@@ -724,13 +725,18 @@ def lyric_norm(text):
 
 
 def parse_words(data):
-    """stdin bytes of --words-stdin -> (words [(text, start, end)] or None, reason or None)."""
+    """stdin bytes of --words-stdin -> (words [(text, start, end)] or None, reason or None). Any parser or
+    conversion failure (bad JSON, nesting too deep, an integer too large for a float) is words_invalid."""
     if len(data) > WORDS_MAX_BYTES:
         return None, "words_too_large"
     try:
-        v = json.loads(data.decode("utf-8"), parse_constant=lambda name: float("nan"))
-    except ValueError:
+        return _parse_words(data)
+    except (ValueError, TypeError, OverflowError, RecursionError):
         return None, "words_invalid"
+
+
+def _parse_words(data):
+    v = json.loads(data.decode("utf-8"), parse_constant=lambda name: float("nan"))
     if not isinstance(v, dict):
         return None, "words_invalid"
     w = v.get("words")
@@ -815,7 +821,9 @@ def lyric_repeats(words, duration, reason=None):
             k = parent[k]
         return k
     for ps in reps:
-        bs = sorted({of[p] for p in ps if of[p] in kset})
+        # every retained block touched by any unit of any occurrence (an occurrence split by a >3 s pause
+        # spans several blocks)
+        bs = sorted({of[k] for p in ps for k in range(p, p + n) if of[k] in kset})
         for k in bs[1:]:
             ra, rb = root(bs[0]), root(k)
             if ra != rb:

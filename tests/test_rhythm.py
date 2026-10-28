@@ -743,6 +743,16 @@ class RhythmAnalyzeTest(RhythmBase):
                 self.write_result(raw=raw)
             b, h = self.h.app.lyric_words(RID64)
             self.assertEqual((json.loads(b), h), (want, sha(b)), raw and raw[:60])
+        # review F2: nesting too deep for the parser, or integers too large for a float, in a matching-id file
+        for raw in ('{"result_id":"%s","words":%s%s}' % (RID64, "[" * 5000, "]" * 5000),
+                    '{"result_id":"%s","words":[{"text":"a","start":1%s,"end":2}]}' % (RID64, "0" * 400),
+                    '{"result_id":"%s","x":%s1%s}' % (RID64, "[" * 100000, "]" * 100000)):
+            self.write_result(raw=raw)
+            self.assertEqual(json.loads(self.h.app.lyric_words(RID64)[0]), {"words": None, "reason": "result_invalid"})
+        self.write_result(raw='{"result_id":"%s","words":%s%s}' % (RID64, "[" * 5000, "]" * 5000))
+        st, b = self.c.json("POST", AR, WAV)
+        self.assertEqual((st, b["rhythm"]["status"]), (200, "done"), b)  # rhythm unaffected
+        self.assertEqual(json.loads(self.fw.calls()[-1]["stdin"]), {"words": None, "reason": "result_invalid"})
         os.unlink(path)
         os.symlink(self.rhythm_file(), path)  # never followed
         self.assertEqual(json.loads(self.h.app.lyric_words(RID64)[0]), {"words": None, "reason": "result_invalid"})
@@ -1607,8 +1617,32 @@ class LyricLogicTest(unittest.TestCase):
         d, _ = rw.lyric_repeats(words, end)
         self.assertEqual([b["group"] for b in d["blocks"]], [0, 0])
         self.assertGreater(d["blocks"][0]["end"] - d["blocks"][0]["start"], 11.0)
+        # with a 3.5 s gap they stay 4 blocks, but chorus+hook repeats as a whole: the n-grams across the pause
+        # touch both blocks of each occurrence, so all four share one group (review F1 rule)
         words, end = _song([CHORUS, hook, VERSES[0], VERSES[1], CHORUS, hook], gap=3.5)
-        self.assertEqual([b["group"] for b in rw.lyric_repeats(words, end)[0]["blocks"]], [0, 1, 0, 1])
+        d = rw.lyric_repeats(words, end)[0]
+        self.assertEqual(([b["group"] for b in d["blocks"]], d["group_count"]), ([0, 0, 0, 0], 1))
+
+    def test_occurrence_split_by_pauses_one_group(self):
+        # review F1 (0.4.3): one repeated n-gram whose units fall in several blocks (pauses > 3 s) groups every
+        # block it touches, not only the block of its first unit; blocks stay separate in time
+        lines = ("remember", "forever", "together", "tomorrow")
+        words = [(" " + w, t0 + 8.0 * i, t0 + 8.0 * i + 4.0) for t0 in (0.0, 64.0) for i, w in enumerate(lines)]
+        d, _ = rw.lyric_repeats(words, 100.0)
+        self.check(d, 100.0)
+        self.assertEqual((d["unit"], d["n"]), ("word", 4))
+        self.assertEqual([(b["start"], b["end"]) for b in d["blocks"]],
+                         [(t0 + 8.0 * i, t0 + 8.0 * i + 4.0) for t0 in (0.0, 64.0) for i in range(4)])
+        self.assertEqual(([b["group"] for b in d["blocks"]], d["group_count"]), ([0] * 8, 1))
+        # char mode: an 8-char n-gram of 4 s characters with 4 s pauses, plus distinct filler to pass 50 chars
+        words = [(c, t0 + 8.0 * i, t0 + 8.0 * i + 4.0)
+                 for t0 in (0.0, 70.0) for i, c in enumerate("あいうえおかきく")]
+        words += [(chr(0x4E00 + i), 130.5 + i * 0.18, 130.5 + i * 0.18 + 0.1) for i in range(50)]  # after both
+        d, _ = rw.lyric_repeats(words, 140.0)
+        self.check(d, 140.0)
+        self.assertEqual(d["unit"], "char")
+        self.assertEqual(len(d["blocks"]), 16)
+        self.assertEqual(([b["group"] for b in d["blocks"]], d["group_count"]), ([0] * 16, 1))
 
     def test_unavailable(self):
         self.assertEqual(rw.lyric_repeats(None, 10.0), ({"status": "unavailable", "reason": "no_words_input"}, []))
@@ -1694,6 +1728,10 @@ class LyricLogicTest(unittest.TestCase):
                     json.dumps({"words": [["a", 1, 2]] * 20001}).encode()):
             self.assertEqual(rw.parse_words(bad), (None, "words_invalid"), bad[:40])
         self.assertEqual(rw.parse_words(b" " * (rw.WORDS_MAX_BYTES + 1)), (None, "words_too_large"))
+        # review F2: parser depth and float conversion failures are malformed input, not a worker failure
+        for bad in (b'{"words":' + b"[" * 5000 + b"]" * 5000 + b"}", b"[" * 100000,
+                    b'{"words":[["a",1' + b"0" * 400 + b',2]]}', b'{"words":[["a",1,-1' + b"0" * 400 + b']]}'):
+            self.assertEqual(rw.parse_words(bad), (None, "words_invalid"), bad[:30])
 
     def test_structure_debug(self):
         nov = [None] * 3 + [0.1, 0.5, 0.1, 0.0, 0.05, 0.12, 0.05, 0.0, 0.2, 0.1] + [None] * 3
@@ -2217,7 +2255,11 @@ class RealWorkerTest(unittest.TestCase):
         for payload, want in ((b'{"words":[]}', {"status": "unavailable", "reason": "no_words"}),
                               (b'{"words":null,"reason":"result_missing"}',
                                {"status": "unavailable", "reason": "result_missing"}),
-                              (b"not json", {"status": "unavailable", "reason": "words_invalid"})):
+                              (b"not json", {"status": "unavailable", "reason": "words_invalid"}),
+                              (b'{"words":' + b"[" * 5000 + b"]" * 5000 + b"}",  # review F2: too deep
+                               {"status": "unavailable", "reason": "words_invalid"}),
+                              (b'{"words":[["a",1' + b"0" * 400 + b',2]]}',  # review F2: overflows a float
+                               {"status": "unavailable", "reason": "words_invalid"})):
             v = run_worker(wav, words=payload)
             self.assertEqual((v["lyric_repeats"], v["melody"]["status"]), (want, "done"))
             self.assertIsNotNone(server.check_rhythm(v))
