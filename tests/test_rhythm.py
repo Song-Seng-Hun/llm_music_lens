@@ -2,6 +2,7 @@
 /status, plus the real Essentia worker on synthetic audio (skipped when the Essentia python is missing)."""
 import fcntl
 import json
+import math
 import os
 import shutil
 import stat
@@ -157,6 +158,53 @@ def bad_v22():
     return out
 
 
+ENERGY = {"unit": "dBFS", "step_s": 1.0, "values": [-30.0, -29.5, -20.0, -19.0, -18.5, -31.0]}
+ENERGY_SUMMARY = {"unit": "dBFS", "window_s": 2.0, "min": -31.0, "max": -18.5, "median": -24.75,
+                  "peaks": [{"start": 3.0, "end": 5.0, "mean": -18.75}, {"start": 1.0, "end": 3.0, "mean": -24.75}],
+                  "quietest": {"start": 0.0, "end": 2.0, "mean": -29.75}}
+SECTIONS = [{"start": 0.0, "end": 2.0, "label": "A", "energy_mean": -29.75, "top_chord": "C", "similarity_to_first": 1.0},
+            {"start": 2.0, "end": 4.0, "label": "B", "energy_mean": -19.5, "top_chord": "Am", "similarity_to_first": 1.0},
+            {"start": 4.0, "end": 6.0, "label": "A", "energy_mean": -24.75, "top_chord": None,
+             "similarity_to_first": 0.8}]
+V30_FIELDS = {"energy": ENERGY, "energy_summary": ENERGY_SUMMARY, "sections": SECTIONS,
+              "sections_method": "beat-sync chroma+mfcc", "sections_reliability": "low_reference"}
+RHYTHM_OUT_V30 = dict(RHYTHM_OUT_V22, **V30_FIELDS)
+V30_SUMMARY_KEYS = ("energy_summary", "sections", "sections_method", "sections_reliability")
+
+
+def bad_v30():
+    """Worker-0.3.0 energy/sections values that must be refused."""
+    out = []
+    sec, es = SECTIONS, ENERGY_SUMMARY
+    for e in ({"unit": "dBFS", "step_s": 1.0, "values": []}, dict(ENERGY, values=[float("nan")]),
+              dict(ENERGY, values=[-121.0]), dict(ENERGY, values=[0.5]), dict(ENERGY, values=["x"]),
+              dict(ENERGY, values=[-20.0] * 602), dict(ENERGY, values=[-20.0] * 10),  # 10 s of values for 6 s
+              dict(ENERGY, step_s=0), dict(ENERGY, unit=""), dict(ENERGY, extra=1), {"unit": "dBFS", "step_s": 1.0},
+              [1], None):
+        out.append(json.dumps(dict(RHYTHM_OUT_V30, energy=e)))
+    for over in ({"min": -10.0}, {"median": -40.0}, {"max": 1.0}, {"window_s": 0}, {"peaks": []},
+                 {"peaks": es["peaks"] * 2}, {"peaks": [es["peaks"][1], es["peaks"][0]]},  # loudest first
+                 {"peaks": [es["peaks"][0], dict(es["peaks"][0], mean=-19.0)]},  # overlapping
+                 {"peaks": [dict(es["peaks"][0], end=3.0)]}, {"peaks": [dict(es["peaks"][0], end=60.0)]},
+                 {"peaks": [dict(es["peaks"][0], mean=-10.0)]}, {"peaks": [dict(es["peaks"][0], x=1)]},
+                 {"quietest": None}, {"quietest": dict(es["quietest"], mean=float("inf"))}, {"unit": None},
+                 {"extra": 1}):
+        out.append(json.dumps(dict(RHYTHM_OUT_V30, energy_summary=dict(es, **over))))
+    for ss in ([dict(sec[0], label="a")], [dict(sec[0], label="AAA")], [dict(sec[0], label="B")],  # must start at A
+               [sec[0], dict(sec[1], label="C")], [dict(sec[0], end=0.0)], [dict(sec[0], end=60.0)],
+               [sec[1], sec[0]], [sec[0], dict(sec[1], start=1.0)], [dict(sec[0], energy_mean=5.0)],
+               [dict(sec[0], similarity_to_first=1.5)], [dict(sec[0], similarity_to_first=None)],
+               [dict(sec[0], top_chord="")], [dict(sec[0], top_chord="x" * 17)], [dict(sec[0], top_chord=3)],
+               [dict(sec[0], extra=1)], [{k: x for k, x in sec[0].items() if k != "top_chord"}],
+               [dict(sec[0], start=i * 0.1, end=(i + 1) * 0.1, label=rw.label_name(i)) for i in range(41)],
+               {"A": 1}, None):
+        out.append(json.dumps(dict(RHYTHM_OUT_V30, sections=ss)))
+    for over in ({"sections_method": ""}, {"sections_method": "x" * 201}, {"sections_reliability": "high"},
+                 {"sections_reliability": None}):
+        out.append(json.dumps(dict(RHYTHM_OUT_V30, **over)))
+    return out
+
+
 class FakeWorker:
     def __init__(self, env):
         self.dir = os.path.join(env.dir, "fakerhythm")
@@ -239,7 +287,7 @@ class RhythmAnalyzeTest(RhythmBase):
         self.assertEqual((r["bpm_confidence_band"], r["bpm_estimates"]), ("excellent", RHYTHM_OUT["bpm_estimates"]))
         self.assertNotIn("beats", r)  # rows only via /timeline
         self.assertNotIn("chords", r)
-        for k in V2_SUMMARY_KEYS + V21_SUMMARY_KEYS + V22_SUMMARY_KEYS:  # default fake output: worker-0.1.0 shape
+        for k in V2_SUMMARY_KEYS + V21_SUMMARY_KEYS + V22_SUMMARY_KEYS + V30_SUMMARY_KEYS:  # 0.1.0-shaped fake
             self.assertIsNone(r[k], k)
         calls = self.fw.calls()
         self.assertEqual(len(calls), 1)
@@ -349,6 +397,33 @@ class RhythmAnalyzeTest(RhythmBase):
 
     def test_v22_invalid_output(self):
         for out in bad_v22():
+            self.fw.write(stdout=out)
+            self.assert_rhythm_failed("failed", "invalid_output")
+
+    def test_v30_sections_and_energy_summary(self):
+        self.fw.write(stdout=json.dumps(RHYTHM_OUT_V30))
+        r = self.c.json("POST", AR, WAV)[1]["rhythm"]
+        self.assertEqual(r["status"], "done", r)
+        for k in V30_SUMMARY_KEYS:
+            self.assertEqual(r[k], RHYTHM_OUT_V30[k], k)
+        self.assertNotIn("energy", r)  # values only via /timeline layer=energy
+        self.assertEqual(r["tempo_cnn"], TC_DONE)
+        with open(self.rhythm_file()) as f:
+            self.assertEqual(json.load(f), dict(RHYTHM_OUT_V30, worker_sha256=self.worker_sha()))
+        r = self.c.json("GET", "/report/" + RID64)[1]["rhythm"]
+        self.assertEqual([x["label"] for x in r["sections"]], ["A", "B", "A"])
+        self.assertEqual(r["energy_summary"]["peaks"][0]["start"], 3.0)
+        # valid edge shapes: no sections (no beats), one quiet-only summary, labels past Z, null summary
+        many = [dict(SECTIONS[0], start=i * 0.1, end=(i + 1) * 0.1, label=rw.label_name(i)) for i in range(40)]
+        for over in ({"sections": []}, {"sections": many}, {"energy_summary": None},
+                     {"energy_summary": dict(ENERGY_SUMMARY, peaks=ENERGY_SUMMARY["peaks"][:1])},
+                     {"energy": dict(ENERGY, values=[-120.0, 0.0, -50.0, -50.0, -50.0, -50.0, -50.0])}):
+            v = json.loads(json.dumps(dict(RHYTHM_OUT_V30, **over)))
+            self.assertIs(server.check_rhythm(v), v, over)
+        self.assertEqual([x["label"] for x in many][24:28], ["Y", "Z", "AA", "AB"])
+
+    def test_v30_invalid_output(self):
+        for out in bad_v30():
             self.fw.write(stdout=out)
             self.assert_rhythm_failed("failed", "invalid_output")
 
@@ -616,8 +691,17 @@ class RhythmReadTest(RhythmBase):
         self.assertIsNone(r["tempo_cnn"])  # 0.2.1 file: no tempo_cnn
         with open(self.rhythm_file(), "w") as f:
             f.write(json.dumps(RHYTHM_OUT_V22))
-        self.assertEqual(self.c.json("GET", "/report/" + RID64)[1]["rhythm"]["tempo_cnn"], TC_DONE)
-        for bad in bad_v2() + bad_v21() + bad_v22():
+        r = self.c.json("GET", "/report/" + RID64)[1]["rhythm"]
+        self.assertEqual(r["tempo_cnn"], TC_DONE)
+        self.assertEqual([r[k] for k in V30_SUMMARY_KEYS], [None] * len(V30_SUMMARY_KEYS))  # 0.2.2 file
+        st, b = self.tl("layer=energy")  # not stored before 0.3.0: same 404 as a missing rhythm file
+        self.assertEqual((st, b["error"]["code"]), (404, "rhythm_not_found"))
+        self.assertEqual(len(self.tl("layer=beats")[1]["beats"]), 7)  # other layers unchanged
+        with open(self.rhythm_file(), "w") as f:
+            f.write(json.dumps(RHYTHM_OUT_V30))
+        r = self.c.json("GET", "/report/" + RID64)[1]["rhythm"]
+        self.assertEqual((r["sections"], r["energy_summary"]), (SECTIONS, ENERGY_SUMMARY))
+        for bad in bad_v2() + bad_v21() + bad_v22() + bad_v30():
             with open(self.rhythm_file(), "w") as f:
                 f.write(bad)
             st, b = self.c.json("GET", "/report/" + RID64)
@@ -649,6 +733,33 @@ class RhythmReadTest(RhythmBase):
         self.assertEqual((b["total"], b["reliability"]), (2, "low_reference"))
         b = self.tl("layer=chords&limit=1&cursor=1")[1]
         self.assertEqual(([c["label"] for c in b["chords"]], b["continuation"]), (["Am"], 2))
+
+    def test_timeline_energy(self):
+        with open(self.rhythm_file(), "w") as f:
+            f.write(json.dumps(RHYTHM_OUT_V30))
+        calls = len(self.env.argv_log())
+        st, b = self.tl("layer=energy&limit=2")
+        self.assertEqual(st, 200, b)
+        self.assertEqual(b["energy"], [{"time": 0.0, "value": -30.0}, {"time": 1.0, "value": -29.5}])
+        self.assertEqual((b["total"], b["truncated"], b["continuation"], b["layer"], b["unit"], b["step_s"]),
+                         (6, True, 2, "energy", "dBFS", 1.0))
+        b = self.tl("layer=energy&limit=2&cursor=4")[1]
+        self.assertEqual((b["energy"][-1], b["truncated"], b["continuation"]),
+                         ({"time": 5.0, "value": -31.0}, False, None))
+        b = self.tl("layer=energy&start=1.5&end=3")[1]  # rows whose time lies in [start, end]
+        self.assertEqual([x["time"] for x in b["energy"]], [2.0, 3.0])
+        for q, code in (("layer=energy&cursor=7", "invalid_argument"), ("layer=energy&end=601", "invalid_argument"),
+                        ("layer=energy&limit=0", "bad_request"), ("layer=energies", "bad_request")):
+            st, b = self.tl(q)
+            self.assertEqual((st, b["error"]["code"]), (400, code), q)
+        self.assertEqual(len(self.env.argv_log()), calls)  # served by the server, not ml
+        # 600 values: the page byte cap holds at limit=200
+        with open(self.rhythm_file(), "w") as f:
+            f.write(json.dumps(dict(RHYTHM_OUT_V30, duration=600.0,
+                                    energy=dict(ENERGY, values=[-123.45 + 3.45] * 600))))
+        b = self.tl("layer=energy&limit=200&cursor=400")[1]
+        self.assertEqual((b["total"], len(b["energy"]), b["continuation"]), (600, 200, None))
+        self.assertLess(len(json.dumps(b)), server.MAX_WIRE_PAGE + 2000)
 
     def test_timeline_errors_and_words_passthrough(self):
         for q, code in (("layer=beats&start=-1", "invalid_argument"), ("layer=beats&start=3&end=2", "invalid_argument"),
@@ -885,6 +996,61 @@ class WorkerLogicTest(unittest.TestCase):
         self.assertEqual([(c["start"], c["end"]) for c in segs], [(0.0, 1.0)])
 
 
+class StructureLogicTest(unittest.TestCase):
+    """Pure helpers of worker 0.3.0 (energy summary, boundary picking, labels); no numpy needed."""
+
+    def test_energy_summary(self):
+        vals = [-40.0] * 4 + [-10.0] * 8 + [-30.0] * 8 + [-12.0] * 8 + [-50.0] * 2
+        es = rw.energy_summary(vals, 30.0)
+        self.assertEqual((es["unit"], es["window_s"], es["min"], es["max"]), ("dBFS", 8.0, -50.0, -10.0))
+        self.assertEqual(es["median"], -12.0)
+        self.assertEqual([(p["start"], p["end"], p["mean"]) for p in es["peaks"]],
+                         [(4.0, 12.0, -10.0), (20.0, 28.0, -12.0), (12.0, 20.0, -30.0)])  # greedy, no overlap
+        self.assertEqual(es["quietest"], {"start": 12.0, "end": 20.0, "mean": -30.0})  # lowest window mean
+        es = rw.energy_summary([-20.0, -10.0, -30.0], 2.7)  # fewer values than a window: one window of all
+        self.assertEqual((es["window_s"], es["peaks"], es["quietest"]),
+                         (3.0, [{"start": 0.0, "end": 2.7, "mean": -20.0}], {"start": 0.0, "end": 2.7, "mean": -20.0}))
+        self.assertIsNone(rw.energy_summary([], 1.0))
+
+    def test_pick_boundaries(self):
+        nov = [None] * 4 + [0.1, 0.2, 0.5, 0.2, 0.1, 0.16, 0.3, 0.1] + [0.05] * 8 + [None] * 4
+        self.assertEqual(rw.pick_boundaries(nov, min_gap=3, thresh=0.15), [6, 10])
+        self.assertEqual(rw.pick_boundaries(nov, min_gap=5, thresh=0.15), [6])  # 10 is within 5 of 6
+        self.assertEqual(rw.pick_boundaries(nov, min_gap=3, thresh=0.6), [])
+        tie = [None, None, 0.3, 0.3, None, None, None, None]
+        self.assertEqual(rw.pick_boundaries(tie, min_gap=2, thresh=0.1), [2])  # tie: earliest
+        self.assertEqual(rw.pick_boundaries([0.9, 0.9, 0.9], min_gap=2, thresh=0.1), [])  # too close to the ends
+        flat = [None] * 3 + [0.2, 0.0] * 40 + [None] * 3
+        self.assertEqual(rw.pick_boundaries(flat, min_gap=2, thresh=0.1), [3])  # equal peaks in reach: earliest
+        self.assertEqual(rw.pick_boundaries(flat, min_gap=1, thresh=0.1, cap=5), [3, 5, 7, 9, 11])  # cap
+
+    def test_assign_labels(self):
+        sim = [[1.0, 0.2, 0.9, 0.1], [0.2, 1.0, 0.3, 0.8], [0.9, 0.3, 1.0, 0.2], [0.1, 0.8, 0.2, 1.0]]
+        self.assertEqual(rw.assign_labels(sim, 0.75), [("A", 1.0), ("B", 1.0), ("A", 0.9), ("B", 0.8)])
+        self.assertEqual(rw.assign_labels(sim, 0.95), [("A", 1.0), ("B", 1.0), ("C", 1.0), ("D", 1.0)])
+        tie = [[1, 0, 0.8], [0, 1, 0.8], [0.8, 0.8, 1]]
+        self.assertEqual(rw.assign_labels(tie, 0.75)[2], ("A", 0.8))  # tie: the earlier group
+        self.assertEqual([rw.label_name(k) for k in (0, 25, 26, 27, 39)], ["A", "Z", "AA", "AB", "AN"])
+
+    def test_top_chord_and_section_energy(self):
+        ch = [{"start": 0.0, "end": 1.0, "label": "C"}, {"start": 1.0, "end": 3.0, "label": "G"},
+              {"start": 3.0, "end": 4.0, "label": "C"}, {"start": 4.0, "end": 5.0, "label": "F"}]
+        self.assertEqual(rw.top_chord(ch, 0.0, 4.0), "C")  # C 2 s vs G 2 s: tie -> earliest overlap
+        self.assertEqual(rw.top_chord(ch, 0.5, 3.0), "G")
+        self.assertIsNone(rw.top_chord(ch, 5.0, 6.0))
+        self.assertIsNone(rw.top_chord([], 0.0, 1.0))
+        vals = [-10.0, -20.0, -30.0, -40.0]
+        self.assertEqual(rw.section_energy(vals, 0.0, 2.0), -15.0)  # midpoints 0.5, 1.5
+        self.assertEqual(rw.section_energy(vals, 2.2, 2.4), -30.0)  # no midpoint inside: window holding the middle
+
+    def test_segment_similarity(self):
+        a, z = [1.0] + [0.0] * 11, [0.0] * 12
+        self.assertAlmostEqual(rw._segment_similarity(a, a, z, z), 1.0)
+        b = [0.0, 1.0] + [0.0] * 10
+        self.assertAlmostEqual(rw._segment_similarity(a, b, z, [1.0] * 12), 0.5 * math.exp(-0.5))
+        self.assertEqual(rw._segment_similarity([0.0] * 12, a, z, z), 0.5)  # silent chroma: cosine 0
+
+
 MODEL_PRESENT = os.path.isfile(rw.TEMPO_CNN_MODEL)
 
 
@@ -904,7 +1070,7 @@ class RealWorkerTest(unittest.TestCase):
         cls.dir = tempfile.mkdtemp(prefix="mlrhythm-")
         cls.out = {}
         for kind, secs in (("click", "30"), ("chords", "30"), ("modulation", "60"), ("kick100", "30"),
-                           ("kick100mid", "30")):
+                           ("kick100mid", "30"), ("abab", "60")):
             wav = os.path.join(cls.dir, kind + ".wav")
             subprocess.run([ESSENTIA_PY, "-I", SYNTH, kind, secs, wav], check=True, timeout=120)
             assert server.strict_wav_check(wav)
@@ -921,7 +1087,14 @@ class RealWorkerTest(unittest.TestCase):
             self.assertEqual((v["sample_rate"], v["chords_reliability"]), (44100, "low_reference"))
             self.assertIn(v["duration"], (30.0, 60.0))
             self.assertEqual(v["tool"]["essentia_version"], "2.1-beta6-dev")
-            self.assertEqual(v["tool"]["version"], "0.2.2")
+            self.assertEqual(v["tool"]["version"], "0.3.0")
+            e = v["energy"]
+            self.assertEqual((e["unit"], e["step_s"], len(e["values"])), ("dBFS", 1.0, int(v["duration"])))
+            self.assertEqual(v["energy_summary"]["window_s"], 8.0)
+            self.assertEqual(v["sections_reliability"], "low_reference")
+            ss = v["sections"]
+            self.assertEqual((ss[0]["start"], ss[0]["label"], ss[-1]["end"]), (0.0, "A", v["duration"]))
+            self.assertEqual([a["end"] for a in ss[:-1]], [b["start"] for b in ss[1:]])  # contiguous
             self.assertEqual(v["tempo_cnn"]["status"], "done" if MODEL_PRESENT else "unavailable", v["tempo_cnn"])
             self.assertIsNotNone(v["double_tempo_evidence"]["mid_to_beat_ratio"])
             self.assertTrue(v["double_tempo_evidence_note"])
@@ -1024,6 +1197,34 @@ class RealWorkerTest(unittest.TestCase):
         labels = {c["label"] for c in v["chords"]}
         self.assertTrue(labels & {"C", "Am", "F", "G"}, labels)
 
+    def test_sections_abab(self):
+        # measured (worker 0.3.0): A 0-15, B 15-30, A 30-45, B 45-60 exactly on the block edges (beats at 15/30/45 s);
+        # energy_mean A -26.68 / B -18.77 dB; peaks 15-23, 45-53, 23-31; quietest 30-38
+        v = self.out["abab"]
+        ss = v["sections"]
+        self.assertEqual([s["label"] for s in ss], ["A", "B", "A", "B"], ss)
+        for s, edge in zip(ss[1:], (15.0, 30.0, 45.0)):
+            self.assertAlmostEqual(s["start"], edge, delta=2.0)
+        a = [s["energy_mean"] for s in ss if s["label"] == "A"]
+        b = [s["energy_mean"] for s in ss if s["label"] == "B"]
+        self.assertGreater(min(b), max(a) + 5.0)
+        self.assertEqual([s["top_chord"] in ("C", "Am", "F", "G") for s in ss], [True, False, True, False])
+        self.assertEqual([s["top_chord"] in ("E", "C#m", "A", "B") for s in ss], [False, True, False, True])
+        self.assertGreater(min(s["similarity_to_first"] for s in ss), 0.9)
+        es = v["energy_summary"]
+        b_spans = [(s["start"], s["end"]) for s in ss if s["label"] == "B"]
+        for p in es["peaks"][:2]:  # the two loudest windows lie inside B sections
+            self.assertTrue(any(lo - 0.5 <= p["start"] and p["end"] <= hi + 0.5 for lo, hi in b_spans), p)
+        self.assertFalse(any(lo <= es["quietest"]["start"] < hi for lo, hi in b_spans))
+        self.assertGreater(es["max"] - es["min"], 5.0)
+
+    def test_sections_single_texture(self):
+        # one loop, one texture: no boundary (interior novelty stays <= ~0.12, threshold 0.15)
+        for kind in ("chords", "click", "kick100"):
+            self.assertEqual([s["label"] for s in self.out[kind]["sections"]], ["A"], kind)
+        energy = self.out["chords"]["energy_summary"]
+        self.assertLess(energy["max"] - energy["min"], 1.0)
+
     def test_errors_one_json_line(self):
         bad = os.path.join(self.dir, "bad.wav")
         with open(bad, "wb") as f:
@@ -1050,6 +1251,11 @@ class RealWorkerTest(unittest.TestCase):
                 self.assertEqual(b["rhythm"]["status"], "done", b["rhythm"])
                 self.assertIn(b["rhythm"]["key"]["tonic"], ("C", "A"))
                 self.assertEqual(b["rhythm"]["tempo_cnn"]["status"], "done" if MODEL_PRESENT else "unavailable")
+                self.assertEqual([s["label"] for s in b["rhythm"]["sections"]], ["A"])
+                self.assertEqual(b["rhythm"]["energy_summary"]["unit"], "dBFS")
+                rid = b["result_id"]
+                st, t = Client(env, h.port).json("GET", "/timeline/%s?layer=energy&limit=200" % rid)
+                self.assertEqual((st, t["total"], len(t["energy"])), (200, 30, 30))
             finally:
                 h.stop()
         finally:

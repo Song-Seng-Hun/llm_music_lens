@@ -45,6 +45,14 @@ Choices:
   only the per-patch maximum (shape (patches,)), so `top` comes from the mean of the softmax rows. The worker
   re-checks that argmax relation on every run. Any exception -> {"status":"failed","code"}; never fails the worker.
   Residual: the file could change between hashing and the Essentia load (same trust as the worker file itself).
+- energy (0.3.0): RMS dBFS of the 16 kHz source per 1 s window (floor -120). Plain dBFS rather than Essentia Loudness
+  (Stevens power law, unitless): a reproducible unit; not perceptual (unweighted, not LUFS). energy_summary: 3 loudest
+  non-overlapping 8 s windows (~4 bars at 120 BPM, one phrase) and the quietest one, plain means of the dB values.
+- sections (0.3.0, reliability "low_reference"): beat-synchronous HPCP chroma + z-scored MFCC 2-13 (level coefficient
+  left out), cosine SSM, Foote checkerboard 2 x 16 beats (a 4-bar loop fits one half) computed only where the full
+  kernel fits (truncated edge kernels gave false boundaries), boundaries at novelty >= 0.15 (synthetic: true changes
+  0.33-0.38, inside one loop <= 0.12) >= 8 beats apart, then letters by segment-mean similarity >= 0.75 to each
+  group's first segment, in order of first appearance. Similarity groups, not verse/chorus. No beats -> [].
 """
 import errno
 import hashlib
@@ -58,7 +66,7 @@ import statistics
 import sys
 import wave
 
-TOOL = {"name": "music-lens-rhythm-worker", "version": "0.2.2"}
+TOOL = {"name": "music-lens-rhythm-worker", "version": "0.3.0"}
 SRC_RATE = 16000
 RATE = 44100
 MAX_SECONDS = 600.0
@@ -94,6 +102,19 @@ TEMPO_CNN_MIN_BPM = 30  # class i = 30 + i BPM
 TEMPO_CNN_MAX_BYTES = 64 * 1024 * 1024
 TEMPO_CNN_TOP = 3
 TEMPO_CNN_NOTE = "learned estimate, uncalibrated on team songs; compare with bpm and bpm_alternatives"
+ENERGY_UNIT = "dBFS"
+ENERGY_STEP = 1.0  # s; one RMS value per non-overlapping 1 s window of the 16 kHz source
+ENERGY_FLOOR = -120.0  # dB; digital silence and anything quieter
+ENERGY_MIN_TAIL = 0.5  # s; a last partial window shorter than this is dropped
+ENERGY_WINDOW = 8  # s (values) per summary window: ~4 bars at 120 BPM, one phrase
+ENERGY_PEAKS = 3
+SEC_KERNEL = 16  # beats per checkerboard half (~4 bars of 4/4): a 4-bar loop sits inside one half
+SEC_MIN = 8  # beats; minimum section length and peak-picking neighbourhood (~2 bars)
+SEC_NOVELTY_MIN = 0.15  # absolute Foote novelty (-1..1 scale) a boundary needs
+SEC_GROUP_MIN = 0.75  # segment similarity (0..1) needed to join an existing label group
+SEC_MAX = 40
+SEC_METHOD = ("beat-sync HPCP12+MFCC2-13(z) cosine SSM; Foote checkerboard 2x16 beats (full kernel only), "
+              "novelty>=0.15, min 8 beats; groups: segment-mean similarity>=0.75 to the group's first segment")
 
 
 class Fail(Exception):
@@ -339,6 +360,178 @@ def tempo_cnn(x16, model):
                 else "inference_error"}
 
 
+def energy_values(x16, duration):
+    """RMS level in dBFS per ENERGY_STEP window of the 16 kHz source ([i, i+1) s; a last partial window of at least
+    ENERGY_MIN_TAIL s is kept, a shorter one dropped); floor ENERGY_FLOOR."""
+    import numpy as np
+    step = int(ENERGY_STEP * SRC_RATE)
+    n = int(duration // ENERGY_STEP)
+    if duration - n * ENERGY_STEP >= ENERGY_MIN_TAIL or n == 0:
+        n += 1
+    out = []
+    for i in range(n):
+        seg = np.asarray(x16[i * step:(i + 1) * step], dtype=np.float64)
+        rms = float(np.sqrt(np.mean(seg * seg))) if len(seg) else 0.0
+        db = 20.0 * math.log10(rms) if rms > 0 else ENERGY_FLOOR
+        out.append(round(min(0.0, max(ENERGY_FLOOR, finite(db))), 2))
+    return out
+
+
+def _window_means(values, w):
+    """[(start index, mean)] of every window of w consecutive values (one window of all when fewer)."""
+    w = min(w, len(values))
+    s = sum(values[:w])
+    out = [(0, s / w)]
+    for i in range(1, len(values) - w + 1):
+        s += values[i + w - 1] - values[i - 1]
+        out.append((i, s / w))
+    return out, w
+
+
+def energy_summary(values, duration, step=ENERGY_STEP, w=ENERGY_WINDOW):
+    """min/max/median of the values, the ENERGY_PEAKS loudest non-overlapping windows of w values (greedy by mean,
+    ties earliest) and the quietest window (ties earliest). Window means are plain means of the dB values."""
+    if not values:
+        return None
+    wins, w = _window_means(values, w)
+    span = lambda i, m: {"start": r3(i * step), "end": r3(min((i + w) * step, duration)), "mean": round(m, 2)}
+    peaks = []
+    for i, m in sorted(wins, key=lambda x: (-x[1], x[0])):
+        if all(abs(i - j) >= w for j, _ in peaks):
+            peaks.append((i, m))
+            if len(peaks) == ENERGY_PEAKS:
+                break
+    qi, qm = min(wins, key=lambda x: (x[1], x[0]))
+    return {"unit": ENERGY_UNIT, "window_s": w * step, "min": min(values), "max": max(values),
+            "median": round(statistics.median(values), 2), "peaks": [span(i, m) for i, m in peaks],
+            "quietest": span(qi, qm)}
+
+
+def pick_boundaries(nov, min_gap=SEC_MIN, thresh=SEC_NOVELTY_MIN, cap=SEC_MAX - 1):
+    """nov[i]: novelty at boundary index i (None where not computed). Candidates: nov >= thresh and the maximum of
+    its +-min_gap neighbourhood (ties: the earliest). Accepted greedily by novelty (ties earliest) when >= min_gap
+    from every accepted one and from both ends (0 and len(nov)); at most cap. Returns sorted indices."""
+    n = len(nov)
+    cand = []
+    for i, x in enumerate(nov):
+        if x is None or x < thresh or i < min_gap or n - i < min_gap:
+            continue
+        lo, hi = max(0, i - min_gap), min(n, i + min_gap + 1)
+        if all(nov[j] is None or nov[j] < x for j in range(lo, i)) and \
+                all(nov[j] is None or nov[j] <= x for j in range(i + 1, hi)):
+            cand.append(i)
+    out = []
+    for i in sorted(cand, key=lambda k: (-nov[k], k)):
+        if len(out) >= cap:
+            break
+        if all(abs(i - j) >= min_gap for j in out):
+            out.append(i)
+    return sorted(out)
+
+
+def label_name(k):
+    return chr(65 + k) if k < 26 else chr(65 + k // 26 - 1) + chr(65 + k % 26)
+
+
+def assign_labels(sim, thresh=SEC_GROUP_MIN):
+    """sim[a][b]: segment similarity 0..1. In time order each segment joins the label group whose first segment it is
+    most similar to (ties: the earlier group) when that similarity >= thresh, else it starts a new label (A, B, ...
+    in order of first appearance). Returns [(label, similarity to its group's first segment)]."""
+    reps, out = [], []
+    for k in range(len(sim)):
+        best = max(range(len(reps)), key=lambda g: (sim[k][reps[g]], -g)) if reps else None
+        if best is not None and sim[k][reps[best]] >= thresh:
+            out.append((label_name(best), round(min(1.0, max(0.0, sim[k][reps[best]])), 3)))
+        else:
+            reps.append(k)
+            out.append((label_name(len(reps) - 1), 1.0))
+    return out
+
+
+def top_chord(chords, start, end):
+    """Label with the most chord time inside [start, end] (ties: earliest overlap), or None."""
+    acc = {}
+    for order, c in enumerate(chords):
+        ov = min(c["end"], end) - max(c["start"], start)
+        if ov > 0:
+            a = acc.setdefault(c["label"], [0.0, -order])
+            a[0] += ov
+    if not acc:
+        return None
+    return max(acc.items(), key=lambda kv: (round(kv[1][0], 6), kv[1][1]))[0]
+
+
+def section_energy(values, start, end, step=ENERGY_STEP):
+    """Mean of the energy values whose window midpoint lies in [start, end) (else the window holding the midpoint)."""
+    sel = [v for i, v in enumerate(values) if start <= (i + 0.5) * step < end]
+    if not sel:
+        sel = [values[min(len(values) - 1, int(((start + end) / 2.0) // step))]]
+    return round(sum(sel) / len(sel), 2)
+
+
+def _segment_similarity(ca, cb, za, zb):
+    """0.5 x cosine of the mean chroma (both >= 0, so 0..1) + 0.5 x exp(-d^2/2), d = RMS difference of the mean
+    standardized MFCCs in z units (identical timbre 1, one z unit apart 0.61)."""
+    na, nb = math.sqrt(sum(x * x for x in ca)), math.sqrt(sum(x * x for x in cb))
+    cc = sum(x * y for x, y in zip(ca, cb)) / (na * nb) if na > 0 and nb > 0 else 0.0
+    d2 = sum((x - y) ** 2 for x, y in zip(za, zb)) / float(len(za))
+    return 0.5 * min(1.0, max(0.0, cc)) + 0.5 * math.exp(-d2 / 2.0)
+
+
+def structure(chroma, mfcc, frame_times, beats, duration, energy, chords):
+    """Sections from beat-synchronous chroma + timbre (see SEC_METHOD). chroma/mfcc: per-frame arrays (frames x 12),
+    frame_times: their times. Returns (sections, warning|None)."""
+    import numpy as np
+    edges = [b for b in beats if 0.0 < b < duration]
+    if not beats or len(frame_times) == 0:
+        return [], "no_sections: no beats, sections need a beat grid"
+    nb = len(edges) - 1  # beat intervals [edges[k], edges[k+1])
+    if nb < 2 * SEC_KERNEL:
+        sections = [(0.0, duration)]
+        warn = "sections_single: fewer than %d beat intervals, one section" % (2 * SEC_KERNEL)
+    else:
+        warn = None
+        ft = np.asarray(frame_times, dtype=np.float64)
+        lo = np.searchsorted(ft, edges[:-1], side="left")
+        hi = np.searchsorted(ft, edges[1:], side="left")
+        C, M = np.zeros((nb, 12)), np.zeros((nb, mfcc.shape[1]))
+        for k in range(nb):
+            a, b = lo[k], hi[k]
+            if b <= a:
+                a = int(np.argmin(np.abs(ft - (edges[k] + edges[k + 1]) / 2.0)))
+                b = a + 1
+            C[k], M[k] = chroma[a:b].mean(axis=0), mfcc[a:b].mean(axis=0)
+        sd = M.std(axis=0)
+        Z = (M - M.mean(axis=0)) / np.where(sd > 1e-9, sd, 1.0)
+        unit = lambda X: X / np.maximum(np.linalg.norm(X, axis=1, keepdims=True), 1e-12)
+        F = np.hstack([unit(C), unit(Z)]) / math.sqrt(2.0)
+        S = F @ F.T  # 0.5 cos(chroma) + 0.5 cos(timbre), -1..1
+        h = SEC_KERNEL  # only where the full kernel fits: truncated kernels near the ends see part of a loop
+        u = np.arange(-h, h)
+        g = np.exp(-0.5 * ((u + 0.5) / (h / 2.0)) ** 2) * np.where(u < 0, -1.0, 1.0)
+        K = np.outer(g, g)
+        K /= np.sum(np.abs(K))
+        nov = [None] * (nb + 1)
+        for i in range(h, nb - h + 1):
+            nov[i] = float(np.sum(K * S[i - h:i + h, i - h:i + h]))
+        cut = pick_boundaries(nov, cap=SEC_MAX - 1)
+        bounds = [0.0] + [edges[i] for i in cut] + [duration]
+        sections = list(zip(bounds[:-1], bounds[1:]))
+        idx = [0] + cut + [nb]
+        cm = [C[a:b].mean(axis=0).tolist() for a, b in zip(idx[:-1], idx[1:])]
+        zm = [Z[a:b].mean(axis=0).tolist() for a, b in zip(idx[:-1], idx[1:])]
+    if len(sections) == 1:
+        labels = [("A", 1.0)]
+    else:
+        sim = [[_segment_similarity(cm[a], cm[b], zm[a], zm[b]) for b in range(len(cm))] for a in range(len(cm))]
+        labels = assign_labels(sim)
+    out = []
+    for (s, e), (lab, sf) in zip(sections, labels):
+        out.append({"start": r3(s), "end": r3(e), "label": lab, "energy_mean": section_energy(energy, s, e),
+                    "top_chord": top_chord(chords, s, e), "similarity_to_first": sf})
+    return out, warn
+
+
 def onset_envelope(audio):
     """Normalized (0..1) half-rectified L1 spectral flux per ONSET_HOP frame; frame i centred at i*ONSET_HOP."""
     import essentia.standard as es
@@ -433,10 +626,13 @@ def analyze(path, model=TEMPO_CNN_MODEL):
     peaks = es.SpectralPeaks(orderBy="magnitude", magnitudeThreshold=0.00001, minFrequency=20, maxFrequency=3500,
                              maxPeaks=60, sampleRate=RATE)
     hpcp = es.HPCP(size=12, sampleRate=RATE)
-    pcps = []
+    mfcc = es.MFCC(inputSize=FRAME // 2 + 1, sampleRate=RATE, numberCoefficients=13)
+    pcps, mfccs = [], []
     for frame in es.FrameGenerator(audio, frameSize=FRAME, hopSize=HOP, startFromZero=True):
-        f, m = peaks(spectrum(window(frame)))
+        sp = spectrum(window(frame))
+        f, m = peaks(sp)
         pcps.append(hpcp(f, m))
+        mfccs.append(mfcc(sp)[1][1:])  # coefficient 0 (overall level) left out: energy is reported on its own
     chords, frame_count = [], 0
     if pcps:
         labels, strengths = es.ChordsDetection(hopSize=HOP, sampleRate=RATE, windowSize=2.0)(
@@ -454,6 +650,14 @@ def analyze(path, model=TEMPO_CNN_MODEL):
             warnings.append("chord_strength_unavailable: non-finite native strength; segment strength is null")
     if not chords:
         warnings.append("no_chords: no chord segment was produced")
+
+    energy = energy_values(x16, duration)
+    step = HOP / float(RATE)
+    sections, sec_warn = structure(np.array(pcps, dtype=np.float64).reshape(-1, 12),
+                                   np.array(mfccs, dtype=np.float64).reshape(-1, 12),
+                                   [min(i * step, duration) for i in range(len(pcps))], beats, duration, energy, chords)
+    if sec_warn:
+        warnings.append(sec_warn)
 
     return {
         "bpm": round(bpm, 2),
@@ -476,6 +680,11 @@ def analyze(path, model=TEMPO_CNN_MODEL):
         "chord_frame_segment_count": frame_count,
         "chords_reliability": "low_reference",
         "chord_vocabulary": "major/minor triads (ChordsDetection)",
+        "energy": {"unit": ENERGY_UNIT, "step_s": ENERGY_STEP, "values": energy},
+        "energy_summary": energy_summary(energy, r3(duration)),
+        "sections": sections,
+        "sections_method": SEC_METHOD,
+        "sections_reliability": "low_reference",
         "sample_rate": RATE,
         "source_sample_rate": SRC_RATE,
         "duration": r3(duration),

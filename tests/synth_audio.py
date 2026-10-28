@@ -4,7 +4,9 @@ Usage: synth_audio.py KIND SECONDS OUT.wav
 KIND: click (120 BPM click track), chords (C - Am - F - G, 2 s each, with a soft 120 BPM pulse), mix (same as chords),
       modulation (C major I-IV-V-I for the first half, then D major I-IV-V-I; 2 s chords, soft 120 BPM pulse),
       kick100 (synthetic kick on every beat at 100 BPM only), kick100mid (the same kicks plus equally strong kicks
-      exactly halfway between them: an effective 200 BPM pulse)
+      exactly halfway between them: an effective 200 BPM pulse),
+      abab (song form A-B-A-B in 15 s blocks, soft 120 BPM pulse throughout: A = C - Am - F - G with three soft
+      harmonics; B = E - C#m - A - B with eight sawtooth-like harmonics at about +8 dB; best with SECONDS = 60)
 """
 import sys
 import wave
@@ -12,7 +14,7 @@ import wave
 import numpy as np
 
 RATE = 16000
-SEMITONE = {"C": 0, "C#": 1, "D": 2, "E": 4, "F": 5, "F#": 6, "G": 7, "A": 9, "B": 11}
+SEMITONE = {"C": 0, "C#": 1, "D": 2, "D#": 3, "E": 4, "F": 5, "F#": 6, "G": 7, "G#": 8, "A": 9, "B": 11}
 PROGRESSION = [("C", ("C", "E", "G")), ("Am", ("A", "C", "E")), ("F", ("F", "A", "C")), ("G", ("G", "B", "D"))]
 
 
@@ -54,7 +56,12 @@ def freq(name):
     return 261.63 * 2 ** (SEMITONE[name] / 12.0)
 
 
-def chords(n, seg_seconds=2.0, progression=PROGRESSION):
+E_MAJOR = [("E", ("E", "G#", "B")), ("C#m", ("C#", "E", "G#")), ("A", ("A", "C#", "E")), ("B", ("B", "D#", "F#"))]
+SOFT = ((1, 1.0), (2, 0.5), (3, 0.25))
+BRIGHT = tuple((h, 1.0 / h) for h in range(1, 9))
+
+
+def chords(n, seg_seconds=2.0, progression=PROGRESSION, partials=SOFT, gain=0.05):
     out = np.zeros(n, dtype=np.float64)
     seg = int(seg_seconds * RATE)
     t = np.arange(seg) / RATE
@@ -67,9 +74,9 @@ def chords(n, seg_seconds=2.0, progression=PROGRESSION):
         for name in notes:
             for octave in (0.5, 1.0):
                 f = freq(name) * octave
-                for h, a in ((1, 1.0), (2, 0.5), (3, 0.25)):
+                for h, a in partials:
                     y += a * np.sin(2 * np.pi * f * h * t)
-        y *= env * 0.05
+        y *= env * gain
         m = min(seg, n - start)
         out[start:start + m] += y[:m]
     return out
@@ -89,6 +96,14 @@ def main(kind, seconds, path):
         y = kicks(n)
     elif kind == "kick100mid":
         y = kicks(n) + kicks(n, offset=0.3)  # 0.6 s period at 100 BPM: halfway = 0.3 s
+    elif kind == "abab":
+        block = 15 * RATE
+        parts = []
+        for k in range(0, n, block):
+            m = min(block, n - k)
+            parts.append(chords(m, gain=0.02) if (k // block) % 2 == 0 else
+                         chords(m, progression=E_MAJOR, partials=BRIGHT, gain=0.045))
+        y = np.concatenate(parts) + clicks(n, gain=0.1)
     else:
         raise SystemExit("unknown kind")
     y = np.clip(y, -0.99, 0.99)

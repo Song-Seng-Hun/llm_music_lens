@@ -55,7 +55,7 @@ CONFIG_KEYS = {"bind", "port", "allow", "clients", "cert", "key", "ml", "root", 
                "launchd_logs", "test_mode", "limits", "test_ready_file", "rhythm"}
 RHYTHM_KEYS = {"python", "worker"}
 RHYTHM_DIR = "results-rhythm"  # under root: <result_id>.json, 0600, written atomically
-RHYTHM_LAYERS = ("beats", "chords")
+RHYTHM_LAYERS = ("beats", "chords", "energy")
 RHYTHM_MAX_BEATS = 5000
 RHYTHM_MAX_CHORDS = 20000
 RHYTHM_MAX_KEY_SECTIONS = 64  # worker 0.2.0 emits <= 30 (20 s windows over 600 s)
@@ -908,7 +908,8 @@ def check_rhythm(v):
         for e in est:
             if not isinstance(e, dict) or not _num(e.get("bpm"), 0, 1000) or not _num(e.get("share"), 0, 1):
                 return None
-        if not _rhythm_v2_ok(v, dur) or not _rhythm_v21_ok(v) or not _rhythm_v22_ok(v):
+        if (not _rhythm_v2_ok(v, dur) or not _rhythm_v21_ok(v) or not _rhythm_v22_ok(v)
+                or not _rhythm_v30_ok(v, dur)):
             return None
         if "worker_sha256" in v and not (isinstance(v["worker_sha256"], str) and RE_HEX64.match(v["worker_sha256"])):
             return None
@@ -1018,6 +1019,76 @@ def _rhythm_v22_ok(v):
                and _num(t["prob"], 0, 1) for t in top)
 
 
+ENERGY_DB = (-120, 0)  # dBFS: the worker's floor and digital full scale
+ENERGY_MAX_VALUES = 601
+SECTIONS_MAX = 40
+RE_SECTION_LABEL = re.compile(r"\A[A-Z]{1,2}\Z")
+SPAN_KEYS = {"start", "end", "mean"}
+SECTION_KEYS = {"start", "end", "label", "energy_mean", "top_chord", "similarity_to_first"}
+ENERGY_SUMMARY_KEYS = {"unit", "window_s", "min", "max", "median", "peaks", "quietest"}
+
+
+def _label_index(lab):
+    """A=0 .. Z=25, AA=26 .. (the worker's order of first appearance)."""
+    return ord(lab) - 65 if len(lab) == 1 else (ord(lab[0]) - 64) * 26 + ord(lab[1]) - 65
+
+
+def _span_ok(d, dur, lo, hi):
+    return (isinstance(d, dict) and set(d) == SPAN_KEYS and _num(d["start"], 0, dur) and _num(d["end"], 0, dur)
+            and d["start"] < d["end"] and _num(d["mean"], lo, hi))
+
+
+def _rhythm_v30_ok(v, dur):
+    """Fields added by worker 0.3.0 (energy, energy_summary, sections, sections_method, sections_reliability); absent
+    in older files, valid when present: finite, bounded, sorted, inside the duration, exact key sets, capped."""
+    if "energy" in v:
+        e = v["energy"]
+        if not (isinstance(e, dict) and set(e) == {"unit", "step_s", "values"} and _short_str(e["unit"], 16)
+                and _num(e["step_s"], 0.01, 60) and isinstance(e["values"], list)
+                and 1 <= len(e["values"]) <= ENERGY_MAX_VALUES and all(_num(x, *ENERGY_DB) for x in e["values"])
+                and (len(e["values"]) - 1) * e["step_s"] <= dur):
+            return False
+    if "energy_summary" in v:
+        es = v["energy_summary"]
+        if es is not None:
+            if not (isinstance(es, dict) and set(es) == ENERGY_SUMMARY_KEYS and _short_str(es["unit"], 16)
+                    and _num(es["window_s"], 0.01, 600) and all(_num(es[k], *ENERGY_DB) for k in ("min", "max", "median"))
+                    and es["min"] <= es["median"] <= es["max"] and isinstance(es["peaks"], list)
+                    and 1 <= len(es["peaks"]) <= 3):
+                return False
+            lo, hi = es["min"] - 0.01, es["max"] + 0.01
+            if not (all(_span_ok(p, dur, lo, hi) for p in es["peaks"]) and _span_ok(es["quietest"], dur, lo, hi)):
+                return False
+            pk = es["peaks"]
+            if any(b["mean"] > a["mean"] for a, b in zip(pk, pk[1:])):  # loudest first
+                return False
+            for i, a in enumerate(pk):
+                if any(a["start"] < b["end"] and b["start"] < a["end"] for b in pk[i + 1:]):  # non-overlapping
+                    return False
+    if "sections" in v:
+        ss = v["sections"]
+        if not isinstance(ss, list) or len(ss) > SECTIONS_MAX:
+            return False
+        prev_end, seen = 0, 0
+        for r in ss:
+            if not (isinstance(r, dict) and set(r) == SECTION_KEYS and _num(r["start"], 0, dur)
+                    and _num(r["end"], 0, dur) and r["start"] < r["end"] and r["start"] >= prev_end
+                    and isinstance(r["label"], str) and RE_SECTION_LABEL.match(r["label"])
+                    and _num(r["energy_mean"], *ENERGY_DB) and _num(r["similarity_to_first"], 0, 1)
+                    and (r["top_chord"] is None or _short_str(r["top_chord"], 16))):
+                return False
+            k = _label_index(r["label"])
+            if k > seen:  # labels are letters in order of first appearance: a new one is the next letter
+                return False
+            seen = max(seen, k + 1)
+            prev_end = r["end"]
+    if "sections_method" in v and not _short_str(v["sections_method"], 200):
+        return False
+    if "sections_reliability" in v and v["sections_reliability"] != "low_reference":
+        return False
+    return True
+
+
 def confidence_band(c):
     """Bands documented by Essentia BeatTrackerMultiFeature: [0,1) very low, [1,1.5] low, (1.5,3.5] good, >3.5."""
     if c < 1:
@@ -1043,7 +1114,8 @@ def _tempo_cnn_retry(v):
 def rhythm_summary(v):
     """Compact view for analyze and /report; beats and chord rows stay in the stored file (/timeline).
     Fields from worker 0.2.0 (bpm_alternatives[_note], key_sections, key_change_count, chords_grid) and 0.2.1
-    (double_tempo_evidence[_note]) and 0.2.2 (tempo_cnn) are null when the stored file predates them."""
+    (double_tempo_evidence[_note]) and 0.2.2 (tempo_cnn) and 0.3.0 (energy_summary, sections, sections_method,
+    sections_reliability) are null when the stored file predates them. Energy values come only from /timeline."""
     return {"status": "done", "bpm": v["bpm"], "bpm_confidence": v["bpm_confidence"],
             "bpm_confidence_band": confidence_band(v["bpm_confidence"]),
             "bpm_confidence_scale": v.get("bpm_confidence_scale"), "bpm_estimates": v.get("bpm_estimates", []),
@@ -1053,6 +1125,8 @@ def rhythm_summary(v):
             "key": v["key"], "key_sections": v.get("key_sections"), "key_change_count": v.get("key_change_count"),
             "beat_count": len(v["beats"]), "chord_segment_count": len(v["chords"]),
             "chords_grid": v.get("chords_grid"), "chords_reliability": v.get("chords_reliability"),
+            "energy_summary": v.get("energy_summary"), "sections": v.get("sections"),
+            "sections_method": v.get("sections_method"), "sections_reliability": v.get("sections_reliability"),
             "downbeats": v["downbeats"], "duration": v["duration"], "tool": v["tool"], "warnings": v["warnings"]}
 
 
@@ -1060,6 +1134,10 @@ def rhythm_page(rid, v, layer, start, end, cursor, limit):
     """Native timeline rules: rows overlapping [start, end], cursor <= total, <= limit rows under the page byte cap."""
     if layer == "beats":
         rows = [{"time": t} for t in v["beats"] if start <= t <= end]
+    elif layer == "energy":  # a value covers [time, time + step_s); rows whose time lies in [start, end]
+        e = v["energy"]
+        rows = [{"time": round(i * e["step_s"], 3), "value": x} for i, x in enumerate(e["values"])
+                if start <= i * e["step_s"] <= end]
     else:
         rows = [c for c in v["chords"] if c["end"] >= start and c["start"] <= end]
     if cursor > len(rows):
@@ -1076,6 +1154,8 @@ def rhythm_page(rid, v, layer, start, end, cursor, limit):
            "warnings": v["warnings"], "truncated": nxt < len(rows), "continuation": nxt if nxt < len(rows) else None}
     if layer == "chords":
         out["reliability"] = v.get("chords_reliability", "low_reference")
+    elif layer == "energy":
+        out["unit"], out["step_s"] = v["energy"]["unit"], v["energy"]["step_s"]
     return out
 
 
@@ -1795,7 +1875,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(200, v)
 
     def rhythm_timeline(self, app, rid, q):
-        """layer=beats|chords, served from the stored rhythm file with the native range/limit/cursor rules."""
+        """layer=beats|chords|energy, served from the stored rhythm file with the native range/limit/cursor rules."""
         vals = {}
         for k, default in (("start", 0.0), ("end", 600.0)):
             if k in q:
@@ -1823,6 +1903,8 @@ class Handler(BaseHTTPRequestHandler):
             raise HttpError("rhythm_not_found")
         if st != "ok":
             raise HttpError("invalid_result")
+        if q["layer"] == "energy" and "energy" not in v:  # stored before worker 0.3.0: that layer is not stored
+            raise HttpError("rhythm_not_found")
         self.send_json(200, rhythm_page(rid, v, q["layer"], vals["start"], vals["end"], cursor, limit))
 
     def do_analyze(self, app, client, rid, query, cl, rest, body_sha, expect_continue):

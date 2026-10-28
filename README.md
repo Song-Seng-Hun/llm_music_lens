@@ -13,7 +13,7 @@ Nothing here is installed. No LaunchAgent, firewall rule, certificate or key is 
 | File | Purpose |
 | --- | --- |
 | `server.py` | The server: config, en0/en1 address discovery, TLS 1.2+, strict framing, HMAC auth, durable nonce and receipt logs, pipeline gate, staging, afconvert, strict WAV check, hard-link promotion, `ml` calls by argv, error mapping, cleanup, logs |
-| `rhythm_worker.py` | Optional rhythm layer worker (Essentia DSP plus one pinned local TempoCNN model): BPM (+ half/double, + learned TempoCNN estimate), beats, key (+ 20 s sections), beat-grid chords. Runs under the Essentia python, never in the listener |
+| `rhythm_worker.py` | Optional rhythm layer worker (Essentia DSP plus one pinned local TempoCNN model): BPM (+ half/double, + learned TempoCNN estimate), beats, key (+ 20 s sections), beat-grid chords, 1 s energy curve, repeated-section structure (A/B/...). Runs under the Essentia python, never in the listener |
 | `limit_exec.py` | Sets RLIMIT_CPU 60 s / FSIZE 24 MiB / NOFILE 32, then `execv /usr/bin/afconvert -f WAVE -d LEI16@16000 -c 1 src dst` |
 | `sign.py` | Shared canonical-string and HMAC helper (server, tests, Python clients) |
 | `sign_vector.mjs` | Reference Node signer; prints or checks the fixed vector (`tests/vectors.json`) |
@@ -94,7 +94,7 @@ Do these only after approving an always-on listener (RunAtLoad + KeepAlive, en0/
    To unload it: `launchctl bootout gui/$(id -u)/com.music-lens.lan-api`. Unloading sends SIGTERM; see
    "Stopping" below. A clean exit does not mean every analysis finished or was cancelled.
 
-## Optional rhythm layer (beats, key, chords)
+## Optional rhythm layer (beats, key, chords, energy, sections)
 
 Off unless the config has a `rhythm` key. Without it the server loads and behaves exactly as before.
 
@@ -119,7 +119,7 @@ API:
   The worker also bounds itself (SIGALRM 330 s, RLIMIT_CPU 600 s) in case the server dies first.
 - Rhythm never fails the analyze: the reply stays 200 with the ASR fields unchanged plus `rhythm`:
   - success: the same compact summary as `/report` plus `cache_hit` and `stored` (no beat or chord rows; page
-    them with `/timeline` `layer=beats|chords`);
+    them with `/timeline` `layer=beats|chords|energy`);
   - `{"status":"busy","code":"busy"}` when the team lock is held (never waits);
   - `{"status":"timeout","code":"timeout"|"no_time_left"}`;
   - `{"status":"failed","code":...}` with the worker's error code (`invalid_audio`, `too_short`, `analysis_failed`,
@@ -140,21 +140,29 @@ API:
   read at start, its hash is null and nothing is reused (every rhythm request recomputes); that alone does not make
   the run fail, the run then succeeds or fails on its own (a worker that is really missing fails at spawn). `/report` and `/timeline` read whatever
   is stored and never recompute. A store failure still returns the
-  data with `stored: false`. The files are not pruned automatically (about 30 KB per 10 minutes of audio).
+  data with `stored: false`. The files are not pruned automatically (about 35-45 KB per 10 minutes of audio with
+  worker 0.3.0: 34,114 B for the 600 s loop, 41,434 B for a 600 s file with 40 sections; cap `rhythm_output` 4 MiB).
 - `GET /report/<id>` adds a `rhythm` summary (`status`, `bpm`, `bpm_confidence`, `bpm_confidence_band`,
   `bpm_estimates`, `bpm_alternatives`, `bpm_alternatives_note`, `double_tempo_evidence`,
   `double_tempo_evidence_note`, `tempo_cnn`, `key`, `key_sections`, `key_change_count`,
-  `beat_count`, `chord_segment_count`, `chords_grid`, `downbeats`, `duration`, `tool`, `warnings`) when a stored file
+  `beat_count`, `chord_segment_count`, `chords_grid`, `energy_summary`, `sections`, `sections_method`,
+  `sections_reliability`, `downbeats`, `duration`, `tool`, `warnings`) when a stored file
   exists, re-serializing the native JSON (number formatting may change). Files stored by worker 0.1.0 lack the
   0.2.0 fields and still load; the summary then has `bpm_alternatives`, `bpm_alternatives_note`, `key_sections`,
   `key_change_count` and `chords_grid` set to `null` (they are not recomputed; old chord rows stay frame-level).
   Files from 0.1.0 and 0.2.0 likewise give `double_tempo_evidence` and `double_tempo_evidence_note` as `null`, and
-  files from before 0.2.2 give `tempo_cnn: null`. A damaged file gives `rhythm: {"status":"failed","code":"invalid_result"}`.
+  files from before 0.2.2 give `tempo_cnn: null`, and files from before 0.3.0 give `energy_summary`, `sections`,
+  `sections_method` and `sections_reliability` as `null`. A damaged file gives `rhythm: {"status":"failed","code":"invalid_result"}`.
   No file: native bytes unchanged.
-- `GET /timeline/<id>?layer=beats|chords` is served by the server from the stored file with the native rules:
+- `GET /timeline/<id>?layer=beats|chords|energy` is served by the server from the stored file with the native rules:
   `start`/`end` 0..600 (default 0 and 600, `end >= start`), rows overlapping the range, `limit` 1..200 (default 100),
   `cursor` <= total, a ~43 KB page byte cap, `truncated` and `continuation`. Beats rows are `{"time"}`, chords rows
-  `{start, end, label, strength}` (with `reliability: "low_reference"`). No stored file: 404 `rhythm_not_found`.
+  `{start, end, label, strength}` (with `reliability: "low_reference"`), energy rows `{time, value}` (with `unit`
+  and `step_s`; a row covers `[time, time + step_s)` and is selected when its `time` lies in `[start, end]`).
+  No stored file: 404 `rhythm_not_found`. `layer=energy` on a file stored before worker 0.3.0 (no `energy` field)
+  gives the same 404 `rhythm_not_found`: the request is valid, that layer is just not stored for this result, and a
+  new `rhythm=1` analyze recomputes it (the worker hash changed); `invalid_argument` would wrongly blame the
+  request. Sections are in the summary only (at most 40 rows), not a timeline layer.
   `words`/`emotion` still go to `ml timeline` unchanged.
 - `GET /status`: when the layer is configured, adds `rhythm: {configured, python_present, worker_present,
   worker_sha256}` (file checks only, Essentia is not run; `worker_sha256` is the start-time hash, null if unreadable). Not configured: native bytes unchanged (no `rhythm` key means unavailable).
@@ -163,7 +171,7 @@ API:
 `very_low` [0, 1), `low` [1, 1.5], `good` (1.5, 3.5] (Essentia: about 80% AMLt), `excellent` above 3.5. It is
 Essentia's guide, not a calibration on the team's music.
 
-Worker output (worker 0.2.2): `bpm`, `bpm_confidence` (RhythmExtractor2013 multifeature, native 0..~5.32,
+Worker output (worker 0.3.0): `bpm`, `bpm_confidence` (RhythmExtractor2013 multifeature, native 0..~5.32,
 uncalibrated), `bpm_estimates` (top 5 shares), `bpm_alternatives` (`[bpm/2, bpm*2]`, 2 decimals, only values within
 40..300; empty when bpm is 0) with `bpm_alternatives_note`, `double_tempo_evidence` with
 `double_tempo_evidence_note` (diagnostic, see below), `tempo_cnn` (learned estimate, see below), `beats` (s, ms rounding),
@@ -174,7 +182,8 @@ count before the beat vote, stored file only), `chords_reliability: "low_referen
 resampled from 16 kHz because RhythmExtractor2013 assumes 44.1 kHz), `duration`, `tool` (name, version,
 `essentia_version`), `warnings` (`short_audio` < 10 s, `near_silent`, `no_beats`, `low_bpm_confidence` < 1.5,
 `low_key_strength` < 0.5, `key_changes` when there is more than one key section, `no_chords`,
-`double_tempo_evidence_unavailable`). Audio under 1 s is
+`double_tempo_evidence_unavailable`, `no_sections`, `sections_single`), `energy`, `energy_summary`, `sections`,
+`sections_method`, `sections_reliability: "low_reference"` (see "Energy and sections" below). Audio under 1 s is
 refused (`too_short`).
 
 - Key sections: the same KeyExtractor (`bgate`, frame 4096, hop 2048) on fixed, non-overlapping 20 s windows (a last
@@ -269,6 +278,60 @@ the same file: 6.3 s, 0.99 GB).
   synthetic C-Am-F-G loop beat-grid and frame-level segments agree (2 s each); on the 30 s click track (no harmony)
   frame labels flicker and the beat vote cuts 32 segments to 11. Synthetic music did not make the frame labels
   flicker (the 2 s ChordsDetection window smooths them), so the reduction on real music is untested here.
+
+### Energy and sections (worker 0.3.0)
+
+Purpose: song-level form for "compose using this song as a reference" (where material repeats, where it gets loud),
+not a transcription. There are no downbeats and no named parts.
+
+- `energy` `{unit: "dBFS", step_s: 1, values}`: RMS level of the 16 kHz source per non-overlapping 1 s window
+  `[i, i+1)` (a last partial window of at least 0.5 s is kept, a shorter one dropped; at most 600 values), in dB
+  relative to digital full scale, 2 decimals, floor -120 (silence). RMS dB was chosen over Essentia `Loudness`
+  (Stevens power law, unitless) because dBFS is a plain, reproducible unit agents can compare across songs of the
+  same master; it is not perceptual loudness (no K/A weighting: bass-heavy passages read louder than they sound,
+  and it is not LUFS).
+- `energy_summary` `{unit, window_s: 8, min, max, median, peaks, quietest}`: `peaks` = the 3 loudest
+  non-overlapping 8 s windows (`{start, end, mean}`, plain mean of the dB values, sliding in 1 s steps, chosen
+  greedily, loudest first, ties earliest), `quietest` = the lowest 8 s window. 8 s is about 4 bars at 120 BPM, one
+  phrase: long enough to ignore single hits, short enough to sit inside one section. Audio under 8 s uses one
+  window of everything.
+- `sections` `[{start, end, label, energy_mean, top_chord, similarity_to_first}]`, contiguous from 0 to
+  `duration`, at most 40. Method (`sections_method` states it in short form):
+  1. Beat-synchronous features: per beat interval the mean 12-bin HPCP chroma (the chord path's frames, frame
+     4096, hop 2048 at 44.1 kHz) and the mean MFCC 2-13 (coefficient 1 = overall level left out, since energy is
+     reported on its own). MFCCs are z-scored per coefficient over the song; chroma and timbre are each
+     L2-normalized and weighted equally, so the self-similarity matrix is 0.5 cos(chroma) + 0.5 cos(timbre).
+  2. Foote checkerboard novelty with a Gaussian-tapered kernel of 2 x 16 beats (sigma 8 beats), normalized so that
+     novelty is (same-side minus cross similarity) / 2 on a -1..1 scale. 16 beats is about 4 bars of 4/4: a
+     typical 4-bar loop then sits inside one kernel half, so chord changes inside a loop do not look like section
+     changes. Novelty is computed only where the full kernel fits: truncated kernels near the ends compared part of
+     a loop with another part and produced false boundaries (synthetic: up to 0.27). So no boundary falls within 16
+     beats (8 s at 120 BPM) of either end; a shorter intro or outro joins its neighbour.
+  3. Boundaries: novelty >= 0.15 that is the maximum of its +-8 beat neighbourhood (ties earliest), accepted
+     greedily by novelty when >= 8 beats (~2 bars, the minimum section length) from every accepted one; at most 39.
+     Synthetic calibration: true A/B changes gave 0.33-0.38; inside one loop and texture novelty stayed <= 0.12.
+     The threshold is not calibrated on real songs.
+  4. Labels: per section the mean chroma and the mean z-scored MFCC; similarity = 0.5 x cosine(mean chroma) +
+     0.5 x exp(-d^2/2) with d the RMS difference of the mean MFCCs in z units (0..1). In time order a section joins
+     the label group whose first section it is most similar to when that similarity is >= 0.75, else it gets the
+     next letter (A, B, C, ... in order of first appearance; after Z: AA, AB, ...). Adjacent sections may share a
+     label (not merged: the boundary had novelty but the material matches). `similarity_to_first` is that
+     similarity (1.0 for a group's first section).
+  5. `energy_mean`: mean of the energy values whose window midpoint lies in the section; `top_chord`: the beat-grid
+     chord label with the most time inside the section (ties: earliest), null when no chord overlaps.
+  No beats: `sections: []` and warning `no_sections`. Fewer than 32 beat intervals: one section `A` and warning
+  `sections_single`. Deterministic (fixed parameters, no random state).
+- Honest limits: labels are similarity groups, not verse/chorus/bridge, and two different parts with the same
+  chords and timbre get one letter; a part that differs only in melody or lyrics is invisible to these features.
+  Boundaries sit on beat times, never within 8 s of the ends. Untested on real songs; `sections_reliability:
+  "low_reference"`. Synthetic results (worker 0.3.0): A-B-A-B in 15 s blocks (A = C-Am-F-G with 3 soft partials,
+  B = E-C#m-A-B with 8 sawtooth-like partials at about +8 dB, soft 120 BPM pulse) gave A 0-15, B 15-30, A 30-45,
+  B 45-60 (boundaries exactly on the block edges), energy_mean A -26.68 / B -18.77 dB, similarity_to_first >=
+  0.999, peaks 15-23, 45-53, 23-31 and quietest 30-38; the same form over 600 s gave 40 sections ABAB... on every
+  15 s edge; the C-Am-F-G loop (30 s and 600 s), the click and kick tracks gave one section A; the C major ->
+  D major modulation track (same timbre) gave A 0-27.98 / B 27.98-60 (true change at 30 s). 600 s runtime is
+  unchanged within noise (worker 0.3.0 7.73-7.86 s and 1.09-1.12 GB peak RSS vs 0.2.2 7.71-7.78 s and 1.10 GB on
+  the same file, same session).
 
 ## Runtime layout (production)
 
