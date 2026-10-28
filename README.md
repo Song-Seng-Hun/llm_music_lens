@@ -572,7 +572,9 @@ repeats are reported on their own and clients compare the two.
   misspells a chorus differently each time, so on 7 team songs scored against reference lyrics from j-lyric
   (repeats = exact 8-grams of the reference text, ASR chars aligned by Levenshtein; scratch check 2026-10-28, numbers
   only), exact 8-grams found 36% of the repeated reference characters at precision 0.99, this rule 65% at 0.97.
-  Tuned on those 7 songs only. Word mode (English, Korean) is unchanged.
+  Tuned on those 7 songs only. Word units are unchanged; the unit choice follows the median word length, not the
+  language, so English or Korean ASR output that falls into char units also gets approximate matching. Both the
+  exact and the approximate 15 s spread are compared in whole microseconds (inclusive, stable under time shifts).
 - Output (summary and stored file): `done` `{status, method, unit: "char"|"word", n, blocks: [{start, end, group}],
   group_count, coverage_s, note}`: blocks sorted, non-overlapping, inside the duration, at most 40 (more: the 40
   longest, warning `lyric_repeats_capped`); `coverage_s` = summed block length. `unavailable` `{status, reason}`:

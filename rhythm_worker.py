@@ -127,7 +127,8 @@ Choices:
   characters, each timed by an even split of its word span, and an n-gram is LYRIC_N_CHAR (8) characters (about one
   sung phrase fragment, 1-2 s); otherwise (space-delimited words: English, Korean) the units are whole words and an
   n-gram is LYRIC_N_WORD (4) words, since 8 letters are only ~1.5 English words and common pairs ("iloveyou")
-  recur outside refrains. Every n-gram occurring >= 2 times with its occurrence starts spread >= LYRIC_SPREAD (15 s)
+  recur outside refrains. Every n-gram occurring >= 2 times with its occurrence starts spread >= LYRIC_SPREAD (15 s;
+  compared in whole microseconds since 0.4.4, so an exact 15 s spread counts after any time shift)
   marks all units of every occurrence covered; covered units closer than LYRIC_JOIN (3 s) join into blocks; blocks
   shorter than LYRIC_MIN_BLOCK (4 s) are dropped; blocks sharing a repeated n-gram are one group (union-find over
   every retained block touched by any unit of any occurrence, also when a >3 s pause splits it; ids
@@ -771,6 +772,13 @@ def kana_fold(text):
     return "".join(chr(ord(c) - 0x60) if "\u30a1" <= c <= "\u30f6" else c for c in text)
 
 
+def lyric_spread_ok(a, b):
+    """Start times a <= b at least LYRIC_SPREAD apart, inclusive and roundoff-stable: the difference is compared in
+    whole microseconds (1.4 and 16.4 are 15 s apart although 16.4 - 1.4 = 14.999999999999998 in binary floats);
+    the unit times themselves are not rounded."""
+    return round((b - a) * 1e6) >= round(LYRIC_SPREAD * 1e6)
+
+
 def _within_edits(a, b, k):
     """Levenshtein distance of strings a, b <= k (row minimum cut-off)."""
     prev = list(range(len(b) + 1))
@@ -803,7 +811,7 @@ def lyric_approx_pairs(units):
             for y in range(x + 1, len(ps)):
                 for off in range(w - LYRIC_APPROX_SEED + 1):
                     i, j = ps[x] - off, ps[y] - off
-                    if i < 0 or j + w > n or (i, j) in seen or units[j][1] - units[i][1] < LYRIC_SPREAD:
+                    if i < 0 or j + w > n or (i, j) in seen or not lyric_spread_ok(units[i][1], units[j][1]):
                         continue
                     if checks >= LYRIC_APPROX_MAX_CHECKS:
                         return out, True
@@ -857,7 +865,7 @@ def lyric_repeats(words, duration, reason=None):
     reps = []  # (occurrence starts, length) of the repeats: exact n-grams, then approximate char windows
     for ps in pos.values():
         ts = [units[p][1] for p in ps]
-        if len(ps) >= 2 and max(ts) - min(ts) >= LYRIC_SPREAD:
+        if len(ps) >= 2 and lyric_spread_ok(min(ts), max(ts)):
             reps.append((ps, n))
     warns = []
     if kind == "char":

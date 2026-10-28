@@ -1792,6 +1792,27 @@ class LyricApproxTest(unittest.TestCase):
         d, _ = rw.lyric_repeats(words, end)
         self.assertEqual(len(d["blocks"]), 2)  # the same chorus in katakana matches
 
+    def test_spread_exact_15s_under_time_shift(self):
+        # review F1 (0.4.4): 16.4 - 1.4 < 15 in binary floats; an exact 15 s spread must count at every offset
+        self.assertTrue(rw.lyric_spread_ok(1.4, 16.4))
+        self.assertTrue(rw.lyric_spread_ok(17.3, 32.3))
+        self.assertFalse(rw.lyric_spread_ok(1.4, 16.399))
+        filler = "".join(chr(0x4e00 + k) for k in range(40))
+        for shift in (0.0, 0.1, 0.4, 1.4, 7.3, 17.3):
+            words = []
+            for t0, text in ((0.0, "abcdefghij"), (15.0, "abcdxfghyj")):
+                words += [(c, shift + t0 + 0.5 * k, shift + t0 + 0.5 * k + 0.45) for k, c in enumerate(text)]
+            words += [(c, shift + 30.0 + 0.5 * k, shift + 30.0 + 0.5 * k + 0.45) for k, c in enumerate(filler)]
+            d, _ = rw.lyric_repeats(words, shift + 60.0)
+            self.assertEqual((len(d["blocks"]), d["group_count"]), (2, 1), shift)
+            # just under 15 s: no pair (the exact 8-gram gate uses the same comparison)
+            near = [(c, a - 0.001 if a >= shift + 15.0 and a < shift + 30.0 else a,
+                     b - 0.001 if a >= shift + 15.0 and a < shift + 30.0 else b) for c, a, b in words]
+            self.assertEqual(rw.lyric_repeats(near, shift + 60.0)[0]["blocks"], [], shift)
+        words, end = _song([VERSES[0], CHORUS, VERSES[1], VERSES[2], CHORUS])
+        shifted = [(c, a + 1.4, b + 1.4) for c, a, b in words]
+        self.assertEqual(len(rw.lyric_repeats(shifted, end + 1.4)[0]["blocks"]), 2)
+
     def test_close_windows_not_paired(self):
         # the same misspelled line within 15 s is a doubled line, not a repeat
         bad = CHORUS[:6] + "x" + CHORUS[7:]
