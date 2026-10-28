@@ -102,7 +102,9 @@ Choices:
   already joined its pieces), becomes one note; from each start the longest qualifying run wins (greedy, left to
   right); its pitch = duration-weighted MEAN rounded half up (the median of a 70/72 alternation is an extreme, the
   mean is its centre 71); (3) same-pitch join again, so a merged vibrato absorbs touching longer notes of its own
-  pitch. Monotonic runs, runs spanning more than 2 semitones, figures with one turn (mordent 72-74-72) and long
+  pitch. All merge thresholds are compared in integer milliseconds (rows are ms-rounded, so this is exact and
+  offset-independent) and the mean uses integer ms weights: pitch = (2 sum(w midi) + sum(w)) // (2 sum(w)).
+  Monotonic runs, runs spanning more than 2 semitones, figures with one turn (mordent 72-74-72) and long
   alternations (pieces >= 0.2 s) stay; a trill or neighbour-note figure within 2 semitones with pieces < 0.2 s
   (72-74-72-74) is merged: at note level it is indistinguishable from wide vibrato.
   note_count_raw = segmentation output after smoothing, before the merge. Not a transcription: octave errors, split or merged repeated notes.
@@ -706,11 +708,25 @@ def _join(group, midi):
     return {"start": group[0]["start"], "end": group[-1]["end"], "midi": midi, "note": note_name(midi)}
 
 
+def _ms(t):
+    """Seconds -> integer milliseconds. Note rows are rounded to ms, so this is exact; every merge threshold is
+    compared in these units (float differences such as 10.2 - 10.0 = 0.1999999999999993 would cross 0.2 s)."""
+    return int(round(t * 1000.0))
+
+
+def _dur_ms(x):
+    return _ms(x["end"]) - _ms(x["start"])
+
+
+def _gap_ms(a, b):
+    return _ms(b["start"]) - _ms(a["end"])
+
+
 def same_pitch_join(notes, gap=MERGE_GAP):
-    """Consecutive notes with the same midi and gap <= `gap` become one note."""
+    """Consecutive notes with the same midi and gap <= `gap` (compared in integer ms) become one note."""
     out = []
     for x in notes:
-        if out and out[-1]["midi"] == x["midi"] and x["start"] - out[-1]["end"] <= gap + 1e-9:
+        if out and out[-1]["midi"] == x["midi"] and _gap_ms(out[-1], x) <= _ms(gap):
             out[-1]["end"] = max(out[-1]["end"], x["end"])
         else:
             out.append(dict(x))
@@ -720,8 +736,7 @@ def same_pitch_join(notes, gap=MERGE_GAP):
 def _oscillation_ok(g, short, centre_max, reversals):
     lo, hi = min(x["midi"] for x in g), max(x["midi"] for x in g)
     for x in g:
-        d = x["end"] - x["start"]
-        if d >= (centre_max if hi - lo == 2 and x["midi"] == lo + 1 else short):
+        if _dur_ms(x) >= _ms(centre_max if hi - lo == 2 and x["midi"] == lo + 1 else short):
             return False
     return _reversals([x["midi"] for x in g]) >= reversals
 
@@ -737,16 +752,16 @@ def merge_notes(notes, gap=MERGE_GAP, short=MERGE_SHORT, centre_max=MERGE_CENTRE
         while j + 1 < n and j + 1 - i < max_run:
             x = notes[j + 1]
             lo2, hi2 = min(lo, x["midi"]), max(hi, x["midi"])
-            if x["start"] - notes[j]["end"] > gap + 1e-9 or hi2 - lo2 > span:
+            if _gap_ms(notes[j], x) > _ms(gap) or hi2 - lo2 > span:
                 break
             lo, hi, j = lo2, hi2, j + 1
             if _oscillation_ok(notes[i:j + 1], short, centre_max, reversals):
                 best = j
         if best > i:
             g = notes[i:best + 1]
-            w = sum(y["end"] - y["start"] for y in g)
-            mean = sum(y["midi"] * (y["end"] - y["start"]) for y in g) / w
-            out.append(_join(g, int(math.floor(mean + 0.5))))
+            w = sum(_dur_ms(y) for y in g)  # integer ms weights (>= 1 each: rows have end > start)
+            sw = sum(y["midi"] * _dur_ms(y) for y in g)
+            out.append(_join(g, (2 * sw + w) // (2 * w)))  # floor(sw / w + 1/2): exact half up
             i = best + 1
         else:
             out.append(notes[i])

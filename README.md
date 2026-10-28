@@ -429,6 +429,10 @@ balance, which scale degrees it sits on, where it climbs). Not a transcription a
      may last up to 0.5 s (the rounded pitch sits on the centre for most of a +-100 cent cycle). It becomes one note.
      From each start the longest qualifying run wins, left to right. Its pitch is the duration-weighted **mean**,
      rounded half up: the median of an even 70/72 alternation is one of the extremes, the mean is the centre 71.
+     All thresholds (30 ms, 0.2 s, 0.5 s) are compared in integer milliseconds of the ms-rounded rows, and the
+     mean uses integer ms weights with an exact half-up, so the same figure merges the same way at any time offset
+     (review fix: float differences such as 10.2 - 10.0 = 0.1999999999999993 merged four 200 ms notes at 10 s but
+     not at 0 s, and a 60.5 mean rounded to 60 at some offsets).
   4. Same-pitch join again, so a merged vibrato absorbs touching longer notes of its own pitch.
   Kept intact: monotonic runs, oscillations wider than 2 semitones, one-turn figures (mordent 72-74-72, turn
   74-72-71-72), alternations with long pieces (77-78-76(1.1 s)-78-76(1.1 s)), and pieces more than 30 ms apart. A

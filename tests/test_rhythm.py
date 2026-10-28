@@ -1393,6 +1393,42 @@ class MergeLogicTest(unittest.TestCase):
         # pieces further apart than 30 ms are not touching
         self.assertEqual(self.midis(_seq([(70, 0.1), (72, 0.1)] * 4, gap=0.04)), [70, 72] * 4)
 
+    def test_thresholds_offset_independent(self):
+        # review (0.4.2) F1: four exact 200 ms pieces with 8 ms gaps are not "shorter than 0.2 s" at any offset
+        # (float subtraction gave 10.2 - 10.0 = 0.1999999999999993 and merged them at 10 s but not at 0 s)
+        for off in (0.0, 10.0, 123.456):
+            notes = [_n(round(off + k * 0.208, 3), round(off + k * 0.208 + 0.2, 3), m)
+                     for k, m in enumerate((60, 61, 60, 61))]
+            self.assertEqual(rw.merge_notes(notes), notes, off)
+            short = [dict(x, end=round(x["end"] - 0.001, 3)) for x in notes]  # 199 ms: merged
+            self.assertEqual([x["midi"] for x in rw.merge_notes(short)], [61], off)  # mean 60.5 -> half up
+            # middle-pitch allowance in a 2-semitone run: exactly 500 ms is not shorter than 0.5 s
+            for centre, want in ((0.5, [72, 71, 70, 71, 72, 71]), (0.499, [71])):
+                run = [_n(round(off, 3), round(off + 0.1, 3), 72)]
+                for m, d in ((71, centre), (70, 0.1), (71, 0.3), (72, 0.1), (71, 0.3)):
+                    t = run[-1]["end"] + 0.008
+                    run.append(_n(round(t, 3), round(t + d, 3), m))
+                self.assertEqual([x["midi"] for x in rw.merge_notes(run)], want, (off, centre))
+            # 30 ms gap joins, 31 ms does not, same units at every offset
+            for g, want in ((0.03, 1), (0.031, 2)):
+                pair = [_n(round(off, 3), round(off + 0.5, 3), 72), _n(round(off + 0.5 + g, 3), round(off + 0.9, 3), 72)]
+                self.assertEqual(len(rw.merge_notes(pair)), want, (off, g))
+                osc = _seq([(70, 0.1), (72, 0.1)] * 3, t0=off, gap=g)
+                self.assertEqual(len(rw.merge_notes(osc)), 1 if want == 1 else 6, (off, g))
+
+    def test_half_up_offset_independent(self):
+        # review (0.4.2) F2: exact mean 60.5 (four 104 ms pieces) rounds up to 61 at every offset (the float mean
+        # 60.49999999999999 gave 60 at offset 0 and 61 at offset 1)
+        for off in (0.0, 1.0, 10.0, 77.777):
+            notes = [_n(round(off + k * 0.104, 3), round(off + (k + 1) * 0.104, 3), m)
+                     for k, m in enumerate((60, 61, 60, 61))]
+            m = rw.merge_notes(notes)
+            self.assertEqual((len(m), m[0]["midi"]), (1, 61), off)
+            self.assertEqual((m[0]["start"], m[0]["end"]), (notes[0]["start"], notes[-1]["end"]))
+            below = [dict(notes[0], end=round(notes[0]["end"] + 0.001, 3)),
+                     dict(notes[1], start=round(notes[1]["start"] + 0.001, 3))] + notes[2:]  # 60 weighs 1 ms more
+            self.assertEqual(rw.merge_notes(below)[0]["midi"], 60, off)
+
     def test_same_pitch_join(self):
         m = rw.merge_notes([_n(0.0, 0.5, 72), _n(0.52, 0.9, 72), _n(0.93, 1.2, 72), _n(1.3, 1.6, 72)])
         self.assertEqual([(x["start"], x["end"]) for x in m], [(0.0, 1.2), (1.3, 1.6)])  # 20, 30 ms join; 100 ms not
