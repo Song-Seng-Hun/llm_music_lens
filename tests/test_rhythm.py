@@ -560,6 +560,35 @@ class RhythmAnalyzeTest(RhythmBase):
             self.fw.write(stdout=out)
             self.assert_rhythm_failed("failed", "invalid_output")
 
+    def test_v40_boundary_note_density(self):
+        # review F1: a note is attributed to the section holding its onset; its density counts the note's own full
+        # length, so a note straddling a section edge (or a section whose only notes start near its end) stays valid
+        secs = [dict(SECTIONS[0], start=0.0, end=10.0), dict(SECTIONS[1], start=10.0, end=20.0)]
+        base = dict(RHYTHM_OUT_V40, duration=20.0, sections=secs)
+        for notes in ([_n(9.992, 10.392, 69)], [_n(2.0, 2.5, 60), _n(9.992, 10.392, 69), _n(12.0, 12.5, 64)],
+                      [_n(9.8, 9.95, 67), _n(9.95, 10.4, 69)], [_n(19.9, 20.0, 72)]):
+            voiced = [round(i * 0.008, 6) for i in range(2500) if any(x["start"] <= i * 0.008 < x["end"] for x in notes)]
+            m = rw.melody_summary(notes, voiced, 0.008, 2500, "C", "major", secs)
+            v = json.loads(json.dumps(dict(base, melody=m, melody_notes=notes)))
+            self.assertIs(server.check_rhythm(v), v, notes)
+            for r in m["sections"]:
+                inside = [x for x in notes if r["start"] <= x["start"] < r["end"] or (r is m["sections"][-1]
+                                                                                       and x["start"] == r["end"])]
+                self.assertEqual(r["notes_per_second"], rw.notes_per_second(inside))
+        self.assertEqual(rw.melody_summary([_n(9.992, 10.392, 69)], [], 0.008, 2500, "C", "major", secs)
+                         ["sections"][0]["notes_per_second"], 2.5)  # 1 note / 0.4 s, not 1 / 0.008 s voiced
+        # the server recomputes the densities from the rows (when not capped): a wrong value is refused
+        notes = [_n(9.992, 10.392, 69)]
+        m = rw.melody_summary(notes, [], 0.008, 2500, "C", "major", secs)
+        for bad in (dict(m, notes_per_second=2.6), dict(m, sections=[dict(m["sections"][0], notes_per_second=125.0),
+                                                                    m["sections"][1]]),
+                    dict(m, sections=[dict(m["sections"][0], note_count=0, low=None, high=None, median_midi=None,
+                                           notes_per_second=None, peak=None),
+                                      dict(m["sections"][1], note_count=1, low=69, high=69, median_midi=69,
+                                           notes_per_second=2.5, peak={"midi": 69, "note": "A4", "time": 9.992})])):
+            v = json.loads(json.dumps(dict(base, melody=bad, melody_notes=notes)))
+            self.assertIsNone(server.check_rhythm(v))
+
     def test_v40_invalid_output(self):
         for out in bad_v40():
             self.fw.write(stdout=out)
@@ -678,6 +707,34 @@ class RhythmCacheIdentityTest(RhythmBase):
             r = self.c.json("POST", AR, WAV)[1]["rhythm"]
             self.assertEqual((r["status"], r["cache_hit"]), ("done", True), code)
             self.assertEqual(len(self.fw.calls()), n)
+
+    def test_recoverable_melody_failure_recomputed(self):
+        # review F2: environment-dependent melody failures are retried like tempo_cnn; non_finite stays cached
+        for code in ("analysis_error", "dependency_missing"):
+            failed = dict(RHYTHM_OUT_V40, melody={"status": "failed", "code": code}, melody_notes=[],
+                          worker_sha256=self.worker_sha())
+            self.write_stored(failed)
+            self.fw.write(stdout=json.dumps(RHYTHM_OUT_V40))  # the cause went away: melody done now
+            n = len(self.fw.calls())
+            r = self.c.json("POST", AR, WAV)[1]["rhythm"]
+            self.assertEqual((r["status"], r["cache_hit"], r["melody"]), ("done", False, MELODY), code)
+            self.assertEqual(len(self.fw.calls()), n + 1)
+            self.assertEqual(self.stored()["melody"], MELODY)
+            self.assertTrue(self.c.json("POST", AR, WAV)[1]["rhythm"]["cache_hit"])  # now reused
+            self.assertEqual(len(self.fw.calls()), n + 1)
+            # a failed recompute keeps the stored file (and the next analyze retries again)
+            self.write_stored(failed)
+            self.fw.write(exit=1, stdout="", stderr_lines=['{"error":{"code":"analysis_failed","message":"x"}}'])
+            r = self.c.json("POST", AR, WAV)[1]["rhythm"]
+            self.assertEqual(r, {"status": "failed", "code": "analysis_failed"})
+            self.assertEqual(self.stored(), failed)
+            self.fw.write(exit=0, stderr_lines=[])
+        self.write_stored(dict(RHYTHM_OUT_V40, melody={"status": "failed", "code": "non_finite"}, melody_notes=[],
+                               worker_sha256=self.worker_sha()))
+        n = len(self.fw.calls())
+        r = self.c.json("POST", AR, WAV)[1]["rhythm"]
+        self.assertEqual((r["cache_hit"], r["melody"]), (True, {"status": "failed", "code": "non_finite"}))
+        self.assertEqual(len(self.fw.calls()), n)
 
     def test_failed_recompute_keeps_old_file(self):
         self.write_stored(RHYTHM_OUT_V2)
@@ -1310,7 +1367,8 @@ class MelodyLogicTest(unittest.TestCase):
         self.assertEqual(m["range"], {"low": {"midi": 60, "note": "C4"}, "high": {"midi": 72, "note": "C5"},
                                       "p5": {"midi": 60, "note": "C4"}, "p95": {"midi": 72, "note": "C5"}})
         self.assertEqual(m["voiced_s"], round(len(MELODY_VOICED) * 0.008, 3))
-        self.assertEqual(m["notes_per_second"], round(7 / m["voiced_s"], 3))
+        self.assertEqual(m["notes_per_second"], round(7 / 3.4, 3))  # notes / summed note duration
+        self.assertEqual(m["sections"][0]["notes_per_second"], round(4 / 1.9, 3))
         # durations: C 0.5, D 0.5, E 0.5, G 0.4, C5 1.0, A 0.5 of 3.4 s
         self.assertEqual(m["scale_degrees"]["bins"],
                          [round(x / 3.4, 3) for x in (1.5, 0, 0.5, 0, 0.5, 0, 0, 0.4, 0, 0.5, 0, 0)])
@@ -1535,8 +1593,8 @@ class RealWorkerTest(unittest.TestCase):
         self.assertEqual([s["direction"] for s in m["sections"]], ["flat"])  # one repeating loop
 
     def test_melody_sections_b_higher(self):
-        # measured (worker 0.4.0): A 60-67 (median 64, peak G4), B 76-83 (median 80, peak B5), all flat; ~2.1-2.3
-        # notes per voiced second; 125 notes for 120 written (a few short glide notes at block edges)
+        # measured (worker 0.4.0): A 60-67 (median 64, peak G4), B 76-83 (median 80, peak B5), all flat; 2.11-2.40
+        # notes per second of note time; 125 notes for 120 written (a few short glide notes at block edges)
         v = self.out["melody_ab"]
         ms = v["melody"]["sections"]
         self.assertEqual([(s["label"], s["start"], s["end"]) for s in ms],

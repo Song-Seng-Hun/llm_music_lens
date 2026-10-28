@@ -134,7 +134,8 @@ API:
   failed re-run leaves the old file in place. A stored file with the current worker is also recomputed when its
   optional `tempo_cnn` is `unavailable` (any reason, e.g. model restored later) or `failed` with `inference_error` /
   `dependency_missing`, since those causes can change without a worker change; deterministic `too_short`,
-  `non_finite`, `inconsistent_output` and (0.4.1) `no_audible_patches` stay cached. While the model stays missing, every rhythm request therefore
+  `non_finite`, `inconsistent_output` and (0.4.1) `no_audible_patches` stay cached. The same applies to a melody
+  `failed` with `analysis_error` or `dependency_missing` (recomputed; `non_finite` cached). While the model stays missing, every rhythm request therefore
   reruns the worker (about 15 s for a 4 min song). Only the worker file is tracked: a changed Essentia python with the same
   worker file is not detected (restart is needed after editing the worker in place). If the worker file cannot be
   read at start, its hash is null and nothing is reused (every rhythm request recomputes); that alone does not make
@@ -409,8 +410,9 @@ balance, which scale degrees it sits on, where it climbs). Not a transcription a
   60 cents pitch distance, rms threshold -2) gives notes; `midi` is rounded to the nearest semitone (A4 = 69 =
   440 Hz, no tuning estimate), `note` is the sharp name (`C#4`, middle C = `C4`).
 - `melody` (summary) on success: `status: "done"`, `method`, `reliability: "low_reference"`, `voiced_fraction`
-  (voiced pitch frames / all frames), `voiced_s`, `note_count`, `notes_per_second` (notes / **voiced** seconds, so
-  rests and instrumental gaps do not dilute it; null without notes), `range` {`low`, `high`, `p5`, `p95`} each
+  (voiced pitch frames / all frames), `voiced_s`, `note_count`, `notes_per_second` (notes / the summed duration of those
+  notes, i.e. per second of note time, so rests and instrumental gaps do not dilute it; null without notes; same
+  definition per section, see below), `range` {`low`, `high`, `p5`, `p95`} each
   `{midi, note}` (low/high plain min/max; p5/p95 duration-weighted), `median_midi` (duration-weighted), `intervals`
   {`count`, `repeat` (0 semitones), `step` (1-2), `leap` (>= 3), `up`, `down`, `max_gap_s` 1.0} as fractions of
   the intervals between consecutive notes at most 1 s apart (a longer rest is a phrase break; null when none),
@@ -420,16 +422,23 @@ balance, which scale degrees it sits on, where it climbs). Not a transcription a
   warning `melody_scale_degrees_unavailable`), and `sections`: one row per 0.3.0 section (same `label`, `start`,
   `end`; `[]` when `sections` is `[]`) with `note_count`, `low`, `high`, `median_midi`, `notes_per_second`, `peak`
   {`midi`, `note`, `time` (onset of the highest note, ties earliest)} and `direction`. A note belongs to the section
-  holding its onset. Direction rule: least-squares line of MIDI against note midpoint time; fitted change = slope x
+  holding its onset, and a section's `notes_per_second` divides its notes by their own full durations, so a note
+  crossing a section edge counts its whole length (worker 0.4.0 as first committed divided by the voiced time inside
+  the section: a 0.4 s note starting 8 ms before an edge gave 125 notes/s and made the server refuse the whole
+  rhythm result; review F1). Direction rule: least-squares line of MIDI against note midpoint time; fitted change = slope x
   (last minus first midpoint); `rising` >= +2 semitones, `falling` <= -2, else `flat`; null with fewer than 4
   notes. Sections without notes have nulls. No note at all: `note_count` 0, every note statistic null, warning
   `no_melody`. A melody error never fails the worker: `{"status":"failed","code"}` (`analysis_error`,
-  `dependency_missing`, `non_finite`), no notes, warning `melody_failed: ...`. The summary is about 1 KB plus
+  `dependency_missing`, `non_finite`), no notes, warning `melody_failed: ...`. A stored `analysis_error` or
+  `dependency_missing` melody is recomputed on the next `rhythm=1` analyze even with the current worker (like a
+  recoverable `tempo_cnn` outcome; a failed rerun keeps the stored file); `non_finite` stays cached. The summary is about 1 KB plus
   ~200 B per section (at most 40).
 - `melody_notes` (stored file, `/timeline layer=melody` only): `{start, end, midi, note}` sorted by onset, at most
   6000 (`melody_notes_capped` warning and the first 6000 kept beyond that). 6000 = 600 s / the 0.1 s minimum note
   length, so valid output cannot exceed it; the cap is a guard that also bounds the stored file (~330 KB).
-- Server checks: exact key sets everywhere, MIDI integers 0-127 with matching names, fractions 0-1 summing to 1
+- Server checks: `notes_per_second` (song and every section) and section note counts are recomputed from the
+  stored rows when they are not capped (tolerance 0.002; bound 1000 = one note per stored millisecond); exact key
+  sets everywhere, MIDI integers 0-127 with matching names, fractions 0-1 summing to 1
   (+-0.01 for rounding), range order low <= p5 <= median <= p95 <= high, note rows sorted and inside the duration,
   stored rows = min(`note_count`, 6000), section rows aligned to `sections` and summing to `note_count`, peak =
   section high inside the section, direction null exactly when a section has under 4 notes, `scale_degrees` key =
@@ -438,10 +447,11 @@ balance, which scale degrees it sits on, where it climbs). Not a transcription a
   file differs, so every older file is recomputed on the next `rhythm=1` analyze after a restart (existing rule, no
   new code).
 - Synthetic results (worker 0.4.0): `melody` 30 s (16-note line A4-A5 in C major, 0.5 s notes): all 60 notes at
-  the right MIDI, onsets within 50 ms, voiced 0.952, 2.10 notes per voiced second, range A4-A5, intervals step
+  the right MIDI, onsets within 50 ms, voiced 0.952, 2.16 notes per second of note time (2.10 per voiced second
+  before the F1 fix), range A4-A5, intervals step
   0.814 / leap 0.186 / repeat 0 (3 leaps per 16-note cycle), up 0.61, key C major and no scale-degree weight
   outside C major, direction flat. `melody_ab` 60 s (abab form; A melody C4-G4, B melody E5-B5): sections A B A B
-  as in 0.3.0, A low 60 / high 67 / median 64 / peak G4, B 76 / 83 / 80 / B5, 2.05-2.32 notes per voiced second,
+  as in 0.3.0, A low 60 / high 67 / median 64 / peak G4, B 76 / 83 / 80 / B5, 2.11-2.40 notes per second of note time,
   all flat, 125 notes for 120 written (short glide notes at block edges). Silence (5 s) and a 1.5 s click: 0 notes,
   `no_melody`. Repeated notes of the same pitch can merge or split (a 3x repeat came out as 2 or 3 notes).
 - Runtime (600 s, same session, 2 runs each): melody track 9.34-9.36 s and 1.13-1.14 GB peak RSS vs worker 0.3.1

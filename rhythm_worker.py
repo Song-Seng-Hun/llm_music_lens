@@ -85,7 +85,8 @@ Choices:
   resampled to 44.1 kHz with the defaults gave 12; frameSize 512 split notes. PitchContourSegmentation (same hop,
   defaults: min 0.1 s, 60 cents, rms -2) turns the contour into notes; midi is rounded to the nearest semitone (A4 = 69 = 440 Hz).
   Stored notes are capped at MELODY_MAX_NOTES (6000 = 600 s / 0.1 s minimum note length, so never reached by valid
-  output; kept as a guard with a warning). Not a transcription: octave errors, split or merged repeated notes.
+  output; kept as a guard with a warning). notes_per_second = notes / their summed duration, for the song and per
+  section (onset attribution, full note length). Not a transcription: octave errors, split or merged repeated notes.
 """
 import errno
 import hashlib
@@ -668,12 +669,19 @@ def melody_direction(notes, min_notes=MEL_DIR_NOTES, thresh=MEL_DIR_MIN):
     return "rising" if change >= thresh else "falling" if change <= -thresh else "flat"
 
 
+def notes_per_second(notes):
+    """len(notes) / summed note duration (s), 3 decimals; None without notes."""
+    t = sum(n["end"] - n["start"] for n in notes)
+    return round(len(notes) / t, 3) if notes and t > 0 else None
+
+
 def melody_summary(notes, voiced, hop_s, n_frames, tonic, scale, sections):
     """notes: [{start, end, midi, note}] sorted; voiced: sorted times (s) of voiced pitch frames; n_frames: all pitch
-    frames. notes_per_second = notes / voiced seconds (voiced frames x hop), so rests and gaps do not dilute it.
+    frames. notes_per_second = notes / the summed duration of those notes (note time; the same definition for the
+    song and for each section, so a note crossing a section edge counts with its own full length and the server can
+    recompute it from the stored rows), so rests and gaps do not dilute it.
     Range p5/p95, median and scale degrees are duration-weighted. Section stats take the notes whose onset lies in
     the section ([start, end), the last one closed). Returns the `melody` dict (status done)."""
-    import bisect
     vsec = len(voiced) * hop_s
     w = [(n["midi"], max(n["end"] - n["start"], 1e-6)) for n in notes]
     rng = med = degrees = None
@@ -693,9 +701,6 @@ def melody_summary(notes, voiced, hop_s, n_frames, tonic, scale, sections):
     for k, sec in enumerate(sections):
         last = k == len(sections) - 1
         inside = [n for n in notes if sec["start"] <= n["start"] < sec["end"] or (last and n["start"] == sec["end"])]
-        a = bisect.bisect_left(voiced, sec["start"])
-        b = bisect.bisect_right(voiced, sec["end"]) if last else bisect.bisect_left(voiced, sec["end"])
-        sv = (b - a) * hop_s
         row = {"label": sec["label"], "start": sec["start"], "end": sec["end"], "note_count": len(inside),
                "low": None, "high": None, "median_midi": None, "notes_per_second": None, "peak": None,
                "direction": melody_direction(inside)}
@@ -703,12 +708,12 @@ def melody_summary(notes, voiced, hop_s, n_frames, tonic, scale, sections):
             top = max(inside, key=lambda n: (n["midi"], -n["start"]))
             row.update(low=min(n["midi"] for n in inside), high=top["midi"],
                        median_midi=_wquantile([(n["midi"], max(n["end"] - n["start"], 1e-6)) for n in inside], 0.5),
-                       notes_per_second=round(len(inside) / sv, 3) if sv > 0 else None,
+                       notes_per_second=notes_per_second(inside),
                        peak=dict(_pitch(top["midi"]), time=top["start"]))
         secs.append(row)
     return {"status": "done", "method": MEL_METHOD, "reliability": "low_reference",
             "voiced_fraction": _frac(len(voiced), n_frames), "voiced_s": round(vsec, 3), "note_count": len(notes),
-            "notes_per_second": round(len(notes) / vsec, 3) if vsec > 0 and notes else None,
+            "notes_per_second": notes_per_second(notes),
             "range": rng, "median_midi": med, "intervals": melody_intervals(notes), "scale_degrees": degrees,
             "sections": secs}
 

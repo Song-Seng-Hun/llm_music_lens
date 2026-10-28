@@ -1152,7 +1152,20 @@ MELODY_SECTION_KEYS = {"label", "start", "end", "note_count", "low", "high", "me
 MELODY_NOTE_KEYS = {"start", "end", "midi", "note"}
 MELODY_DIRECTIONS = (None, "rising", "falling", "flat")
 MELODY_DIR_NOTES = 4  # the worker's minimum notes for a section direction
-MELODY_MAX_NPS = 20  # notes per voiced second; notes last >= 0.1 s, so 10 is the physical bound for valid output
+MELODY_MAX_NPS = 1000  # notes per second of note time; stored rows last >= 0.001 s (ms rounding, end > start)
+MELODY_NPS_TOL = 0.002  # recomputed from the stored rows; the worker rounds to 3 decimals
+MELODY_RETRY_CODES = frozenset(("analysis_error", "dependency_missing"))  # environment-dependent, like tempo_cnn
+
+
+def _notes_per_second(notes):
+    """The worker's definition: len(notes) / summed note duration; None without notes."""
+    t = sum(n["end"] - n["start"] for n in notes)
+    return len(notes) / t if notes and t > 0 else None
+
+
+def _nps_matches(stored, notes):
+    want = _notes_per_second(notes)
+    return stored is None if want is None else stored is not None and abs(stored - want) <= MELODY_NPS_TOL
 NOTE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
 
 
@@ -1180,6 +1193,9 @@ def _melody_done_ok(m, v, dur, notes):
             and _opt_num(m["notes_per_second"], 0, MELODY_MAX_NPS) and _opt_num(m["median_midi"], 0, 127)):
         return False
     if notes is not None and len(notes) != min(n, MELODY_MAX_NOTES):
+        return False
+    full = notes is not None and len(notes) == n  # not capped: densities are recomputed from the rows
+    if full and not _nps_matches(m["notes_per_second"], notes):
         return False
     if n == 0:  # no note: every note statistic is null
         if any(m[k] is not None for k in ("notes_per_second", "range", "median_midi", "intervals", "scale_degrees")):
@@ -1214,11 +1230,16 @@ def _melody_done_ok(m, v, dur, notes):
             (r["label"], r["start"], r["end"]) for r in ref]:  # aligned to the 0.3.0 sections
         return False
     total = 0
-    for r in ss:
+    for k, r in enumerate(ss):
         if not (isinstance(r, dict) and set(r) == MELODY_SECTION_KEYS and _count(r["note_count"], MELODY_MAX_NOTES * 4)
                 and r["direction"] in MELODY_DIRECTIONS and _opt_num(r["notes_per_second"], 0, MELODY_MAX_NPS)):
             return False
         total += r["note_count"]
+        if full:  # onset attribution: [start, end), the last section closed
+            last = k == len(ss) - 1
+            inside = [x for x in notes if r["start"] <= x["start"] < r["end"] or (last and x["start"] == r["end"])]
+            if len(inside) != r["note_count"] or not _nps_matches(r["notes_per_second"], inside):
+                return False
         if r["note_count"] == 0:
             if any(r[k] is not None for k in ("low", "high", "median_midi", "notes_per_second", "peak", "direction")):
                 return False
@@ -1269,6 +1290,14 @@ def confidence_band(c):
 # tempo_cnn outcomes whose cause can change without a worker change (model file restored, transient TF error);
 # deterministic ones (too_short, non_finite, inconsistent_output) stay cached
 TEMPO_CNN_RETRY_CODES = frozenset(("inference_error", "dependency_missing"))
+
+
+def _rhythm_retry(v):
+    """True when a stored file with the current worker must still be recomputed: an optional stage (tempo_cnn or,
+    worker 0.4.0+, melody) ended in an outcome whose cause can change without a worker change."""
+    m = v.get("melody")
+    return _tempo_cnn_retry(v) or (isinstance(m, dict) and m.get("status") == "failed"
+                                   and m.get("code") in MELODY_RETRY_CODES)
 
 
 def _tempo_cnn_retry(v):
@@ -1462,7 +1491,7 @@ class App:
             return {"status": "failed", "code": "no_result_id"}
         state, stored = self.load_rhythm(result_id)
         cur = self.rhythm_worker_sha256
-        if state == "ok" and cur is not None and stored.get("worker_sha256") == cur and not _tempo_cnn_retry(stored):
+        if state == "ok" and cur is not None and stored.get("worker_sha256") == cur and not _rhythm_retry(stored):
             return dict(rhythm_summary(stored), cache_hit=True, stored=True)
         # absent (worker 0.1.0/0.2.0 files), different or unverifiable worker identity: recompute; the stored file
         # is replaced only after a successful run, so /report and /timeline keep the old one until then
