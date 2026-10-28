@@ -6,7 +6,12 @@ KIND: click (120 BPM click track), chords (C - Am - F - G, 2 s each, with a soft
       kick100 (synthetic kick on every beat at 100 BPM only), kick100mid (the same kicks plus equally strong kicks
       exactly halfway between them: an effective 200 BPM pulse),
       abab (song form A-B-A-B in 15 s blocks, soft 120 BPM pulse throughout: A = C - Am - F - G with three soft
-      harmonics; B = E - C#m - A - B with eight sawtooth-like harmonics at about +8 dB; best with SECONDS = 60)
+      harmonics; B = E - C#m - A - B with eight sawtooth-like harmonics at about +8 dB; best with SECONDS = 60),
+      melody (a known 16-note line, 0.5 s per note, A4..A5 in C major (MELODY), six-partial tone over soft C - Am - F - G
+      chords),
+      melody_ab (abab plus a melody: A blocks carry MELODY_LOW (C4..G4, C major), B blocks MELODY_HIGH (E5..B5,
+      E major), 0.5 s per note; best with SECONDS = 60),
+      silence (digital silence)
 """
 import sys
 import wave
@@ -82,6 +87,26 @@ def chords(n, seg_seconds=2.0, progression=PROGRESSION, partials=SOFT, gain=0.05
     return out
 
 
+MELODY = (72, 74, 76, 79, 76, 74, 72, 71, 69, 71, 72, 74, 76, 77, 79, 81)  # MIDI, 0.5 s each, repeating
+MELODY_LOW = (60, 62, 64, 65, 67, 65, 64, 62)  # C4 D4 E4 F4 G4 F4 E4 D4
+MELODY_HIGH = (76, 78, 80, 81, 83, 81, 80, 78)  # E5 F#5 G#5 A5 B5 A5 G#5 F#5
+
+
+def melody_line(n, notes, note_seconds=0.5, gain=0.15, offset=0):
+    """Harmonic tone (6 partials, 0.6 decay) per note, 0.46 s sounding + 40 ms rest, from sample `offset` on."""
+    out = np.zeros(n, dtype=np.float64)
+    m = int(note_seconds * RATE)
+    t = np.arange(m) / RATE
+    env = np.clip(np.minimum(t / 0.01, (note_seconds - 0.04 - t) / 0.01), 0.0, 1.0)
+    for i in range((n - offset + m - 1) // m):
+        f = 440.0 * 2 ** ((notes[i % len(notes)] - 69) / 12.0)
+        y = sum(0.6 ** k * np.sin(2 * np.pi * f * (k + 1) * t) for k in range(6)) * env * gain
+        s = offset + i * m
+        k = min(m, n - s)
+        out[s:s + k] += y[:k]
+    return out
+
+
 def main(kind, seconds, path):
     n = int(float(seconds) * RATE)
     if kind == "click":
@@ -104,6 +129,20 @@ def main(kind, seconds, path):
             parts.append(chords(m, gain=0.02) if (k // block) % 2 == 0 else
                          chords(m, progression=E_MAJOR, partials=BRIGHT, gain=0.045))
         y = np.concatenate(parts) + clicks(n, gain=0.1)
+    elif kind == "melody":
+        y = chords(n, gain=0.02) + melody_line(n, MELODY)
+    elif kind == "melody_ab":
+        block = 15 * RATE
+        parts = []
+        for k in range(0, n, block):
+            m = min(block, n - k)
+            if (k // block) % 2 == 0:
+                parts.append(chords(m, gain=0.02) + melody_line(m, MELODY_LOW))
+            else:
+                parts.append(chords(m, progression=E_MAJOR, partials=BRIGHT, gain=0.045) + melody_line(m, MELODY_HIGH))
+        y = np.concatenate(parts) + clicks(n, gain=0.1)
+    elif kind == "silence":
+        y = np.zeros(n)
     else:
         raise SystemExit("unknown kind")
     y = np.clip(y, -0.99, 0.99)

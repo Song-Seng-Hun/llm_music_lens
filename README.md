@@ -13,7 +13,7 @@ Nothing here is installed. No LaunchAgent, firewall rule, certificate or key is 
 | File | Purpose |
 | --- | --- |
 | `server.py` | The server: config, en0/en1 address discovery, TLS 1.2+, strict framing, HMAC auth, durable nonce and receipt logs, pipeline gate, staging, afconvert, strict WAV check, hard-link promotion, `ml` calls by argv, error mapping, cleanup, logs |
-| `rhythm_worker.py` | Optional rhythm layer worker (Essentia DSP plus one pinned local TempoCNN model): BPM (+ half/double, + learned TempoCNN estimate), beats, key (+ 20 s sections), beat-grid chords, 1 s energy curve, repeated-section structure (A/B/...). Runs under the Essentia python, never in the listener |
+| `rhythm_worker.py` | Optional rhythm layer worker (Essentia DSP plus one pinned local TempoCNN model): BPM (+ half/double, + learned TempoCNN estimate), beats, key (+ 20 s sections), beat-grid chords, 1 s energy curve, repeated-section structure (A/B/...), melody feature summary (predominant pitch notes). Runs under the Essentia python, never in the listener |
 | `limit_exec.py` | Sets RLIMIT_CPU 60 s / FSIZE 24 MiB / NOFILE 32, then `execv /usr/bin/afconvert -f WAVE -d LEI16@16000 -c 1 src dst` |
 | `sign.py` | Shared canonical-string and HMAC helper (server, tests, Python clients) |
 | `sign_vector.mjs` | Reference Node signer; prints or checks the fixed vector (`tests/vectors.json`) |
@@ -94,7 +94,7 @@ Do these only after approving an always-on listener (RunAtLoad + KeepAlive, en0/
    To unload it: `launchctl bootout gui/$(id -u)/com.music-lens.lan-api`. Unloading sends SIGTERM; see
    "Stopping" below. A clean exit does not mean every analysis finished or was cancelled.
 
-## Optional rhythm layer (beats, key, chords, energy, sections)
+## Optional rhythm layer (beats, key, chords, energy, sections, melody)
 
 Off unless the config has a `rhythm` key. Without it the server loads and behaves exactly as before.
 
@@ -119,7 +119,7 @@ API:
   The worker also bounds itself (SIGALRM 330 s, RLIMIT_CPU 600 s) in case the server dies first.
 - Rhythm never fails the analyze: the reply stays 200 with the ASR fields unchanged plus `rhythm`:
   - success: the same compact summary as `/report` plus `cache_hit` and `stored` (no beat or chord rows; page
-    them with `/timeline` `layer=beats|chords|energy`);
+    them with `/timeline` `layer=beats|chords|energy|melody`);
   - `{"status":"busy","code":"busy"}` when the team lock is held (never waits);
   - `{"status":"timeout","code":"timeout"|"no_time_left"}`;
   - `{"status":"failed","code":...}` with the worker's error code (`invalid_audio`, `too_short`, `analysis_failed`,
@@ -141,28 +141,33 @@ API:
   the run fail, the run then succeeds or fails on its own (a worker that is really missing fails at spawn). `/report` and `/timeline` read whatever
   is stored and never recompute. A store failure still returns the
   data with `stored: false`. The files are not pruned automatically (about 35-45 KB per 10 minutes of audio with
-  worker 0.3.0: 34,114 B for the 600 s loop, 41,434 B for a 600 s file with 40 sections; cap `rhythm_output` 4 MiB).
+  worker 0.3.0: 34,114 B for the 600 s loop, 41,434 B for a 600 s file with 40 sections; worker 0.4.0 adds the
+  melody notes, about 54 B per note: 46,911 B for the 600 s loop (225 notes), 103,330 B for the 600 s melody track
+  (1200 notes); at most 6000 notes, ~330 KB; cap `rhythm_output` 4 MiB).
 - `GET /report/<id>` adds a `rhythm` summary (`status`, `bpm`, `bpm_confidence`, `bpm_confidence_band`,
   `bpm_estimates`, `bpm_alternatives`, `bpm_alternatives_note`, `double_tempo_evidence`,
   `double_tempo_evidence_note`, `tempo_cnn`, `key`, `key_sections`, `key_change_count`,
   `beat_count`, `chord_segment_count`, `chords_grid`, `energy_summary`, `sections`, `sections_method`,
-  `sections_reliability`, `downbeats`, `duration`, `tool`, `warnings`) when a stored file
+  `sections_reliability`, `melody`, `downbeats`, `duration`, `tool`, `warnings`) when a stored file
   exists, re-serializing the native JSON (number formatting may change). Files stored by worker 0.1.0 lack the
   0.2.0 fields and still load; the summary then has `bpm_alternatives`, `bpm_alternatives_note`, `key_sections`,
   `key_change_count` and `chords_grid` set to `null` (they are not recomputed; old chord rows stay frame-level).
   Files from 0.1.0 and 0.2.0 likewise give `double_tempo_evidence` and `double_tempo_evidence_note` as `null`, and
   files from before 0.2.2 give `tempo_cnn: null`, and files from before 0.3.0 give `energy_summary`, `sections`,
-  `sections_method` and `sections_reliability` as `null`. A damaged file gives `rhythm: {"status":"failed","code":"invalid_result"}`.
+  `sections_method` and `sections_reliability` as `null`, and files from before 0.4.0 give `melody: null`. A damaged file gives `rhythm: {"status":"failed","code":"invalid_result"}`.
   No file: native bytes unchanged.
-- `GET /timeline/<id>?layer=beats|chords|energy` is served by the server from the stored file with the native rules:
+- `GET /timeline/<id>?layer=beats|chords|energy|melody` is served by the server from the stored file with the native rules:
   `start`/`end` 0..600 (default 0 and 600, `end >= start`), rows overlapping the range, `limit` 1..200 (default 100),
   `cursor` <= total, a ~43 KB page byte cap, `truncated` and `continuation`. Beats rows are `{"time"}`, chords rows
   `{start, end, label, strength}` (with `reliability: "low_reference"`), energy rows `{time, value}` (with `unit`
-  and `step_s`; a row covers `[time, time + step_s)` and is selected when its `time` lies in `[start, end]`).
+  and `step_s`; a row covers `[time, time + step_s)` and is selected when its `time` lies in `[start, end]`), melody
+  rows `{start, end, midi, note}` (selected like chords: overlapping the range; with `reliability: "low_reference"`
+  and `layer_status` = the stored melody `status`, so a `failed` melody gives `done`-shaped paging with no rows and
+  `layer_status: "failed"`).
   No stored file: 404 `rhythm_not_found`. `layer=energy` on a file stored before worker 0.3.0 (no `energy` field)
   gives the same 404 `rhythm_not_found`: the request is valid, that layer is just not stored for this result, and a
   new `rhythm=1` analyze recomputes it (the worker hash changed); `invalid_argument` would wrongly blame the
-  request. Sections are in the summary only (at most 40 rows), not a timeline layer.
+  request. `layer=melody` on a file stored before worker 0.4.0 gives the same 404. Sections are in the summary only (at most 40 rows), not a timeline layer.
   `words`/`emotion` still go to `ml timeline` unchanged.
 - `GET /status`: when the layer is configured, adds `rhythm: {configured, python_present, worker_present,
   worker_sha256}` (file checks only, Essentia is not run; `worker_sha256` is the start-time hash, null if unreadable). Not configured: native bytes unchanged (no `rhythm` key means unavailable).
@@ -171,7 +176,7 @@ API:
 `very_low` [0, 1), `low` [1, 1.5], `good` (1.5, 3.5] (Essentia: about 80% AMLt), `excellent` above 3.5. It is
 Essentia's guide, not a calibration on the team's music.
 
-Worker output (worker 0.3.1): `bpm`, `bpm_confidence` (RhythmExtractor2013 multifeature, native 0..~5.32,
+Worker output (worker 0.4.0): `bpm`, `bpm_confidence` (RhythmExtractor2013 multifeature, native 0..~5.32,
 uncalibrated), `bpm_estimates` (top 5 shares), `bpm_alternatives` (`[bpm/2, bpm*2]`, 2 decimals, only values within
 40..300; empty when bpm is 0) with `bpm_alternatives_note`, `double_tempo_evidence` with
 `double_tempo_evidence_note` (diagnostic, see below), `tempo_cnn` (learned estimate, see below), `beats` (s, ms rounding),
@@ -182,8 +187,9 @@ count before the beat vote, stored file only), `chords_reliability: "low_referen
 resampled from 16 kHz because RhythmExtractor2013 assumes 44.1 kHz), `duration`, `tool` (name, version,
 `essentia_version`), `warnings` (`short_audio` < 10 s, `near_silent`, `no_beats`, `low_bpm_confidence` < 1.5,
 `low_key_strength` < 0.5, `key_changes` when there is more than one key section, `no_chords`,
-`double_tempo_evidence_unavailable`, `no_sections`, `sections_single`, `tempo_cnn_patch_count_mismatch`), `energy`, `energy_summary`, `sections`,
-`sections_method`, `sections_reliability: "low_reference"` (see "Energy and sections" below). Audio under 1 s is
+`double_tempo_evidence_unavailable`, `no_sections`, `sections_single`, `tempo_cnn_patch_count_mismatch`, `no_melody`, `melody_failed`, `melody_scale_degrees_unavailable`,
+`melody_notes_capped`), `energy`, `energy_summary`, `sections`, `sections_method`, `sections_reliability:
+"low_reference"` (see "Energy and sections" below), `melody` and `melody_notes` (see "Melody features" below). Audio under 1 s is
 refused (`too_short`).
 
 - Key sections: the same KeyExtractor (`bgate`, frame 4096, hop 2048) on fixed, non-overlapping 20 s windows (a last
@@ -349,6 +355,68 @@ not a transcription. There are no downbeats and no named parts.
   unchanged within noise (worker 0.3.0 7.73-7.86 s and 1.09-1.12 GB peak RSS vs 0.2.2 7.71-7.78 s and 1.10 GB on
   the same file, same session; worker 0.3.1 with TempoCNN batch 64: 7.70-7.71 s, 1.09-1.10 GB).
 
+### Melody features (worker 0.4.0)
+
+Purpose: the shape of the tune for "compose using this song as a reference" (range, note density, step/leap
+balance, which scale degrees it sits on, where it climbs). Not a transcription and not a vocal track.
+
+- What is tracked: the **predominant pitch of the full mix**. On a typical song that is usually the lead vocal, but
+  intros, instrumental breaks and solos track whatever instrument is loudest, and accompaniment-only passages track
+  some line of the accompaniment (synthetic: the C-Am-F-G loop with no melody gave 11 "notes" in 30 s and 225 in
+  600 s, on the chord roots F2-C3). There is no vocal separation and no voicing classifier beyond Melodia's own.
+- Method: EqualLoudness, then `PredominantPitchMelodia` (Salamon & Gomez) directly on the 16 kHz source with
+  `frameSize` 1024 (64 ms) and `hopSize` 128 (8 ms), `maxFrequency` 8000 (the default 20000 is above the 16 kHz
+  Nyquist); everything else default (salience 55-1760 Hz, `minFrequency` 80 Hz, so MIDI about 40-93). The
+  algorithm is designed for 44.1 kHz (frame 2048 = 46 ms, hop 128 = 2.9 ms); its time parameters are in ms and
+  cents/ms, so they do not depend on the rate. Checked on synthetic lines (harmonic tones, 0.5 s notes, over soft
+  chords): 16 kHz direct with frame 1024 and with 2048 both recovered every note of a 30 s A4-A5 line; with frame
+  1024, 20 of 24 notes of a 10 s C3-C4 line, while the same audio resampled to 44.1 kHz with the defaults found
+  only 12 of 24; frame 512 split notes of the A4-A5 line (63 for 60). Then `PitchContourSegmentation` (same rate and hop, defaults: minimum note 0.1 s,
+  60 cents pitch distance, rms threshold -2) gives notes; `midi` is rounded to the nearest semitone (A4 = 69 =
+  440 Hz, no tuning estimate), `note` is the sharp name (`C#4`, middle C = `C4`).
+- `melody` (summary) on success: `status: "done"`, `method`, `reliability: "low_reference"`, `voiced_fraction`
+  (voiced pitch frames / all frames), `voiced_s`, `note_count`, `notes_per_second` (notes / **voiced** seconds, so
+  rests and instrumental gaps do not dilute it; null without notes), `range` {`low`, `high`, `p5`, `p95`} each
+  `{midi, note}` (low/high plain min/max; p5/p95 duration-weighted), `median_midi` (duration-weighted), `intervals`
+  {`count`, `repeat` (0 semitones), `step` (1-2), `leap` (>= 3), `up`, `down`, `max_gap_s` 1.0} as fractions of
+  the intervals between consecutive notes at most 1 s apart (a longer rest is a phrase break; null when none),
+  `scale_degrees` {`tonic`, `scale`, `weight: "duration"`, `bins`}: 12 duration-weighted fractions, bin k = k
+  semitones above the detected `key` tonic (the global KeyExtractor key, so a wrong or modulating key shifts
+  every bin; the worker always reports a key, so this is null only without notes or with an unrecognized tonic,
+  warning `melody_scale_degrees_unavailable`), and `sections`: one row per 0.3.0 section (same `label`, `start`,
+  `end`; `[]` when `sections` is `[]`) with `note_count`, `low`, `high`, `median_midi`, `notes_per_second`, `peak`
+  {`midi`, `note`, `time` (onset of the highest note, ties earliest)} and `direction`. A note belongs to the section
+  holding its onset. Direction rule: least-squares line of MIDI against note midpoint time; fitted change = slope x
+  (last minus first midpoint); `rising` >= +2 semitones, `falling` <= -2, else `flat`; null with fewer than 4
+  notes. Sections without notes have nulls. No note at all: `note_count` 0, every note statistic null, warning
+  `no_melody`. A melody error never fails the worker: `{"status":"failed","code"}` (`analysis_error`,
+  `dependency_missing`, `non_finite`), no notes, warning `melody_failed: ...`. The summary is about 1 KB plus
+  ~200 B per section (at most 40).
+- `melody_notes` (stored file, `/timeline layer=melody` only): `{start, end, midi, note}` sorted by onset, at most
+  6000 (`melody_notes_capped` warning and the first 6000 kept beyond that). 6000 = 600 s / the 0.1 s minimum note
+  length, so valid output cannot exceed it; the cap is a guard that also bounds the stored file (~330 KB).
+- Server checks: exact key sets everywhere, MIDI integers 0-127 with matching names, fractions 0-1 summing to 1
+  (+-0.01 for rounding), range order low <= p5 <= median <= p95 <= high, note rows sorted and inside the duration,
+  stored rows = min(`note_count`, 6000), section rows aligned to `sections` and summing to `note_count`, peak =
+  section high inside the section, direction null exactly when a section has under 4 notes, `scale_degrees` key =
+  `key`. `melody` and `melody_notes` come together or not at all (files before 0.4.0 have neither and stay valid).
+- Cache: a stored file is reused only when its `worker_sha256` equals the running worker's hash; the 0.4.0 worker
+  file differs, so every older file is recomputed on the next `rhythm=1` analyze after a restart (existing rule, no
+  new code).
+- Synthetic results (worker 0.4.0): `melody` 30 s (16-note line A4-A5 in C major, 0.5 s notes): all 60 notes at
+  the right MIDI, onsets within 50 ms, voiced 0.952, 2.10 notes per voiced second, range A4-A5, intervals step
+  0.814 / leap 0.186 / repeat 0 (3 leaps per 16-note cycle), up 0.61, key C major and no scale-degree weight
+  outside C major, direction flat. `melody_ab` 60 s (abab form; A melody C4-G4, B melody E5-B5): sections A B A B
+  as in 0.3.0, A low 60 / high 67 / median 64 / peak G4, B 76 / 83 / 80 / B5, 2.05-2.32 notes per voiced second,
+  all flat, 125 notes for 120 written (short glide notes at block edges). Silence (5 s) and a 1.5 s click: 0 notes,
+  `no_melody`. Repeated notes of the same pitch can merge or split (a 3x repeat came out as 2 or 3 notes).
+- Runtime (600 s, same session, 2 runs each): melody track 9.34-9.36 s and 1.13-1.14 GB peak RSS vs worker 0.3.1
+  7.51-7.53 s and 1.10-1.11 GB; C-Am-F-G loop 9.10 s and 1.14 GB vs 7.68 s and 1.09-1.10 GB. So the melody layer
+  adds about +1.6-1.8 s and +40 MB, far inside the 300 s worker budget.
+- Honest limits: not a transcription; octave errors (a harmonic or subharmonic taken as the pitch) and
+  accompaniment tracking are expected on real mixes; vibrato and slides become several short notes or one long one;
+  no word-to-note alignment; scale degrees inherit the global key estimate. **Untested on real songs.**
+
 ## Runtime layout (production)
 
 - The `~/AI-Listen/api/` directory (0700) holds `nonces.log` and `receipts.log` (0600, fsynced with F_FULLFSYNC).
@@ -421,7 +489,7 @@ cleanup, so it alone does not prove the pipeline is idle).
    check (including 0 < duration <= 600 s) and no-overwrite hard link. A canonical WAV (PCM mono 16 kHz s16) skips
    afconvert. A conversion failure gives 400 `invalid_audio`; size limits, magic-byte detection and framing are
    unchanged.
-12. Optional rhythm layer (not in v0.6): `rhythm=1` on `/analyze`, a `rhythm` summary in `/report`, `layer=beats|chords`
+12. Optional rhythm layer (not in v0.6): `rhythm=1` on `/analyze`, a `rhythm` summary in `/report`, `layer=beats|chords|energy|melody`
    on `/timeline`, and a `rhythm` object in `/status` (see "Optional rhythm layer"). New rhythm work and the `/status`
    field need the `rhythm` config key; `/report` and `/timeline` read stored files whenever they exist. The receipt
    records the ASR outcome only; the rhythm result lives in `results-rhythm/`. The worker runs while the API gate is

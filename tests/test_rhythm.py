@@ -218,6 +218,61 @@ def bad_v30():
     return out
 
 
+def _n(start, end, midi):
+    return {"start": start, "end": end, "midi": midi, "note": rw.note_name(midi)}
+
+
+MELODY_NOTES = [_n(0.0, 0.5, 60), _n(0.5, 1.0, 62), _n(1.0, 1.5, 64), _n(1.5, 1.9, 67), _n(2.0, 2.5, 72),
+                _n(2.5, 3.0, 72), _n(4.0, 4.5, 69)]
+MELODY_VOICED = [round(i * 0.008, 6) for i in range(750) if any(n["start"] <= i * 0.008 < n["end"]
+                                                                for n in MELODY_NOTES)]
+MELODY = rw.melody_summary(MELODY_NOTES, MELODY_VOICED, 0.008, 750, "C", "major", SECTIONS)
+RHYTHM_OUT_V40 = dict(RHYTHM_OUT_V30, melody=MELODY, melody_notes=MELODY_NOTES)
+V40_SUMMARY_KEYS = ("melody",)
+MELODY_FAILED = {"status": "failed", "code": "analysis_error"}
+
+
+def bad_v40():
+    """Worker-0.4.0 melody values that must be refused."""
+    out = []
+    m, ms, ns = MELODY, MELODY["sections"], MELODY_NOTES
+    rng, iv, sd = m["range"], m["intervals"], m["scale_degrees"]
+    for over in ({"status": "Done"}, {"extra": 1}, {"reliability": "high"}, {"method": ""}, {"voiced_fraction": 1.5},
+                 {"voiced_s": 100.0}, {"note_count": 8}, {"note_count": 6}, {"note_count": -1}, {"note_count": 7.0},
+                 {"notes_per_second": None}, {"notes_per_second": 25}, {"median_midi": 74.5}, {"median_midi": 59},
+                 {"range": None}, {"range": dict(rng, low={"midi": 61, "note": "C#4"})},
+                 {"range": dict(rng, high={"midi": 72, "note": "C4"})}, {"range": dict(rng, p5={"midi": 60})},
+                 {"range": dict(rng, p95={"midi": 128, "note": "G#9"})}, {"range": dict(rng, extra=rng["low"])},
+                 {"intervals": dict(iv, count=7)}, {"intervals": dict(iv, count=0)}, {"intervals": dict(iv, repeat=0.9)},
+                 {"intervals": dict(iv, up=0.0, down=0.0)}, {"intervals": dict(iv, leap=-0.1)},
+                 {"intervals": dict(iv, extra=1)}, {"scale_degrees": dict(sd, bins=sd["bins"][:11])},
+                 {"scale_degrees": dict(sd, bins=[0.5] * 12)}, {"scale_degrees": dict(sd, tonic="D")},
+                 {"scale_degrees": dict(sd, weight="count")}, {"scale_degrees": dict(sd, bins=[float("nan")] * 12)},
+                 {"sections": ms[:2]}, {"sections": [dict(ms[0], label="B")] + ms[1:]},
+                 {"sections": [dict(ms[0], end=2.5)] + ms[1:]}, {"sections": [dict(ms[0], note_count=5)] + ms[1:]},
+                 {"sections": [dict(ms[0], low=70)] + ms[1:]}, {"sections": [dict(ms[0], high=66)] + ms[1:]},
+                 {"sections": [dict(ms[0], direction="up")] + ms[1:]},
+                 {"sections": [dict(ms[0], direction=None)] + ms[1:]},  # 4 notes need a direction
+                 {"sections": ms[:2] + [dict(ms[2], direction="flat")]},  # 1 note: direction must be null
+                 {"sections": [dict(ms[0], peak=dict(ms[0]["peak"], time=3.0))] + ms[1:]},
+                 {"sections": [dict(ms[0], peak=dict(ms[0]["peak"], note="A4"))] + ms[1:]},
+                 {"sections": [dict(ms[0], peak=None)] + ms[1:]}, {"sections": [dict(ms[0], extra=1)] + ms[1:]},
+                 {"sections": [dict(ms[0], notes_per_second=50)] + ms[1:]}, {"sections": None}):
+        out.append(json.dumps(dict(RHYTHM_OUT_V40, melody=dict(m, **over))))
+    for notes in (ns[:6], [ns[1], ns[0]] + ns[2:], [dict(ns[0], note="D4")] + ns[1:], [dict(ns[0], midi=60.0)] + ns[1:],
+                  [dict(ns[0], midi=128, note="G#9")] + ns[1:], [dict(ns[0], end=0.0)] + ns[1:],
+                  ns[:6] + [dict(ns[6], end=60.0)], [dict(ns[0], extra=1)] + ns[1:], {"x": 1}, None,
+                  [dict(ns[0], start=float("inf"))] + ns[1:]):
+        out.append(json.dumps(dict(RHYTHM_OUT_V40, melody_notes=notes)))
+    for over in ({"melody": MELODY_FAILED}, {"melody": dict(MELODY_FAILED, extra=1), "melody_notes": []},
+                 {"melody": {"status": "failed", "code": "Bad code"}, "melody_notes": []},
+                 {"melody": {"status": "failed"}, "melody_notes": []}, {"melody": None}, {"melody": "done"}):
+        out.append(json.dumps(dict(RHYTHM_OUT_V40, **over)))
+    out.append(json.dumps({k: x for k, x in RHYTHM_OUT_V40.items() if k != "melody_notes"}))  # both or neither
+    out.append(json.dumps({k: x for k, x in RHYTHM_OUT_V40.items() if k != "melody"}))
+    return out
+
+
 class FakeWorker:
     def __init__(self, env):
         self.dir = os.path.join(env.dir, "fakerhythm")
@@ -300,7 +355,7 @@ class RhythmAnalyzeTest(RhythmBase):
         self.assertEqual((r["bpm_confidence_band"], r["bpm_estimates"]), ("excellent", RHYTHM_OUT["bpm_estimates"]))
         self.assertNotIn("beats", r)  # rows only via /timeline
         self.assertNotIn("chords", r)
-        for k in V2_SUMMARY_KEYS + V21_SUMMARY_KEYS + V22_SUMMARY_KEYS + V30_SUMMARY_KEYS:  # 0.1.0-shaped fake
+        for k in V2_SUMMARY_KEYS + V21_SUMMARY_KEYS + V22_SUMMARY_KEYS + V30_SUMMARY_KEYS + V40_SUMMARY_KEYS:  # 0.1.0 shape
             self.assertIsNone(r[k], k)
         calls = self.fw.calls()
         self.assertEqual(len(calls), 1)
@@ -437,6 +492,34 @@ class RhythmAnalyzeTest(RhythmBase):
 
     def test_v30_invalid_output(self):
         for out in bad_v30():
+            self.fw.write(stdout=out)
+            self.assert_rhythm_failed("failed", "invalid_output")
+
+    def test_v40_melody_summary(self):
+        self.fw.write(stdout=json.dumps(RHYTHM_OUT_V40))
+        r = self.c.json("POST", AR, WAV)[1]["rhythm"]
+        self.assertEqual(r["status"], "done", r)
+        self.assertEqual(r["melody"], MELODY)
+        self.assertNotIn("melody_notes", r)  # rows only via /timeline layer=melody
+        with open(self.rhythm_file()) as f:
+            self.assertEqual(json.load(f), dict(RHYTHM_OUT_V40, worker_sha256=self.worker_sha()))
+        self.assertEqual(self.c.json("GET", "/report/" + RID64)[1]["rhythm"]["melody"], MELODY)
+        # valid edge shapes: failed melody (no rows), no note at all, no sections, capped notes
+        empty = rw.melody_summary([], [], 0.008, 750, "C", "major", SECTIONS)
+        many = [_n(i * 0.1, i * 0.1 + 0.1, 60 + i % 12) for i in range(server.MELODY_MAX_NOTES)]
+        capped = dict(rw.melody_summary(many, [], 0.008, 75000, "C", "major", []), note_count=6100,
+                      notes_per_second=10.0, voiced_s=600.0, intervals=None)
+        for over in ({"melody": MELODY_FAILED, "melody_notes": []}, {"melody": empty, "melody_notes": []},
+                     {"melody": dict(MELODY, sections=[]), "sections": []},
+                     {"melody": capped, "melody_notes": many, "sections": [], "duration": 600.0}):
+            v = json.loads(json.dumps(dict(RHYTHM_OUT_V40, **over)))
+            self.assertIs(server.check_rhythm(v), v, str(over)[:200])
+        self.assertEqual(empty["sections"][0], {"label": "A", "start": 0.0, "end": 2.0, "note_count": 0, "low": None,
+                                                "high": None, "median_midi": None, "notes_per_second": None,
+                                                "peak": None, "direction": None})
+
+    def test_v40_invalid_output(self):
+        for out in bad_v40():
             self.fw.write(stdout=out)
             self.assert_rhythm_failed("failed", "invalid_output")
 
@@ -714,7 +797,13 @@ class RhythmReadTest(RhythmBase):
             f.write(json.dumps(RHYTHM_OUT_V30))
         r = self.c.json("GET", "/report/" + RID64)[1]["rhythm"]
         self.assertEqual((r["sections"], r["energy_summary"]), (SECTIONS, ENERGY_SUMMARY))
-        for bad in bad_v2() + bad_v21() + bad_v22() + bad_v30():
+        self.assertIsNone(r["melody"])  # 0.3.x file: no melody
+        st, b = self.tl("layer=melody")  # not stored before 0.4.0: same 404 as energy before 0.3.0
+        self.assertEqual((st, b["error"]["code"]), (404, "rhythm_not_found"))
+        with open(self.rhythm_file(), "w") as f:
+            f.write(json.dumps(RHYTHM_OUT_V40))
+        self.assertEqual(self.c.json("GET", "/report/" + RID64)[1]["rhythm"]["melody"], MELODY)
+        for bad in bad_v2() + bad_v21() + bad_v22() + bad_v30() + bad_v40():
             with open(self.rhythm_file(), "w") as f:
                 f.write(bad)
             st, b = self.c.json("GET", "/report/" + RID64)
@@ -772,6 +861,38 @@ class RhythmReadTest(RhythmBase):
                                     energy=dict(ENERGY, values=[-123.45 + 3.45] * 600))))
         b = self.tl("layer=energy&limit=200&cursor=400")[1]
         self.assertEqual((b["total"], len(b["energy"]), b["continuation"]), (600, 200, None))
+        self.assertLess(len(json.dumps(b)), server.MAX_WIRE_PAGE + 2000)
+
+    def test_timeline_melody(self):
+        with open(self.rhythm_file(), "w") as f:
+            f.write(json.dumps(RHYTHM_OUT_V40))
+        calls = len(self.env.argv_log())
+        st, b = self.tl("layer=melody&limit=3")
+        self.assertEqual(st, 200, b)
+        self.assertEqual(b["melody"], MELODY_NOTES[:3])
+        self.assertEqual(b["melody"][0], {"start": 0.0, "end": 0.5, "midi": 60, "note": "C4"})
+        self.assertEqual((b["total"], b["truncated"], b["continuation"], b["layer"], b["layer_status"],
+                          b["reliability"]), (7, True, 3, "melody", "done", "low_reference"))
+        b = self.tl("layer=melody&limit=3&cursor=6")[1]
+        self.assertEqual((b["melody"], b["truncated"], b["continuation"]), ([MELODY_NOTES[6]], False, None))
+        b = self.tl("layer=melody&start=1.7&end=2.2")[1]  # rows overlapping [start, end]
+        self.assertEqual([x["midi"] for x in b["melody"]], [67, 72])
+        for q, code in (("layer=melody&cursor=8", "invalid_argument"), ("layer=melody&start=5&end=4", "invalid_argument"),
+                        ("layer=melody&limit=201", "bad_request"), ("layer=melodies", "bad_request")):
+            st, b = self.tl(q)
+            self.assertEqual((st, b["error"]["code"]), (400, code), q)
+        self.assertEqual(len(self.env.argv_log()), calls)  # served by the server, not ml
+        with open(self.rhythm_file(), "w") as f:  # failed melody: empty layer with its status
+            f.write(json.dumps(dict(RHYTHM_OUT_V40, melody=MELODY_FAILED, melody_notes=[])))
+        b = self.tl("layer=melody")[1]
+        self.assertEqual((b["melody"], b["total"], b["layer_status"]), ([], 0, "failed"))
+        # the most notes a valid file can hold: the page byte cap holds at limit=200
+        many = [_n(i * 0.1, i * 0.1 + 0.1, 60 + i % 12) for i in range(server.MELODY_MAX_NOTES)]
+        m = dict(rw.melody_summary(many, [], 0.008, 75000, "C", "major", []), notes_per_second=10.0, voiced_s=600.0)
+        with open(self.rhythm_file(), "w") as f:
+            f.write(json.dumps(dict(RHYTHM_OUT_V40, duration=600.0, sections=[], melody=m, melody_notes=many)))
+        b = self.tl("layer=melody&limit=200&cursor=5800")[1]
+        self.assertEqual((b["total"], len(b["melody"]), b["continuation"]), (6000, 200, None))
         self.assertLess(len(json.dumps(b)), server.MAX_WIRE_PAGE + 2000)
 
     def test_timeline_errors_and_words_passthrough(self):
@@ -1092,7 +1213,55 @@ class StructureLogicTest(unittest.TestCase):
         self.assertEqual(rw._segment_similarity([0.0] * 12, a, z, z), 0.5)  # silent chroma: cosine 0
 
 
+class MelodyLogicTest(unittest.TestCase):
+    """Pure helpers of worker 0.4.0 (note names, intervals, direction, summary); no numpy needed."""
+
+    def test_note_name(self):
+        self.assertEqual([rw.note_name(m) for m in (0, 21, 60, 61, 69, 71, 72, 127)],
+                         ["C-1", "A0", "C4", "C#4", "A4", "B4", "C5", "G9"])
+        self.assertTrue(all(rw.note_name(m) == server.note_name(m) for m in range(128)))
+
+    def test_intervals(self):
+        ns = [_n(0, 0.5, 60), _n(0.5, 1, 60), _n(1, 1.5, 62), _n(1.5, 2, 61), _n(2, 2.5, 67), _n(4, 4.5, 50)]
+        iv = rw.melody_intervals(ns)  # 0, +2, -1, +6; the 1.5 s gap before the last note is a phrase break
+        self.assertEqual(iv, {"count": 4, "repeat": 0.25, "step": 0.5, "leap": 0.25, "up": 0.5, "down": 0.25,
+                              "max_gap_s": 1.0})
+        self.assertEqual(rw.melody_intervals(ns, gap=2.0)["count"], 5)
+        self.assertIsNone(rw.melody_intervals(ns[:1]))
+        self.assertIsNone(rw.melody_intervals([]))
+
+    def test_direction(self):
+        up = [_n(i, i + 0.5, 60 + i) for i in range(4)]  # +3 semitones fitted over 3 s
+        self.assertEqual(rw.melody_direction(up), "rising")
+        self.assertEqual(rw.melody_direction([_n(i, i + 0.5, 60 - i) for i in range(4)]), "falling")
+        self.assertEqual(rw.melody_direction([_n(i, i + 0.5, 60 + i % 2) for i in range(6)]), "flat")
+        self.assertEqual(rw.melody_direction([_n(i, i + 0.5, 60 + i // 2) for i in range(4)]), "flat")  # fitted 1.6 < 2
+        self.assertIsNone(rw.melody_direction(up[:3]))
+
+    def test_summary(self):
+        m = MELODY
+        self.assertEqual((m["status"], m["note_count"], m["median_midi"]), ("done", 7, 67))  # weighted: 67 reaches half of 3.4 s
+        self.assertEqual(m["range"], {"low": {"midi": 60, "note": "C4"}, "high": {"midi": 72, "note": "C5"},
+                                      "p5": {"midi": 60, "note": "C4"}, "p95": {"midi": 72, "note": "C5"}})
+        self.assertEqual(m["voiced_s"], round(len(MELODY_VOICED) * 0.008, 3))
+        self.assertEqual(m["notes_per_second"], round(7 / m["voiced_s"], 3))
+        # durations: C 0.5, D 0.5, E 0.5, G 0.4, C5 1.0, A 0.5 of 3.4 s
+        self.assertEqual(m["scale_degrees"]["bins"],
+                         [round(x / 3.4, 3) for x in (1.5, 0, 0.5, 0, 0.5, 0, 0, 0.4, 0, 0.5, 0, 0)])
+        self.assertEqual(m["intervals"]["count"], 6)  # 2.5-3.0 -> 4.0 is a 1.0 s gap: still counted (<= 1.0)
+        self.assertEqual([(s["label"], s["note_count"], s["low"], s["high"], s["median_midi"], s["direction"])
+                          for s in m["sections"]],
+                         [("A", 4, 60, 67, 62, "rising"), ("B", 2, 72, 72, 72, None), ("A", 1, 69, 69, 69, None)])
+        self.assertEqual(m["sections"][0]["peak"], {"midi": 67, "note": "G4", "time": 1.5})
+        self.assertEqual(m["sections"][1]["peak"]["time"], 2.0)  # ties: earliest
+        g = rw.melody_summary(MELODY_NOTES, MELODY_VOICED, 0.008, 750, "Eb", "minor", [])
+        self.assertEqual((g["scale_degrees"]["tonic"], g["scale_degrees"]["bins"][9], g["sections"]),
+                         ("Eb", round(1.5 / 3.4, 3), []))  # C is degree 9 above Eb
+        self.assertIsNone(rw.melody_summary(MELODY_NOTES, MELODY_VOICED, 0.008, 750, "X", "major", [])["scale_degrees"])
+
+
 MODEL_PRESENT = os.path.isfile(rw.TEMPO_CNN_MODEL)
+SYNTH_MELODY = (72, 74, 76, 79, 76, 74, 72, 71, 69, 71, 72, 74, 76, 77, 79, 81)  # synth_audio.MELODY (numpy-free copy)
 
 
 def run_worker(wav, *opts):
@@ -1111,7 +1280,7 @@ class RealWorkerTest(unittest.TestCase):
         cls.dir = tempfile.mkdtemp(prefix="mlrhythm-")
         cls.out = {}
         for kind, secs in (("click", "30"), ("chords", "30"), ("modulation", "60"), ("kick100", "30"),
-                           ("kick100mid", "30"), ("abab", "60")):
+                           ("kick100mid", "30"), ("abab", "60"), ("melody", "30"), ("melody_ab", "60")):
             wav = os.path.join(cls.dir, kind + ".wav")
             subprocess.run([ESSENTIA_PY, "-I", SYNTH, kind, secs, wav], check=True, timeout=120)
             assert server.strict_wav_check(wav)
@@ -1128,7 +1297,9 @@ class RealWorkerTest(unittest.TestCase):
             self.assertEqual((v["sample_rate"], v["chords_reliability"]), (44100, "low_reference"))
             self.assertIn(v["duration"], (30.0, 60.0))
             self.assertEqual(v["tool"]["essentia_version"], "2.1-beta6-dev")
-            self.assertEqual(v["tool"]["version"], "0.3.1")
+            self.assertEqual(v["tool"]["version"], "0.4.0")
+            self.assertEqual(v["melody"]["status"], "done")
+            self.assertEqual(len(v["melody_notes"]), v["melody"]["note_count"])
             e = v["energy"]
             self.assertEqual((e["unit"], e["step_s"], len(e["values"])), ("dBFS", 1.0, int(v["duration"])))
             self.assertEqual(v["energy_summary"]["window_s"], 8.0)
@@ -1273,6 +1444,63 @@ class RealWorkerTest(unittest.TestCase):
         self.assertFalse(any(lo <= es["quietest"]["start"] < hi for lo, hi in b_spans))
         self.assertGreater(es["max"] - es["min"], 5.0)
 
+    def test_melody_line(self):
+        # measured (worker 0.4.0): all 60 notes of the 30 s line (16 notes x 0.5 s, A4..A5, C major) at the right
+        # MIDI; voiced 0.952; intervals step 0.814 / leap 0.186 (3 leaps of 16 per cycle), up 0.61
+        v = self.out["melody"]
+        m, ns = v["melody"], v["melody_notes"]
+        line = [SYNTH_MELODY[i % 16] for i in range(60)]
+        self.assertEqual((m["range"]["low"], m["range"]["high"]), ({"midi": 69, "note": "A4"}, {"midi": 81, "note": "A5"}))
+        self.assertLessEqual(abs(m["note_count"] - 60), 3)
+        self.assertGreater(m["voiced_fraction"], 0.85)
+        self.assertEqual([n["midi"] for n in ns][:16], line[:16])
+        for n in ns[:16]:  # onsets within 50 ms of the 0.5 s grid
+            self.assertLess(abs(n["start"] - round(n["start"] * 2) / 2.0), 0.05, n)
+        iv = m["intervals"]
+        self.assertAlmostEqual(iv["leap"], 3 / 16.0, delta=0.05)
+        self.assertAlmostEqual(iv["step"], 13 / 16.0, delta=0.05)
+        self.assertLess(iv["repeat"], 0.05)
+        self.assertAlmostEqual(m["notes_per_second"], 2.0, delta=0.3)
+        self.assertEqual((v["key"]["tonic"], v["key"]["scale"]), ("C", "major"))
+        sd = m["scale_degrees"]
+        self.assertEqual((sd["tonic"], sd["scale"]), ("C", "major"))
+        self.assertLess(sum(sd["bins"][k] for k in (1, 3, 6, 8, 10)), 0.02)  # no note outside C major
+        self.assertGreater(min(sd["bins"][k] for k in (0, 2, 4, 5, 7, 9, 11)), 0.0)
+        self.assertEqual([s["direction"] for s in m["sections"]], ["flat"])  # one repeating loop
+
+    def test_melody_sections_b_higher(self):
+        # measured (worker 0.4.0): A 60-67 (median 64, peak G4), B 76-83 (median 80, peak B5), all flat; ~2.1-2.3
+        # notes per voiced second; 125 notes for 120 written (a few short glide notes at block edges)
+        v = self.out["melody_ab"]
+        ms = v["melody"]["sections"]
+        self.assertEqual([(s["label"], s["start"], s["end"]) for s in ms],
+                         [(s["label"], s["start"], s["end"]) for s in v["sections"]])
+        self.assertEqual([s["label"] for s in ms], ["A", "B", "A", "B"])
+        for s in ms:
+            lo, hi = (60, 67) if s["label"] == "A" else (76, 83)
+            self.assertAlmostEqual(s["median_midi"], (lo + hi) / 2.0, delta=2.0, msg=s)
+            self.assertEqual(s["peak"]["midi"], hi, s)
+            self.assertGreaterEqual(s["low"], lo - 1, s)
+            self.assertAlmostEqual(s["notes_per_second"], 2.0, delta=0.5)
+            self.assertEqual(s["direction"], "flat")
+        a = max(s["median_midi"] for s in ms if s["label"] == "A")
+        b = min(s["median_midi"] for s in ms if s["label"] == "B")
+        self.assertGreaterEqual(b - a, 12)
+        self.assertEqual(sum(s["note_count"] for s in ms), v["melody"]["note_count"])
+
+    def test_melody_silence_and_short(self):
+        for kind, secs in (("silence", "5"), ("click", "1.5"), ("chords", "1.2")):
+            wav = os.path.join(self.dir, "m-%s-%s.wav" % (kind, secs))
+            subprocess.run([ESSENTIA_PY, "-I", SYNTH, kind, secs, wav], check=True, timeout=120)
+            v = run_worker(wav)
+            self.assertIsNotNone(server.check_rhythm(v), kind)
+            m = v["melody"]
+            self.assertEqual(m["status"], "done", m)
+            if kind != "chords":  # silence and clicks carry no pitch
+                self.assertEqual((m["note_count"], m["voiced_fraction"], m["range"], m["scale_degrees"],
+                                  v["melody_notes"]), (0, 0.0, None, None, []), kind)
+                self.assertIn("no_melody: no pitched note was found", v["warnings"])
+
     def test_sections_single_texture(self):
         # one loop, one texture: no boundary (interior novelty stays <= ~0.12, threshold 0.15)
         for kind in ("chords", "click", "kick100"):
@@ -1308,9 +1536,13 @@ class RealWorkerTest(unittest.TestCase):
                 self.assertEqual(b["rhythm"]["tempo_cnn"]["status"], "done" if MODEL_PRESENT else "unavailable")
                 self.assertEqual([s["label"] for s in b["rhythm"]["sections"]], ["A"])
                 self.assertEqual(b["rhythm"]["energy_summary"]["unit"], "dBFS")
+                self.assertEqual(b["rhythm"]["melody"]["status"], "done")
+                self.assertNotIn("melody_notes", b["rhythm"])
                 rid = b["result_id"]
                 st, t = Client(env, h.port).json("GET", "/timeline/%s?layer=energy&limit=200" % rid)
                 self.assertEqual((st, t["total"], len(t["energy"])), (200, 30, 30))
+                st, t = Client(env, h.port).json("GET", "/timeline/%s?layer=melody&limit=200" % rid)
+                self.assertEqual((st, t["layer_status"], t["total"]), (200, "done", b["rhythm"]["melody"]["note_count"]))
             finally:
                 h.stop()
         finally:

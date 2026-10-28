@@ -55,7 +55,7 @@ CONFIG_KEYS = {"bind", "port", "allow", "clients", "cert", "key", "ml", "root", 
                "launchd_logs", "test_mode", "limits", "test_ready_file", "rhythm"}
 RHYTHM_KEYS = {"python", "worker"}
 RHYTHM_DIR = "results-rhythm"  # under root: <result_id>.json, 0600, written atomically
-RHYTHM_LAYERS = ("beats", "chords", "energy")
+RHYTHM_LAYERS = ("beats", "chords", "energy", "melody")
 RHYTHM_MAX_BEATS = 5000
 RHYTHM_MAX_CHORDS = 20000
 RHYTHM_MAX_KEY_SECTIONS = 64  # worker 0.2.0 emits <= 30 (20 s windows over 600 s)
@@ -909,7 +909,7 @@ def check_rhythm(v):
             if not isinstance(e, dict) or not _num(e.get("bpm"), 0, 1000) or not _num(e.get("share"), 0, 1):
                 return None
         if (not _rhythm_v2_ok(v, dur) or not _rhythm_v21_ok(v) or not _rhythm_v22_ok(v)
-                or not _rhythm_v30_ok(v, dur)):
+                or not _rhythm_v30_ok(v, dur) or not _rhythm_v40_ok(v, dur)):
             return None
         if "worker_sha256" in v and not (isinstance(v["worker_sha256"], str) and RE_HEX64.match(v["worker_sha256"])):
             return None
@@ -1119,6 +1119,122 @@ def _rhythm_v30_ok(v, dur):
     return True
 
 
+MELODY_MAX_NOTES = 6000  # worker cap: 600 s / PitchContourSegmentation's 0.1 s minimum note
+MELODY_KEYS = {"status", "method", "reliability", "voiced_fraction", "voiced_s", "note_count", "notes_per_second",
+               "range", "median_midi", "intervals", "scale_degrees", "sections"}
+MELODY_RANGE_KEYS = ("low", "high", "p5", "p95")
+MELODY_INTERVAL_KEYS = {"count", "repeat", "step", "leap", "up", "down", "max_gap_s"}
+MELODY_DEGREE_KEYS = {"tonic", "scale", "weight", "bins"}
+MELODY_SECTION_KEYS = {"label", "start", "end", "note_count", "low", "high", "median_midi", "notes_per_second", "peak",
+                       "direction"}
+MELODY_NOTE_KEYS = {"start", "end", "midi", "note"}
+MELODY_DIRECTIONS = (None, "rising", "falling", "flat")
+MELODY_DIR_NOTES = 4  # the worker's minimum notes for a section direction
+MELODY_MAX_NPS = 20  # notes per voiced second; notes last >= 0.1 s, so 10 is the physical bound for valid output
+NOTE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+
+
+def note_name(midi):
+    return NOTE_NAMES[midi % 12] + str(midi // 12 - 1)
+
+
+def _midi(x):
+    return isinstance(x, int) and not isinstance(x, bool) and 0 <= x <= 127
+
+
+def _pitch_ok(p):
+    return isinstance(p, dict) and set(p) == {"midi", "note"} and _midi(p["midi"]) and p["note"] == note_name(p["midi"])
+
+
+def _sum_ok(*xs):
+    return 0.99 <= sum(xs) <= 1.01  # fractions rounded to 3 decimals
+
+
+def _melody_done_ok(m, v, dur, notes):
+    if set(m) != MELODY_KEYS or m["reliability"] != "low_reference" or not _short_str(m["method"], 200):
+        return False
+    n = m["note_count"]
+    if not (_num(m["voiced_fraction"], 0, 1) and _num(m["voiced_s"], 0, dur) and _count(n, MELODY_MAX_NOTES * 4)
+            and _opt_num(m["notes_per_second"], 0, MELODY_MAX_NPS) and _opt_num(m["median_midi"], 0, 127)):
+        return False
+    if notes is not None and len(notes) != min(n, MELODY_MAX_NOTES):
+        return False
+    if n == 0:  # no note: every note statistic is null
+        if any(m[k] is not None for k in ("notes_per_second", "range", "median_midi", "intervals", "scale_degrees")):
+            return False
+    else:
+        r = m["range"]
+        if not (isinstance(r, dict) and set(r) == set(MELODY_RANGE_KEYS) and all(_pitch_ok(r[k]) for k in r)
+                and r["low"]["midi"] <= r["p5"]["midi"] <= r["p95"]["midi"] <= r["high"]["midi"]
+                and _midi(m["median_midi"]) and r["p5"]["midi"] <= m["median_midi"] <= r["p95"]["midi"]
+                and m["notes_per_second"] is not None):
+            return False
+    iv = m["intervals"]
+    if iv is not None:
+        if not (isinstance(iv, dict) and set(iv) == MELODY_INTERVAL_KEYS and _count(iv["count"], MELODY_MAX_NOTES * 4)
+                and 1 <= iv["count"] < max(n, 1) and _num(iv["max_gap_s"], 0, 60)
+                and all(_num(iv[k], 0, 1) for k in ("repeat", "step", "leap", "up", "down"))
+                and _sum_ok(iv["repeat"], iv["step"], iv["leap"]) and _sum_ok(iv["repeat"], iv["up"], iv["down"])):
+            return False
+    sd = m["scale_degrees"]
+    if sd is not None:
+        if not (isinstance(sd, dict) and set(sd) == MELODY_DEGREE_KEYS and _short_str(sd["tonic"], 8)
+                and _short_str(sd["scale"], 16) and sd["weight"] == "duration" and isinstance(sd["bins"], list)
+                and len(sd["bins"]) == 12 and all(_num(b, 0, 1) for b in sd["bins"]) and _sum_ok(*sd["bins"])):
+            return False
+        if (sd["tonic"], sd["scale"]) != (v["key"]["tonic"], v["key"]["scale"]):
+            return False
+    ss = m["sections"]
+    ref = v.get("sections")
+    if not isinstance(ss, list) or len(ss) > SECTIONS_MAX:
+        return False
+    if ref is not None and [(r["label"], r["start"], r["end"]) for r in ss] != [
+            (r["label"], r["start"], r["end"]) for r in ref]:  # aligned to the 0.3.0 sections
+        return False
+    total = 0
+    for r in ss:
+        if not (isinstance(r, dict) and set(r) == MELODY_SECTION_KEYS and _count(r["note_count"], MELODY_MAX_NOTES * 4)
+                and r["direction"] in MELODY_DIRECTIONS and _opt_num(r["notes_per_second"], 0, MELODY_MAX_NPS)):
+            return False
+        total += r["note_count"]
+        if r["note_count"] == 0:
+            if any(r[k] is not None for k in ("low", "high", "median_midi", "notes_per_second", "peak", "direction")):
+                return False
+            continue
+        pk = r["peak"]
+        if not (_midi(r["low"]) and _midi(r["high"]) and _midi(r["median_midi"])
+                and r["low"] <= r["median_midi"] <= r["high"] and isinstance(pk, dict)
+                and set(pk) == {"midi", "note", "time"} and _pitch_ok({"midi": pk["midi"], "note": pk["note"]})
+                and pk["midi"] == r["high"] and _num(pk["time"], r["start"], r["end"])
+                and (r["direction"] is None) == (r["note_count"] < MELODY_DIR_NOTES)):
+            return False
+    return not ss or total == n
+
+
+def _rhythm_v40_ok(v, dur):
+    """Fields added by worker 0.4.0 (melody summary + melody_notes rows); absent in older files, both or neither.
+    failed: exactly {status, code}, no notes. done: exact key sets, ints for MIDI, names match, bounded, sorted,
+    inside the duration, section rows aligned to `sections`, stored rows = min(note_count, cap)."""
+    if ("melody" in v) != ("melody_notes" in v):
+        return False
+    if "melody" not in v:
+        return True
+    m, notes = v["melody"], v["melody_notes"]
+    if not isinstance(notes, list) or len(notes) > MELODY_MAX_NOTES or not isinstance(m, dict):
+        return False
+    prev = 0
+    for r in notes:
+        if not (isinstance(r, dict) and set(r) == MELODY_NOTE_KEYS and _num(r["start"], 0, dur)
+                and _num(r["end"], 0, dur) and r["start"] < r["end"] and r["start"] >= prev and _midi(r["midi"])
+                and r["note"] == note_name(r["midi"])):
+            return False
+        prev = r["start"]
+    if m.get("status") == "failed":
+        return set(m) == {"status", "code"} and isinstance(m["code"], str) and bool(RE_CODE.match(m["code"])) \
+            and notes == []
+    return m.get("status") == "done" and _melody_done_ok(m, v, dur, notes)
+
+
 def confidence_band(c):
     """Bands documented by Essentia BeatTrackerMultiFeature: [0,1) very low, [1,1.5] low, (1.5,3.5] good, >3.5."""
     if c < 1:
@@ -1145,7 +1261,8 @@ def rhythm_summary(v):
     """Compact view for analyze and /report; beats and chord rows stay in the stored file (/timeline).
     Fields from worker 0.2.0 (bpm_alternatives[_note], key_sections, key_change_count, chords_grid) and 0.2.1
     (double_tempo_evidence[_note]) and 0.2.2 (tempo_cnn) and 0.3.0 (energy_summary, sections, sections_method,
-    sections_reliability) are null when the stored file predates them. Energy values come only from /timeline."""
+    sections_reliability) and 0.4.0 (melody) are null when the stored file predates them. Energy values and melody
+    notes come only from /timeline."""
     return {"status": "done", "bpm": v["bpm"], "bpm_confidence": v["bpm_confidence"],
             "bpm_confidence_band": confidence_band(v["bpm_confidence"]),
             "bpm_confidence_scale": v.get("bpm_confidence_scale"), "bpm_estimates": v.get("bpm_estimates", []),
@@ -1157,7 +1274,7 @@ def rhythm_summary(v):
             "chords_grid": v.get("chords_grid"), "chords_reliability": v.get("chords_reliability"),
             "energy_summary": v.get("energy_summary"), "sections": v.get("sections"),
             "sections_method": v.get("sections_method"), "sections_reliability": v.get("sections_reliability"),
-            "downbeats": v["downbeats"], "duration": v["duration"], "tool": v["tool"], "warnings": v["warnings"]}
+            "melody": v.get("melody"), "downbeats": v["downbeats"], "duration": v["duration"], "tool": v["tool"], "warnings": v["warnings"]}
 
 
 def rhythm_page(rid, v, layer, start, end, cursor, limit):
@@ -1169,7 +1286,8 @@ def rhythm_page(rid, v, layer, start, end, cursor, limit):
         rows = [{"time": round(i * e["step_s"], 3), "value": x} for i, x in enumerate(e["values"])
                 if start <= i * e["step_s"] <= end]
     else:
-        rows = [c for c in v["chords"] if c["end"] >= start and c["start"] <= end]
+        src = v["melody_notes"] if layer == "melody" else v["chords"]
+        rows = [c for c in src if c["end"] >= start and c["start"] <= end]
     if cursor > len(rows):
         raise HttpError("invalid_argument")
     page, size = [], 2
@@ -1186,6 +1304,9 @@ def rhythm_page(rid, v, layer, start, end, cursor, limit):
         out["reliability"] = v.get("chords_reliability", "low_reference")
     elif layer == "energy":
         out["unit"], out["step_s"] = v["energy"]["unit"], v["energy"]["step_s"]
+    elif layer == "melody":
+        out["layer_status"] = v["melody"]["status"]
+        out["reliability"] = "low_reference"
     return out
 
 
@@ -1905,7 +2026,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(200, v)
 
     def rhythm_timeline(self, app, rid, q):
-        """layer=beats|chords|energy, served from the stored rhythm file with the native range/limit/cursor rules."""
+        """layer=beats|chords|energy|melody, served from the stored rhythm file with the native range/limit/cursor rules."""
         vals = {}
         for k, default in (("start", 0.0), ("end", 600.0)):
             if k in q:
@@ -1934,6 +2055,8 @@ class Handler(BaseHTTPRequestHandler):
         if st != "ok":
             raise HttpError("invalid_result")
         if q["layer"] == "energy" and "energy" not in v:  # stored before worker 0.3.0: that layer is not stored
+            raise HttpError("rhythm_not_found")
+        if q["layer"] == "melody" and "melody_notes" not in v:  # stored before worker 0.4.0
             raise HttpError("rhythm_not_found")
         self.send_json(200, rhythm_page(rid, v, q["layer"], vals["start"], vals["end"], cursor, limit))
 

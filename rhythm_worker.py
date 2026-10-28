@@ -61,6 +61,17 @@ Choices:
   kernel fits (truncated edge kernels gave false boundaries), boundaries at novelty >= 0.15 (synthetic: true changes
   0.33-0.38, inside one loop <= 0.12) >= 8 beats apart, then letters by segment-mean similarity >= 0.75 to each
   group's first segment, in order of first appearance. Similarity groups, not verse/chorus. No beats -> [].
+- melody (0.4.0, reliability "low_reference"): the predominant pitch of the full mix (usually the lead vocal; intros
+  and solos may track an instrument, accompaniment-only passages track the loudest line, e.g. a chord root). No
+  vocal separation. EqualLoudness + PredominantPitchMelodia run on the 16 kHz source itself with frameSize 1024
+  (64 ms; the 44.1 kHz default 2048 is 46 ms) and hopSize 128 (8 ms); time-based parameters (ms, cents/ms) are rate
+  independent, maxFrequency is set to the 8 kHz Nyquist (the default 20 kHz is above it) and the salience range is the
+  default 55 Hz..1760 Hz with minFrequency 80 Hz. Measured on synthetic lines (2026-10-28): 16 kHz direct (frame 1024 or
+  2048) recovered every note of a 0.5 s line at MIDI 69-81, and 20 of 24 at MIDI 48-60 where the same audio
+  resampled to 44.1 kHz with the defaults gave 12; frameSize 512 split notes. PitchContourSegmentation (same hop, defaults: min 0.1 s,
+  60 cents, rms -2) turns the contour into notes; midi is rounded to the nearest semitone (A4 = 69 = 440 Hz).
+  Stored notes are capped at MELODY_MAX_NOTES (6000 = 600 s / 0.1 s minimum note length, so never reached by valid
+  output; kept as a guard with a warning). Not a transcription: octave errors, split or merged repeated notes.
 """
 import errno
 import hashlib
@@ -74,7 +85,7 @@ import statistics
 import sys
 import wave
 
-TOOL = {"name": "music-lens-rhythm-worker", "version": "0.3.1"}
+TOOL = {"name": "music-lens-rhythm-worker", "version": "0.4.0"}
 SRC_RATE = 16000
 RATE = 44100
 MAX_SECONDS = 600.0
@@ -125,6 +136,17 @@ SEC_MIN = 8  # beats; minimum section length and peak-picking neighbourhood (~2 
 SEC_NOVELTY_MIN = 0.15  # absolute Foote novelty (-1..1 scale) a boundary needs
 SEC_GROUP_MIN = 0.75  # segment similarity (0..1) needed to join an existing label group
 SEC_MAX = 40
+MEL_FRAME, MEL_HOP = 1024, 128  # at 16 kHz: 64 ms window, 8 ms hop (see docstring)
+MEL_MAX_FREQ = 8000.0  # Nyquist of the 16 kHz source
+MELODY_MAX_NOTES = 6000  # 600 s / PitchContourSegmentation's 0.1 s minimum note: an upper bound for valid output
+MEL_PHRASE_GAP = 1.0  # s; consecutive notes further apart than this are a phrase break, not an interval
+MEL_DIR_MIN = 2.0  # semitones of fitted change a section needs to be rising/falling
+MEL_DIR_NOTES = 4  # fewer notes in a section: direction null
+MEL_METHOD = ("EqualLoudness+PredominantPitchMelodia 16 kHz frame 1024 hop 128 (predominant pitch of the full mix); "
+              "PitchContourSegmentation notes, midi rounded")
+NOTE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+PITCH_CLASS = {"C": 0, "C#": 1, "Db": 1, "D": 2, "D#": 3, "Eb": 3, "E": 4, "F": 5, "F#": 6, "Gb": 6, "G": 7,
+               "G#": 8, "Ab": 8, "A": 9, "A#": 10, "Bb": 10, "B": 11}
 SEC_METHOD = ("beat-sync HPCP12+MFCC2-13(z) cosine SSM; Foote checkerboard 2x16 beats (full kernel only), "
               "novelty>=0.15, min 8 beats; groups: segment-mean similarity>=0.75 to the group's first segment")
 
@@ -571,6 +593,145 @@ def structure(chroma, mfcc, frame_times, beats, duration, energy, chords):
     return out, warn
 
 
+def note_name(midi):
+    """MIDI number -> scientific pitch name with sharps (60 = C4, 69 = A4)."""
+    return NOTE_NAMES[midi % 12] + str(midi // 12 - 1)
+
+
+def _pitch(midi):
+    return {"midi": midi, "note": note_name(midi)}
+
+
+def _wquantile(pairs, q):
+    """Duration-weighted quantile of [(midi, weight)]: the smallest midi whose cumulative weight reaches q."""
+    pairs = sorted(pairs)
+    total = sum(w for _, w in pairs)
+    acc = 0.0
+    for m, w in pairs:
+        acc += w
+        if acc >= q * total - 1e-12:
+            return m
+    return pairs[-1][0]
+
+
+def _frac(n, d):
+    return round(n / float(d), 3) if d else 0.0
+
+
+def melody_intervals(notes, gap=MEL_PHRASE_GAP):
+    """Intervals between consecutive notes at most `gap` s apart (onset minus previous end): repeat (0 semitones),
+    step (1-2), leap (>= 3), up and down as fractions of all counted intervals. None when there is none."""
+    iv = [b["midi"] - a["midi"] for a, b in zip(notes, notes[1:]) if b["start"] - a["end"] <= gap]
+    if not iv:
+        return None
+    n = len(iv)
+    return {"count": n, "repeat": _frac(sum(1 for d in iv if d == 0), n),
+            "step": _frac(sum(1 for d in iv if 1 <= abs(d) <= 2), n),
+            "leap": _frac(sum(1 for d in iv if abs(d) >= 3), n),
+            "up": _frac(sum(1 for d in iv if d > 0), n), "down": _frac(sum(1 for d in iv if d < 0), n),
+            "max_gap_s": gap}
+
+
+def melody_direction(notes, min_notes=MEL_DIR_NOTES, thresh=MEL_DIR_MIN):
+    """Least-squares line of midi against note midpoint time; fitted change = slope x (last - first midpoint).
+    rising >= +thresh semitones, falling <= -thresh, else flat; None with fewer than min_notes notes."""
+    if len(notes) < min_notes:
+        return None
+    t = [(n["start"] + n["end"]) / 2.0 for n in notes]
+    y = [float(n["midi"]) for n in notes]
+    tm, ym = sum(t) / len(t), sum(y) / len(y)
+    var = sum((a - tm) ** 2 for a in t)
+    if var <= 0:
+        return "flat"
+    change = sum((a - tm) * (b - ym) for a, b in zip(t, y)) / var * (t[-1] - t[0])
+    return "rising" if change >= thresh else "falling" if change <= -thresh else "flat"
+
+
+def melody_summary(notes, voiced, hop_s, n_frames, tonic, scale, sections):
+    """notes: [{start, end, midi, note}] sorted; voiced: sorted times (s) of voiced pitch frames; n_frames: all pitch
+    frames. notes_per_second = notes / voiced seconds (voiced frames x hop), so rests and gaps do not dilute it.
+    Range p5/p95, median and scale degrees are duration-weighted. Section stats take the notes whose onset lies in
+    the section ([start, end), the last one closed). Returns the `melody` dict (status done)."""
+    import bisect
+    vsec = len(voiced) * hop_s
+    w = [(n["midi"], max(n["end"] - n["start"], 1e-6)) for n in notes]
+    rng = med = degrees = None
+    if notes:
+        rng = {"low": _pitch(min(n["midi"] for n in notes)), "high": _pitch(max(n["midi"] for n in notes)),
+               "p5": _pitch(_wquantile(w, 0.05)), "p95": _pitch(_wquantile(w, 0.95))}
+        med = _wquantile(w, 0.5)
+        pc = PITCH_CLASS.get(tonic)
+        if pc is not None:
+            bins = [0.0] * 12
+            for m, d in w:
+                bins[(m - pc) % 12] += d
+            tot = sum(bins)
+            degrees = {"tonic": tonic, "scale": scale, "weight": "duration",
+                       "bins": [round(b / tot, 3) for b in bins]}
+    secs = []
+    for k, sec in enumerate(sections):
+        last = k == len(sections) - 1
+        inside = [n for n in notes if sec["start"] <= n["start"] < sec["end"] or (last and n["start"] == sec["end"])]
+        a = bisect.bisect_left(voiced, sec["start"])
+        b = bisect.bisect_right(voiced, sec["end"]) if last else bisect.bisect_left(voiced, sec["end"])
+        sv = (b - a) * hop_s
+        row = {"label": sec["label"], "start": sec["start"], "end": sec["end"], "note_count": len(inside),
+               "low": None, "high": None, "median_midi": None, "notes_per_second": None, "peak": None,
+               "direction": melody_direction(inside)}
+        if inside:
+            top = max(inside, key=lambda n: (n["midi"], -n["start"]))
+            row.update(low=min(n["midi"] for n in inside), high=top["midi"],
+                       median_midi=_wquantile([(n["midi"], max(n["end"] - n["start"], 1e-6)) for n in inside], 0.5),
+                       notes_per_second=round(len(inside) / sv, 3) if sv > 0 else None,
+                       peak=dict(_pitch(top["midi"]), time=top["start"]))
+        secs.append(row)
+    return {"status": "done", "method": MEL_METHOD, "reliability": "low_reference",
+            "voiced_fraction": _frac(len(voiced), n_frames), "voiced_s": round(vsec, 3), "note_count": len(notes),
+            "notes_per_second": round(len(notes) / vsec, 3) if vsec > 0 and notes else None,
+            "range": rng, "median_midi": med, "intervals": melody_intervals(notes), "scale_degrees": degrees,
+            "sections": secs}
+
+
+def melody(x16, duration, tonic, scale, sections):
+    """(melody dict, notes, warnings) for the 16 kHz source; never raises (failure -> status failed, no notes)."""
+    try:
+        import essentia.standard as es
+        import numpy as np
+        a = es.EqualLoudness(sampleRate=SRC_RATE)(x16)
+        pitch, _ = es.PredominantPitchMelodia(sampleRate=SRC_RATE, frameSize=MEL_FRAME, hopSize=MEL_HOP,
+                                              maxFrequency=MEL_MAX_FREQ)(a)
+        pitch = np.asarray(pitch, dtype=np.float64)
+        if not np.all(np.isfinite(pitch)):
+            return {"status": "failed", "code": "non_finite"}, [], ["melody_failed: non_finite"]
+        hop_s = MEL_HOP / float(SRC_RATE)
+        voiced = [round(i * hop_s, 6) for i in np.nonzero(pitch > 0)[0].tolist()]
+        notes = []
+        if voiced:
+            on, du, mi = es.PitchContourSegmentation(sampleRate=SRC_RATE, hopSize=MEL_HOP)(
+                np.ascontiguousarray(pitch, dtype=np.float32), a)
+            for o, d, m in zip(on, du, mi):
+                o, d, m = float(o), float(d), float(m)
+                if not (math.isfinite(o) and math.isfinite(d) and math.isfinite(m)):
+                    return {"status": "failed", "code": "non_finite"}, [], ["melody_failed: non_finite"]
+                s, e, mm = r3(min(max(o, 0.0), duration)), r3(min(max(o + d, 0.0), duration)), int(round(m))
+                if e > s and 0 <= mm <= 127:
+                    notes.append({"start": s, "end": e, "midi": mm, "note": note_name(mm)})
+        notes.sort(key=lambda n: (n["start"], n["end"]))
+        warns = []
+        if not notes:
+            warns.append("no_melody: no pitched note was found")
+        summary = melody_summary(notes, voiced, hop_s, len(pitch), tonic, scale, sections)
+        if summary["scale_degrees"] is None and notes:
+            warns.append("melody_scale_degrees_unavailable: key tonic not recognized")
+        if len(notes) > MELODY_MAX_NOTES:
+            warns.append("melody_notes_capped: %d notes, first %d stored" % (len(notes), MELODY_MAX_NOTES))
+            notes = notes[:MELODY_MAX_NOTES]
+        return summary, notes, warns
+    except Exception as e:  # never fail the worker because of the melody layer
+        return ({"status": "failed", "code": "dependency_missing" if isinstance(e, (ImportError, AttributeError))
+                 else "analysis_error"}, [], ["melody_failed: " + type(e).__name__])
+
+
 def onset_envelope(audio):
     """Normalized (0..1) half-rectified L1 spectral flux per ONSET_HOP frame; frame i centred at i*ONSET_HOP."""
     import essentia.standard as es
@@ -699,6 +860,8 @@ def analyze(path, model=TEMPO_CNN_MODEL):
                                    [min(i * step, duration) for i in range(len(pcps))], beats, duration, energy, chords)
     if sec_warn:
         warnings.append(sec_warn)
+    mel, mel_notes, mel_warn = melody(x16, r3(duration), str(tonic), str(scale), sections)
+    warnings.extend(mel_warn)
 
     return {
         "bpm": round(bpm, 2),
@@ -726,6 +889,8 @@ def analyze(path, model=TEMPO_CNN_MODEL):
         "sections": sections,
         "sections_method": SEC_METHOD,
         "sections_reliability": "low_reference",
+        "melody": mel,
+        "melody_notes": mel_notes,
         "sample_rate": RATE,
         "source_sample_rate": SRC_RATE,
         "duration": r3(duration),
