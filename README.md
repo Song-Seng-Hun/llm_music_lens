@@ -612,16 +612,31 @@ Why lyric repeats are the backbone: on the 8 real songs (stored 0.4.3 `structure
      non-repeat pieces of the same kind then join while the result stays <= 40 s;
   5. a repeat with more than half of its 1 s windows below `silence_db` (ASR text over a silent tail or fade, not a
      chorus candidate) becomes `silence` with `group: null`, is counted in `dropped_repeats` instead of
-     `repeat_groups`, and joins an adjacent silence piece (<= 40 s).
+     `repeat_groups`, and joins an adjacent silence piece (<= 40 s);
+  6. (heuristic, overview only; `lyric_repeats` is unchanged) a repeat segment longer than 45 s is cut at its best
+     internal point, both parts >= 8 s, keeping kind `repeat`, the group and the block: the middle of the longest
+     run of whole 1 s windows inside it touched by no ASR word (ties earliest), else the middle of the largest gap
+     between consecutive words inside it, else the audio section boundary nearest its middle; repeated while longer
+     than 45 s and fewer than 40 segments exist; no candidate meeting the 8 s rule (word rules need words): no cut.
+     On the 8 songs: 111-171 -> 111-138 + 138-171 and 65-116 -> 65-80 + 80-116 (both at a word-free second).
+- `internal` (every segment; false unless a repeat): true when the repeat's group has a single surviving block,
+  i.e. the text repeats only inside that block (a line sung twice >= 15 s apart within it), not across the song.
+  Chosen as a flag rather than a new kind so every lyric-repeat segment keeps `kind: "repeat"` (clients filtering
+  by kind still see it) while `repeat_groups` lists only groups with >= 2 blocks: `count` = blocks (a cut block
+  still counts once), `seconds` = their segments' total. Internal groups are not listed. Blocks dropped to silence
+  (step 5) do not count, so a group left with one audible block becomes internal.
 - `source: "audio"` when lyric repeats are unavailable, failed or empty: the stored `sections`, kind `section` (with
-  its `label` letter) or `silence` (label `silence`), made contiguous. No repeats and no sections (no beats):
+  its `label` letter) or `silence` (label `silence`), made contiguous. `structure` tells how much form there is:
+  `lyric` (lyric source), `audio_labels` (audio source with >= 2 different section letters) or `unknown` (audio
+  source whose audible sections all share one letter, e.g. all `A`: the segments are only novelty cuts, so do not
+  infer form, repeats or a chorus from them; labels are kept as stored). No repeats and no sections (no beats):
   `{status: "failed", code: "no_structure"}`.
 - Words: the ASR words of `<root>/results/<result_id>.json` read like the lyric input (same checks), used only when
   their payload hash equals the stored `words_sha256` (the words the repeats came from); otherwise (result file
   gone, changed by an ASR re-run, malformed) `words` is null on every segment. Only counts are returned, never text.
-- Output: `{status: "done", source, method, reliability: "low_reference", segment_count, repeat_groups: [{group,
-  count, seconds}], dropped_repeats, segments, notes}`; at most 40 segments, contiguous 0..duration (times 3 decimals). Each segment
-  `{start, end, kind, group (repeat only, else null), label (audio only, else null), energy: {mean_db, rel_db,
+- Output: `{status: "done", source, structure, method, reliability: "low_reference", segment_count, repeat_groups:
+  [{group, count, seconds}], dropped_repeats, segments, notes}`; at most 40 segments, contiguous 0..duration (times 3 decimals). Each segment
+  `{start, end, kind, group (repeat only, else null), internal, label (audio only, else null), energy: {mean_db, rel_db,
   rank}, quiet, chords: {top, changes_per_min}, melody, words}`:
   - `energy.mean_db`: mean of the 1 s values whose midpoint lies in the segment, leaving out values below
     `silence_db` unless the segment is silence or holds only such values; `rel_db` = mean_db minus the song median of
@@ -638,14 +653,15 @@ Why lyric repeats are the backbone: on the 8 real songs (stored 0.4.3 `structure
   failing the server's own strict shape check `{..., code: "invalid_overview"}`; the rest of the summary and the
   report are unchanged.
 - Offline check (8 stored songs, read-only): one result predates 0.4.3 -> null; one has `too_little_text` -> audio
-  source, 7 sections all `A`; the other 7 gave 6-14 segments with 2-4 repeats each (1-2 groups); repeat `rel_db`
+  source, 7 sections all `A` (`structure: "unknown"`); the other 7 gave 6-14 segments with 2-4 repeat blocks
+  each (1-2 groups; two songs have a one-block group, flagged `internal`); repeat `rel_db`
   -2.4..+1.2 dB except two hallucination-like repeats over a fading/silent tail of one song: the -107 dB one (mostly
   silent) is dropped to `silence` (`dropped_repeats: 1`), the -23 dB one stays a repeat with `quiet: true`; repeat
   `rel_semitones` -4..+12.
 - Honest limits: `repeat` = repeated ASR text, a chorus/hook candidate, not a verified chorus; verse and pre-chorus
   are not distinguished (both `vocal`); everything depends on the ASR (missed lines turn into `instrumental`,
   hallucinated text over an instrumental into `vocal` or `repeat`); split points sit on 1 s windows or section
-  boundaries; thresholds (4 s, 8 s, 25%, 40 s) are set by reasoning, checked on 8 songs only. Say "estimate".
+  boundaries or word gaps; thresholds (4 s, 8 s, 25%, 40 s, 45 s) are set by reasoning, checked on 8 songs only. Say "estimate".
 
 ## Runtime layout (production)
 

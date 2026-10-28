@@ -94,8 +94,9 @@ def backbone():
 
 def assert_shape(t, o, dur):
     """Independent strict check of a done overview: exact keys, contiguity, caps, ranks, groups."""
-    t.assertEqual(set(o), {"status", "source", "method", "reliability", "segment_count", "repeat_groups",
-                           "dropped_repeats", "segments", "notes"})
+    t.assertEqual(set(o), {"status", "source", "structure", "method", "reliability", "segment_count",
+                           "repeat_groups", "dropped_repeats", "segments", "notes"})
+    t.assertEqual(o["structure"] == "lyric", o["source"] == "lyric")
     t.assertEqual((o["status"], o["reliability"]), ("done", "low_reference"))
     segs = o["segments"]
     t.assertTrue(1 <= len(segs) <= 40)
@@ -105,8 +106,10 @@ def assert_shape(t, o, dur):
     for a, b in zip(segs, segs[1:]):
         t.assertEqual(a["end"], b["start"])
     for s in segs:
-        t.assertEqual(set(s), {"start", "end", "kind", "group", "label", "energy", "quiet", "chords", "melody",
-                               "words"})
+        t.assertEqual(set(s), {"start", "end", "kind", "group", "internal", "label", "energy", "quiet", "chords",
+                               "melody", "words"})
+        t.assertTrue(s["kind"] == "repeat" or s["internal"] is False)
+        t.assertEqual(s["internal"], s["kind"] == "repeat" and s["group"] not in {g["group"] for g in o["repeat_groups"]})
         t.assertIs(s["quiet"], s["kind"] == "repeat" and s["energy"]["rel_db"] is not None
                    and s["energy"]["rel_db"] <= -12)
         t.assertLess(s["start"], s["end"])
@@ -145,8 +148,10 @@ class OverviewLogicTest(unittest.TestCase):
                                   ("repeat", 0, 20.0, 35.0), ("vocal", None, 35.0, 60.0), ("repeat", 0, 60.0, 75.0),
                                   ("instrumental", None, 75.0, 87.0), ("vocal", None, 87.0, 100.0),
                                   ("repeat", 1, 100.0, 112.0), ("instrumental", None, 112.0, 120.0)])
-        self.assertEqual(o["repeat_groups"], [{"group": 0, "count": 2, "seconds": 30.0},
-                                              {"group": 1, "count": 1, "seconds": 12.0}])
+        # group 1 has one block (text repeats only inside it): internal, not a repeat group
+        self.assertEqual(o["repeat_groups"], [{"group": 0, "count": 2, "seconds": 30.0}])
+        self.assertEqual([s["internal"] for s in o["segments"] if s["kind"] == "repeat"], [False, False, True])
+        self.assertEqual(o["structure"], "lyric")
         s = o["segments"]
         # energy: song median of non-silent windows is -20 (verse); choruses +6 dB, ranked 1 and 2 (ties earliest)
         self.assertEqual(s[2]["energy"], {"mean_db": LOUD, "rel_db": 6.0, "rank": 1})
@@ -191,6 +196,45 @@ class OverviewLogicTest(unittest.TestCase):
         assert_shape(self, o, 30.0)
         self.assertEqual((seq(o), o["dropped_repeats"], o["repeat_groups"], o["source"]),
                          ([("silence", None, 0.0, 30.0)], 1, [], "lyric"))
+
+    def test_long_repeat_split(self):
+        def ov(blocks, words, dur=120.0, bounds=()):
+            o = server.rhythm_overview(stored(dur, [VERSE] * int(dur), blocks, bounds=bounds), words)
+            assert_shape(self, o, dur)
+            return o
+
+        rep = [(10.0, 70.0, 0), (90.0, 100.0, 0)]
+        # 1) the longest word-free run of whole 1 s windows inside: window 30 vs windows 51-52 (the word at 49.9
+        # touches window 50) -> cut at 52
+        words = _words(0, 30) + _words(31, 50) + _words(53, 120)
+        o = ov(rep, words)
+        self.assertEqual([(k, g, a, b) for k, g, a, b in seq(o) if k == "repeat"],
+                         [("repeat", 0, 10.0, 52.0), ("repeat", 0, 52.0, 70.0), ("repeat", 0, 90.0, 100.0)])
+        self.assertEqual(o["repeat_groups"], [{"group": 0, "count": 2, "seconds": 70.0}])  # count = blocks
+        # 2) every window touched: the largest gap between consecutive words (39.25-40.2) -> its middle 39.725
+        words = [w for w in _words(0, 120) if not 39.2 < w[1] < 40.0]
+        self.assertEqual([x for x in seq(ov(rep, words)) if x[0] == "repeat"][:2],
+                         [("repeat", 0, 10.0, 39.725), ("repeat", 0, 39.725, 70.0)])
+        # 3) no words: the section boundary nearest the middle (44 beats 20 and 61)
+        self.assertEqual([x for x in seq(ov(rep, None, bounds=(20.0, 44.0, 61.0))) if x[0] == "repeat"][:2],
+                         [("repeat", 0, 10.0, 44.0), ("repeat", 0, 44.0, 70.0)])
+        # candidates within 8 s of an edge are refused: no cut at all
+        words = [[w, a, round(a + 0.3, 3)] for w, a, _ in _words(0, 14) + _words(15, 120)]  # gapless but 14-15
+        # (word-free window 14 and the 1 s word gap: cuts near 14.5 < 18), section boundary 65 > 62
+        self.assertEqual([x for x in seq(ov(rep, words, bounds=(65.0,))) if x[0] == "repeat"][0],
+                         ("repeat", 0, 10.0, 70.0))
+        # 45 s exactly is not long; 100 s is cut repeatedly while > 45 s
+        self.assertEqual(seq(ov([(0.0, 45.0, 0), (60.0, 70.0, 0)], _words(0, 120)))[0], ("repeat", 0, 0.0, 45.0))
+        words = [w for w in _words(0, 120) if not (40 <= w[1] < 41 or 70 <= w[1] < 71)]
+        o = ov([(0.0, 100.0, 0), (105.0, 115.0, 0)], words)
+        self.assertEqual([(a, b) for k, _, a, b in seq(o) if k == "repeat"],
+                         [(0.0, 40.625), (40.625, 70.625), (70.625, 100.0), (105.0, 115.0)])  # word gaps 40.15-41.1
+        self.assertTrue(all(b - a <= 45 for k, _, a, b in seq(o) if k == "repeat"))
+        # an internal one-block group stays internal in both parts
+        o = ov([(10.0, 70.0, 0)], _words(0, 30) + _words(31, 120))
+        self.assertEqual([(s["start"], s["internal"]) for s in o["segments"] if s["kind"] == "repeat"],
+                         [(10.0, True), (30.5, True)])
+        self.assertEqual(o["repeat_groups"], [])
 
     def test_long_gap_split_at_sections(self):
         vals = [VERSE] * 150
@@ -278,6 +322,16 @@ class OverviewLogicTest(unittest.TestCase):
                               ("section", "B", 40.0, 70.0)])
             self.assertEqual([s["energy"]["rank"] for s in o["segments"]], [None, 2, 1])
             self.assertEqual([s["words"] for s in o["segments"]], [None] * 3)
+        self.assertEqual(o["structure"], "audio_labels")  # A and B differ: labels carry information
+        # one letter for every audible section: no form information at all
+        v = stored(70.0, vals, [], bounds=(10.0, 40.0), lyric={"status": "unavailable", "reason": "no_words"})
+        v["sections"][2]["label"] = "A"
+        self.assertIs(server.check_rhythm(v), v)
+        o = server.rhythm_overview(v, None)
+        assert_shape(self, o, 70.0)
+        self.assertEqual((o["source"], o["structure"], [s["label"] for s in o["segments"]]),
+                         ("audio", "unknown", ["silence", "A", "A"]))
+        self.assertFalse(server.overview_ok(dict(o, structure="audio_labels"), 70.0))
         # no repeats and no sections (no beats): failed no_structure
         v = stored(70.0, vals, [], lyric={"status": "unavailable", "reason": "no_words"})
         v = json.loads(json.dumps(dict(v, sections=[], beats=[])))
@@ -366,6 +420,10 @@ class OverviewLogicTest(unittest.TestCase):
                segs(2, chords={"top": [{"label": "C", "share": 1.5}], "changes_per_min": 1.0}),
                segs(2, melody=dict(o["segments"][2]["melody"], low=80)), segs(0, melody=None),
                segs(2, quiet=True), segs(0, quiet=None), dict(o, dropped_repeats=-1), dict(o, dropped_repeats=True),
+               segs(0, internal=True), segs(2, internal=True), segs(7, internal=False), segs(2, internal=None),
+               dict(o, structure="unknown"), dict(o, structure=None),
+               dict(o, repeat_groups=o["repeat_groups"] + [{"group": 1, "count": 1, "seconds": 12.0}]),
+               dict(o, repeat_groups=[dict(o["repeat_groups"][0], count=1)]),
                segs(0, melody=dict(s0["melody"], low=60)), segs(1, words=None), segs(1, words={"count": -1}),
                {"status": "failed"}, {"status": "failed", "code": "Bad"}, {"status": "done"}, None]
         for b in bad:

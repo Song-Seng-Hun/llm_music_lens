@@ -1472,9 +1472,12 @@ OV_VOCAL_FRACTION = 0.25  # share of a piece's 1 s windows touched by a word (or
 OV_SILENCE_DB = -60.0  # the worker's SILENCE_DB, used when energy_summary carries no silence_db
 OV_TOP_CHORDS = 3
 OV_QUIET_DB = -12.0  # heuristic: a repeat this far below the song median is flagged quiet (likely not a chorus)
-OV_KEYS = {"status", "source", "method", "reliability", "segment_count", "repeat_groups", "dropped_repeats",
-           "segments", "notes"}
-OV_SEG_KEYS = {"start", "end", "kind", "group", "label", "energy", "quiet", "chords", "melody", "words"}
+OV_LONG_REPEAT = 45.0  # s; heuristic: a longer repeat segment is cut at its best internal point (overview only)
+OV_MIN_REPEAT_PART = 8.0  # s; both parts of such a cut, else no cut
+OV_STRUCTURES = ("lyric", "audio_labels", "unknown")
+OV_KEYS = {"status", "source", "structure", "method", "reliability", "segment_count", "repeat_groups",
+           "dropped_repeats", "segments", "notes"}
+OV_SEG_KEYS = {"start", "end", "kind", "group", "internal", "label", "energy", "quiet", "chords", "melody", "words"}
 OV_KINDS = {"lyric": ("repeat", "vocal", "instrumental", "silence", "gap"), "audio": ("section", "silence")}
 OV_VOCAL_BY = ("words", "melody", "none")
 OV_METHOD_LYRIC = ("lyric_repeats blocks; gaps: silence if >half 1 s windows < silence_db, else vocal if >=25%% "
@@ -1579,10 +1582,10 @@ class _Ov:
     # ---- segmentation
     def lyric(self, blocks):
         segs, t = [], 0.0
-        for s, e, g in blocks:
+        for k, (s, e, g) in enumerate(blocks):
             if s > t + 1e-9:
                 segs += self.gap(t, s)
-            segs.append({"start": s, "end": e, "kind": "repeat", "group": g, "label": None})
+            segs.append({"start": s, "end": e, "kind": "repeat", "group": g, "label": None, "block": k})
             t = e
         if self.dur > t + 1e-9:
             segs += self.gap(t, self.dur)
@@ -1591,7 +1594,59 @@ class _Ov:
             if x["kind"] == "repeat" and self.mostly_silent(x["start"], x["end"]):
                 x["kind"], x["group"] = "silence", None
                 self.dropped += 1
-        return _ov_coalesce(segs)
+        return self.split_long_repeats(_ov_coalesce(segs))
+
+    def split_long_repeats(self, segs):
+        """Heuristic, overview only (lyric_repeats unchanged): a repeat segment > 45 s is cut at its best internal
+        point, both parts >= 8 s and keeping kind, group and block; repeated while > 45 s and < 40 segments. Cut:
+        the middle of the longest run of 1 s windows inside it touched by no word (ties earliest), else the middle
+        of the largest gap between consecutive word onsets/ends inside it, else the audio section boundary nearest
+        its middle; with no candidate meeting the 8 s rule (or no words for the first two), no cut."""
+        out, todo = [], list(reversed(segs))
+        while todo:
+            x = todo.pop()
+            c = self.repeat_cut(x) if x["kind"] == "repeat" and len(out) + len(todo) + 1 < OV_MAX_SEGMENTS else None
+            if c is None:
+                out.append(x)
+                continue
+            todo += [dict(x, start=c), dict(x, end=c)]
+        return out
+
+    def repeat_cut(self, x):
+        a, b = _ms(x["start"]), _ms(x["end"])
+        if b - a <= _ms(OV_LONG_REPEAT):
+            return None
+        lo, hi = a + _ms(OV_MIN_REPEAT_PART), b - _ms(OV_MIN_REPEAT_PART)
+
+        def ok(t):
+            return lo <= t <= hi
+        step = _ms(self.step)
+        if self.words is not None:
+            best, i, n = None, 0, len(self.touched)  # (length, -start_ms) over word-free runs of whole windows
+            while i < n:
+                if self.touched[i] or i * step < a or (i + 1) * step > b:
+                    i += 1
+                    continue
+                j = i
+                while j + 1 < n and not self.touched[j + 1] and (j + 2) * step <= b:
+                    j += 1
+                mid = (i * step + (j + 1) * step) // 2
+                if ok(mid) and (best is None or (j - i + 1, -i) > best[0]):
+                    best = ((j - i + 1, -i), mid)
+                i = j + 1
+            if best is not None:
+                return best[1] / 1000.0
+            ws = [(_ms(s), _ms(e)) for s, e in self.words if a <= _ms(s) < b]
+            gaps = [(ws[k + 1][0] - max(ws[k][1], ws[k][0]), -k, (max(ws[k][1], ws[k][0]) + ws[k + 1][0]) // 2)
+                    for k in range(len(ws) - 1)]
+            gaps = [g for g in gaps if g[0] > 0 and ok(g[2])]
+            if gaps:
+                return max(gaps)[2] / 1000.0
+        bounds = [_ms(r["start"]) for r in (self.v.get("sections") or [])[1:]]
+        inner = [t for t in bounds if ok(t)]
+        if inner:
+            return min(inner, key=lambda t: (abs(2 * t - a - b), t)) / 1000.0
+        return None
 
     def mostly_silent(self, a, b):
         idx = self.windows(a, b)
@@ -1718,6 +1773,12 @@ class _Ov:
             source, segs, method = "audio", self.audio(), OV_METHOD["audio"]
         else:
             return {"status": "failed", "code": "no_structure"}
+        blocks_of = {}  # group -> its surviving (not dropped) blocks; one block = the text repeats only inside it
+        for x in segs:
+            if x["kind"] == "repeat":
+                blocks_of.setdefault(x["group"], set()).add(x["block"])
+        letters = {x["label"] for x in segs if x["kind"] == "section"}
+        structure = "lyric" if source == "lyric" else "audio_labels" if len(letters) >= 2 else "unknown"
         loud = sorted(x for x in self.values if x >= self.sil_db)
         median = None
         if loud:
@@ -1729,22 +1790,21 @@ class _Ov:
             mean = self.energy(a, b, s["kind"])
             rel = None if mean is None or median is None else round(mean - median, 2)
             out.append({"start": round(a, 3), "end": round(b, 3), "kind": s["kind"], "group": s["group"],
-                        "label": s["label"], "energy": {"mean_db": mean, "rel_db": rel, "rank": None},
+                        "internal": s["kind"] == "repeat" and len(blocks_of[s["group"]]) == 1, "label": s["label"], "energy": {"mean_db": mean, "rel_db": rel, "rank": None},
                         "quiet": s["kind"] == "repeat" and rel is not None and rel <= OV_QUIET_DB,
                         "chords": self.chord_info(a, b), "melody": self.melody_info(a, b), "words": self.words_info(a, b)})
         ranked = sorted((k for k, s in enumerate(out) if s["kind"] != "silence" and s["energy"]["mean_db"] is not None),
                         key=lambda k: (-out[k]["energy"]["mean_db"], k))
         for r, k in enumerate(ranked, 1):
             out[k]["energy"]["rank"] = r
-        groups = {}
+        secs = {}
         for s in out:
-            if s["kind"] == "repeat":
-                c, t = groups.get(s["group"], (0, 0.0))
-                groups[s["group"]] = (c + 1, t + s["end"] - s["start"])
-        return {"status": "done", "source": source, "method": method, "reliability": "low_reference",
-                "segment_count": len(out),
-                "repeat_groups": [{"group": g, "count": groups[g][0], "seconds": round(groups[g][1], 3)}
-                                  for g in sorted(groups)],
+            if s["kind"] == "repeat" and not s["internal"]:
+                secs[s["group"]] = secs.get(s["group"], 0) + _ms(s["end"]) - _ms(s["start"])
+        return {"status": "done", "source": source, "structure": structure, "method": method,
+                "reliability": "low_reference", "segment_count": len(out),
+                "repeat_groups": [{"group": g, "count": len(blocks_of[g]), "seconds": secs[g] / 1000.0}
+                                  for g in sorted(secs)],
                 "dropped_repeats": self.dropped, "segments": out, "notes": OV_NOTES}
 
 
@@ -1784,12 +1844,14 @@ def overview_ok(o, dur):
         return set(o) == {"status", "code"} and isinstance(o["code"], str) and bool(RE_CODE.match(o["code"]))
     if set(o) != OV_KEYS or o["source"] not in OV_KINDS or o["reliability"] != "low_reference":
         return False
+    if o["structure"] not in OV_STRUCTURES or (o["structure"] == "lyric") != (o["source"] == "lyric"):
+        return False
     if not (_short_str(o["method"], 200) and _short_str(o["notes"], 200)):
         return False
     segs = o["segments"]
     if not (isinstance(segs, list) and 1 <= len(segs) <= OV_MAX_SEGMENTS and o["segment_count"] == len(segs)):
         return False
-    t, ranks, groups = 0.0, [], {}
+    t, ranks, groups, internal = 0.0, [], {}, {}
     mel = [s.get("melody") is None for s in segs if isinstance(s, dict)]
     wrd = [s.get("words") is None for s in segs if isinstance(s, dict)]
     if len(set(mel)) > 1 or len(set(wrd)) > 1:  # melody / words present for every segment or none
@@ -1802,6 +1864,10 @@ def overview_ok(o, dur):
         if (s["kind"] == "repeat") != _int(s["group"], 0, LYRIC_MAX_BLOCKS - 1) or (s["kind"] != "repeat"
                                                                                   and s["group"] is not None):
             return False
+        if not isinstance(s["internal"], bool) or (s["internal"] and s["kind"] != "repeat"):
+            return False
+        if s["kind"] == "repeat" and internal.setdefault(s["group"], s["internal"]) is not s["internal"]:
+            return False  # one flag per group
         if o["source"] == "audio":
             if not (s["label"] == SILENCE_LABEL if s["kind"] == "silence"
                     else isinstance(s["label"], str) and bool(RE_SECTION_LABEL.match(s["label"]))):
@@ -1844,16 +1910,20 @@ def overview_ok(o, dur):
         w = s["words"]
         if w is not None and not (isinstance(w, dict) and set(w) == {"count"} and _count(w["count"], LYRIC_MAX_WORDS)):
             return False
-        if s["kind"] == "repeat":
+        if s["kind"] == "repeat" and not s["internal"]:
             c0, t0 = groups.get(s["group"], (0, 0.0))
             groups[s["group"]] = (c0 + 1, t0 + s["end"] - s["start"])
     if not (_int(o["dropped_repeats"], 0, LYRIC_MAX_BLOCKS) and (o["source"] == "lyric" or o["dropped_repeats"] == 0)):
         return False
     if abs(t - round(dur, 3)) > 0.001 or sorted(ranks) != list(range(1, len(ranks) + 1)):
         return False
-    rg = o["repeat_groups"]
+    if o["source"] == "audio":
+        letters = {s["label"] for s in segs if s["kind"] == "section"}
+        if o["structure"] != ("audio_labels" if len(letters) >= 2 else "unknown"):
+            return False
+    rg = o["repeat_groups"]  # groups with >= 2 surviving blocks (count = blocks <= its segments, a long block may be cut)
     return (isinstance(rg, list) and [x.get("group") if isinstance(x, dict) else None for x in rg] == sorted(groups)
-            and all(set(x) == {"group", "count", "seconds"} and x["count"] == groups[x["group"]][0]
+            and all(set(x) == {"group", "count", "seconds"} and _int(x["count"], 2, groups[x["group"]][0])
                     and _num(x["seconds"], 0, 601) and abs(x["seconds"] - groups[x["group"]][1]) <= 0.002 for x in rg))
 
 
