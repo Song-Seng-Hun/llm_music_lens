@@ -25,9 +25,9 @@ MCP `analyze_music_timing`은 이제 서버에서 음원을 직접 분석해 박
 
 **구간을 잇는 시간축:** `compose_music_timeline`은 기존 분석의 박·마디 첫박·보컬 음높이를 곡 전체 시각으로 묶어 필요한 구간만 반환합니다. 같은 자료의 중복은 제거하고, 겹친 구간의 다른 추정과 알 수 없는 값은 출처별로 유지합니다. 새 모델 실행 없이 동작하며, 음높이 검출 정확도를 바꾸거나 빈 구간을 채우지는 않습니다. [호출법·페이지 경계·한계](docs/music-continuity.md).
 
-프로젝트 저장소: [Song-Seng-Hun/llm_music_lens](https://github.com/Song-Seng-Hun/llm_music_lens). 소스·테스트·설치 스크립트·라이선스와 서버 실행에 필요한 MIT Beat This 모델(약 9.4MB)을 보관합니다. 다른 연구 모델, 음원, 정답 주석, 실행 로그와 실험 원자료는 커밋하지 않습니다. `evidence/` 및 연구용 `examples/` 링크는 기존 로컬 기록이며 새 clone에는 없습니다. 측정 요약은 [연구 상태와 한계](docs/research-status.md)에 있습니다.
+프로젝트 저장소: [Song-Seng-Hun/llm_music_lens](https://github.com/Song-Seng-Hun/llm_music_lens). 소스·테스트·설치 스크립트·라이선스와 서버 실행에 필요한 MIT Beat This 모델(약 9.4MB)을 보관합니다. 다른 연구 모델, 음원, 정답 주석, 실행 로그와 실험 원자료는 커밋하지 않으며, 검증 기록도 로컬에만 둡니다. 측정 요약은 [연구 상태와 한계](docs/research-status.md)에 있습니다.
 
-**팀 귀 — Mac LAN API (`lan/`):** Mac의 Music Lens local(0.2.2, Whisper large-v3-turbo)과 리듬 분석 worker(0.4.4: 박·BPM·키·코드·에너지·구간·멜로디 요약, 가사 반복 기반 곡 구조 overview)를 같은 공유기 안의 팀 AI가 서명된 요청으로 쓰는 서버입니다. Python 3.9 표준 라이브러리만 쓰며 이 웹앱과는 별개로 Mac에서 실행됩니다. 설치·API·한계는 [lan/README.md](lan/README.md), Windows 팀용 스킬은 [lan/docs/skill/music-lens-remote/SKILL.md](lan/docs/skill/music-lens-remote/SKILL.md)에 있습니다. 실제 J-pop 8곡으로 확인했으며 영어·한국어 곡은 미검증입니다.
+**같은 네트워크에서 쓰는 Mac 분석 서버 (`lan/`):** 같은 공유기에 연결된 AI 팀원이 서명된 요청으로 Mac의 Music Lens local(0.2.2, Whisper large-v3-turbo)과 리듬 분석 worker(0.4.4: 박·BPM·키·코드·에너지·구간·멜로디 요약, 가사 반복 기반 곡 구조 overview)를 쓸 수 있게 하는 서버입니다. Python 3.9 표준 라이브러리만 쓰며 이 웹앱과는 별개로 Mac에서 실행됩니다. 설치·API·한계는 [lan/README.md](lan/README.md), Windows 팀용 스킬은 [lan/docs/skill/music-lens-remote/SKILL.md](lan/docs/skill/music-lens-remote/SKILL.md)에 있습니다. 실제 J-pop 8곡으로 확인했으며 영어·한국어 곡은 미검증입니다.
 
 ## 바로 실행
 
@@ -64,7 +64,7 @@ npm run dev -- --host 127.0.0.1
 6. **저장/가져오기:** 로그인한 사용자별 보관함, 최대 1.9 MB UTF-8 JSON. 원음은 저장하지 않습니다. 저장·가져온 자료는 클라이언트 제공 데이터이며 독립 검증으로 승격하지 않습니다.
 7. **빠른 모드 / YouTube 참고:** 빠른 모드는 모델 없는 기존 신호 분석입니다. YouTube는 참고 주소 확인과 원본 링크만 지원하며 주소만으로 음원을 내려받거나 분석하지 않습니다.
 
-**추가된 귀 역할:** 템포 후보를 실제 타격 포착률·그리드 지지와 비교하고, 모호하거나 변하는 템포는 전곡 고정 박을 보류합니다. 긴 무음에는 박을 억지로 채우지 않습니다. ‘분석 단서’에서 1초별 스펙트럼 중심/평탄도, 대역 에너지 비중, 타격 밀도, RMS를 볼 수 있으며 MCP와 전달문에도 포함됩니다. 구조적 변화는 2초 단위 에너지로 판단해 개별 타격의 감쇠와 구분합니다.
+**템포와 음향 단서 보강:** 템포 후보를 실제 타격 포착률·그리드 지지와 비교하고, 모호하거나 변하는 템포는 전곡 고정 박을 보류합니다. 긴 무음에는 박을 억지로 채우지 않습니다. ‘분석 단서’에서 1초별 스펙트럼 중심/평탄도, 대역 에너지 비중, 타격 밀도, RMS를 볼 수 있으며 MCP와 전달문에도 포함됩니다. 구조적 변화는 2초 단위 에너지로 판단해 개별 타격의 감쇠와 구분합니다.
 
 브라우저 분석의 음표 모델과 WASM 실행 파일은 사이트에서, 선택한 가사 모델은 Hugging Face에서 내려받습니다. 브라우저 분석 음원은 브라우저를 떠나지 않으며, 서버 MCP 분석은 호출자가 보낸 PCM을 서버에서 처리합니다. 첫 가사 실행은 수백 MB급 다운로드와 수 분 이상 계산이 필요할 수 있습니다. 페이지를 여는 것만으로 모델을 내려받지는 않습니다.
 
@@ -114,7 +114,7 @@ npm run dev -- --host 127.0.0.1
 
 `db:local`은 초기 스키마만 생성합니다. 기존 `analysis_requests` 테이블/초기 마이그레이션은 데이터 보존용으로 남지만 실행 코드에서 사용하지 않습니다. 모델 호출 경로, 키 입력과 `analyze_youtube`는 제거했습니다. 이후 테이블 제거는 별도 데이터 마이그레이션입니다.
 
-코드·조성 검증은 `evidence/harmony/CHECKS.md`, 리듬·음색 검증은 `evidence/improve-ears/CHECKS.md`; 이전 정밀 버전은 `evidence/precision/CHECKS.md`, 과거 버전은 `evidence/keyless/`, `evidence/CHECKS.md`에 구분합니다. `tests/browser-precision.cjs`는 실제 모델/UI/MCP를, `tests/browser-lyrics.cjs`는 공개 음성으로 전사 실행을 검사합니다. `MUSIC_EVIDENCE_DIR`로 결과 폴더, `MUSIC_REAL_FIXTURE`로 이용 조건을 확인한 로컬 음악 샘플을 지정할 수 있습니다. `PLAYWRIGHT_MODULE`과 `BROWSER_EXECUTABLE`로 기존 설치를 사용합니다. `tests/precision-storage.mjs`는 큰 JSON, 용량 거부, 사용자 격리를 검사하고 생성한 ID만 정리합니다.
+코드·조성과 리듬·음색 검증, 이전 버전의 기록은 로컬에 따로 보관합니다. `tests/browser-precision.cjs`는 실제 모델/UI/MCP를, `tests/browser-lyrics.cjs`는 공개 음성으로 전사 실행을 검사합니다. `MUSIC_EVIDENCE_DIR`로 결과 폴더, `MUSIC_REAL_FIXTURE`로 이용 조건을 확인한 로컬 음악 샘플을 지정할 수 있습니다. `PLAYWRIGHT_MODULE`과 `BROWSER_EXECUTABLE`로 기존 설치를 사용합니다. `tests/precision-storage.mjs`는 큰 JSON, 용량 거부, 사용자 격리를 검사하고 생성한 ID만 정리합니다.
 
 서버 실제 경로: `app/mcp/route.ts` → `lib/mcp.ts` → `lib/server/music-timing.ts` → `lib/server/beat-analysis.mjs`. [서버 분석 안내](docs/server-timing.md). 기존 브라우저 경로는 `components/music-lens.tsx` → `lib/browser-detail.ts` → `public/precision-worker.mjs` (소스 `analysis/precision-worker.mjs`)이며 보존합니다. 공통 보고서 `lib/report.ts`의 선택적 `detail`로 이전 JSON을 보존합니다. 저장은 `lib/server/reports.ts`입니다.
 
@@ -122,10 +122,10 @@ npm run dev -- --host 127.0.0.1
 
 코드와 장·단조는 `public/analysis/harmony.mjs`가 음표 모델 이후 계산하며 `detail.harmony`가 정본입니다. 호환용 `rhythm.key/chords`는 같은 결과를 투영합니다. 가장 강한 3화음을 전곡 조성으로 사용하던 계산은 제거했습니다. UI의 **음높이 · 화음** 탭, JSON/Markdown, AI 팀 전달문과 MCP 요약/타임라인에서 근거를 확인합니다. 이 기능은 정밀 분석을 다시 실행하면 생성되며 과거 보고서를 몰래 다시 계산하지 않습니다.
 
-정답 음표가 있는 실제 관악 4중주 샘플을 [examples/reference-song/README.md](examples/reference-song/README.md)에 준비했습니다. ChoraleBricks CC BY 4.0 자료이며 WAV, 개별 파트, 악보 MIDI/MusicXML, 음표 주석을 함께 보관합니다. 57초·정답 231개를 현재 브라우저 분석기로 한 번 측정한 음표 시작점/음높이 F1은 50.47%(50 ms / 50 cents), 정밀도 39.56%, 재현율 69.70%였습니다. 조건·원결과·한계는 [evidence/reference-song/CHECKS.md](evidence/reference-song/CHECKS.md)에 있습니다. 이 한 곡으로 일반적인 실곡 정확도나 개선을 주장할 수는 없으며, 가사·랩·드럼 정확도는 평가하지 않았습니다. 다음 개선은 이 기준을 보존하고 비교 조건과 예산을 먼저 고정합니다.
+정답 음표가 있는 실제 관악 4중주 연주를 기준 샘플로 썼습니다. CC BY 4.0 공개 자료이며 음원, 개별 파트, 악보 MIDI/MusicXML, 음표 주석은 로컬에만 둡니다. 57초·정답 231개를 현재 브라우저 분석기로 한 번 측정한 음표 시작점/음높이 F1은 50.47%(50 ms / 50 cents), 정밀도 39.56%, 재현율 69.70%였습니다. 조건·원결과·한계는 로컬 기록에 남겼습니다. 이 한 곡으로 일반적인 실곡 정확도나 개선을 주장할 수는 없으며, 가사·랩·드럼 정확도는 평가하지 않았습니다. 다음 개선은 이 기준을 보존하고 비교 조건과 예산을 먼저 고정합니다.
 
-2026-10-14 후속 진단: 지속 중인 음의 약한 시작점 신호를 억제하는 후보를 같은 모델 출력에 비교했습니다. F1 50.47→55.17%, 미일치 음표246→189개였지만 사전 채택 기준(+5%p)에 못 미쳐 원복했습니다. 후보·오류 분류·결과는 [evidence/note-events-01/CHECKS.md](evidence/note-events-01/CHECKS.md)에 보존했습니다. 기준을 사후 변경하거나 재조정하지 않았습니다.
+2026-10-14 후속 진단: 지속 중인 음의 약한 시작점 신호를 억제하는 후보를 같은 모델 출력에 비교했습니다. F1 50.47→55.17%, 미일치 음표 246→189개였지만 사전 채택 기준(+5%p)에 못 미쳐 원복했습니다. 후보·오류 분류·결과는 로컬 기록에 보존했습니다. 기준을 사후 변경하거나 재조정하지 않았습니다.
 
-같은 날 두 곡으로 넓힌 세 후보도 개선 폭 또는 음표 재현율 보존 기준을 통과하지 못해 기본 디코딩을 유지했습니다. 별도로 발견한 **마지막 음 길이 잘림**은 수정했습니다. 실제 브라우저 합성음 두 개에서 끝부분 누락이 24.8→1.5ms, 97.8→0ms로 줄었고, 소수점 길이의 파일 끝을 넘어가는 반올림도 막았습니다. 일반적인 실곡 정확도 향상과는 구분합니다. [결과·실패·검증 기록](evidence/note-events-02/CHECKS.md).
+같은 날 두 곡으로 넓힌 세 후보도 개선 폭 또는 음표 재현율 보존 기준을 통과하지 못해 기본 디코딩을 유지했습니다. 별도로 발견한 **마지막 음 길이 잘림**은 수정했습니다. 실제 브라우저 합성음 두 개에서 끝부분 누락이 24.8→1.5ms, 97.8→0ms로 줄었고, 소수점 길이의 파일 끝을 넘어가는 반올림도 막았습니다. 일반적인 실곡 정확도 향상과는 구분합니다.
 
-키노피오P 「신 같네」 공식 배포의 보컬·하모니 참고 트랙 첫 60초도 로컬 성능 시험용으로 준비했습니다. [출처와 파일 안내](examples/pinocchiop-local/GOD-ISH.md). 앱에는 `examples/pinocchiop-local/God-ish-vocal-hamo-first60s.flac`을 넣으세요. 원본 PCM이 같은 무손실 파일이며 기존 12MiB 입력 제한 안에 들어갑니다. 이 참고 음원에는 정답 음표·가사 정렬이 없으므로 분석 실행과 정확도 채점은 구분합니다.
+제작자가 공식 배포한 보컬·하모니 트랙의 첫 60초도 로컬 성능 시험용으로 준비했습니다. 음원은 저장소에 넣지 않으며, 원음과 같은 PCM의 무손실 파일이라 기존 12MiB 입력 제한 안에 들어갑니다. 이 음원에는 정답 음표·가사 정렬이 없으므로 분석 실행과 정확도 채점은 구분합니다.
