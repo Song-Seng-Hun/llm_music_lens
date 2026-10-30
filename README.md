@@ -76,6 +76,20 @@ npm run dev -- --host 127.0.0.1
 - 악기·장르·감정은 자동으로 판단하지 않습니다. 스타일 해석은 출처와 시간 범위를 든 AI의 몫입니다.
 - 사이트 게시, 팀 연결, 사용자별 보고서 조회는 실제 인증 연결로 아직 확인하지 않았습니다.
 
+## 사용 모델과 라이선스
+
+| 구성 | 쓰는 곳 | 라이선스 |
+|---|---|---|
+| [Beat This!](https://github.com/CPJKU/beat_this) small0 (ONNX로 변환해 `models/beat-this/`에 포함) | 서버 박·BPM | MIT |
+| [Spotify Basic Pitch](https://github.com/spotify/basic-pitch-ts) (모델 포함) | 브라우저 음표 | Apache-2.0 |
+| [Whisper](https://huggingface.co/Xenova/whisper-base) (`Xenova/whisper-base`·`whisper-small`, 필요할 때 브라우저가 내려받음) | 가사 단어 전사 (선택) | Apache-2.0 (모델 카드 기준) |
+| [SOME](https://github.com/openvpi/SOME) (모델은 따로 준비) | 솔로 보컬 음표 (선택) | 코드 MIT, 모델 CC BY-NC-SA 4.0 |
+| [Essentia](https://essentia.upf.edu/)와 TempoCNN 모델 (Mac 서버에 따로 설치) | 선택 리듬 층 | Essentia AGPL-3.0, 모델 조건은 확인 안 됨 |
+| Transformers.js · ONNX Runtime Web · TensorFlow.js | 브라우저에서 모델 실행 | Apache-2.0 · MIT · Apache-2.0 |
+
+- SOME 모델에는 비상업적 이용 조건(CC BY-NC-SA 4.0)이 있습니다.
+- 포함된 구성의 라이선스 원문은 [public/licenses/](public/licenses/README.md)와 [models/beat-this/](models/beat-this/README.md)에 있습니다.
+
 ## 더 보기
 
 자세한 문서는 영어입니다.
