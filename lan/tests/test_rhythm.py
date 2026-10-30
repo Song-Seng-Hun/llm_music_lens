@@ -360,6 +360,56 @@ def bad_v43():
     return out
 
 
+GENRE_LABELS = ["Parent%02d---Style%03d" % (i % 15, i) for i in range(rw.GENRE_CLASSES)]
+
+
+def genre_rows(n, hot=((7, 0.6), (22, 0.3), (8, 0.2))):
+    """n patch rows with fixed activations: class 7 (Parent07) 0.6, class 22 (Parent07) 0.3, class 8 0.2, rest 0.01."""
+    rows = []
+    for _ in range(n):
+        r = [0.01] * rw.GENRE_CLASSES
+        for i, p in hot:
+            r[i] = p
+        rows.append(r)
+    return rows
+
+
+GENRE_DONE = rw.genre_summary(genre_rows(5), [False] * 5, GENRE_LABELS, 6.0)  # 6 s holds 5 patches
+RHYTHM_OUT_V50 = dict(RHYTHM_OUT_V43, genre=GENRE_DONE)
+GENRE_SUMMARY = dict({k: x for k, x in GENRE_DONE.items() if k != "windows"}, window_count=1)
+
+
+def bad_v50():
+    """Worker-0.5.0 genre values that must be refused."""
+    out = []
+    g, top, par, w = GENRE_DONE, GENRE_DONE["top"], GENRE_DONE["parents"], GENRE_DONE["windows"][0]
+    for over in ({"status": "Done"}, {"extra": 1}, {"reliability": "low_reference"}, {"model": ""},
+                 {"model_sha256": "AB" * 32}, {"embedding_sha256": None}, {"note": "a\nb"},
+                 {"patches": 0}, {"patches": 5.0}, {"patches": 10 ** 6}, {"silent_patches": 5}, {"silent_patches": -1},
+                 {"patch_hop_s": 0}, {"window_s": None},
+                 {"top": []}, {"top": top + [top[0]]}, {"top": top[::-1]}, {"top": [dict(top[0], score=1.5)]},
+                 {"top": [dict(top[0], style="no separator")] + top[1:]}, {"top": [dict(top[0], style="A---B---C")]},
+                 {"top": [dict(top[0], style="---B")]}, {"top": [dict(top[0], extra=1)] + top[1:]},
+                 {"top": top + [{"style": "P---S%d" % i, "score": 0.0} for i in range(2)]},
+                 {"parents": []}, {"parents": par[::-1]}, {"parents": [dict(par[0], score=0.5)] + par[1:]},
+                 {"parents": [par[0], par[0]] + par[2:]}, {"parents": [dict(par[0], parent="")] + par[1:]},
+                 {"parents": par[:1] + [dict(par[1], score=0.0)] + par[2:]},
+                 {"windows": []}, {"windows": [dict(w, start=1.0)]}, {"windows": [dict(w, end=5.0)]},
+                 {"windows": [dict(w, end=60.0)]}, {"windows": [dict(w, patches=4)]},
+                 {"windows": [dict(w, top=[])]}, {"windows": [dict(w, patches=0)], "silent_patches": 4},
+                 {"windows": [dict(w, top=w["top"] + [w["top"][0]])]}, {"windows": [dict(w, extra=1)]},
+                 {"windows": [dict(w, end=3.0), dict(w, start=3.5, patches=0, top=[])]}, {"windows": None}):
+        out.append(json.dumps(dict(RHYTHM_OUT_V50, genre=dict(g, **over))))
+    # a listed style above its listed parent (parent score = max over its styles)
+    out.append(json.dumps(dict(RHYTHM_OUT_V50, genre=dict(g, top=[top[0], dict(top[1], style="Parent08---X",
+                                                                              score=0.5)] + top[2:]))))
+    for gn in ({"status": "unavailable"}, {"status": "unavailable", "reason": "Model missing"},
+               {"status": "unavailable", "reason": "too_short", "top": []}, {"status": "failed", "reason": "x"},
+               {"status": "failed", "code": 5}, {"status": "ok"}, None, [], "done"):
+        out.append(json.dumps(dict(RHYTHM_OUT_V50, genre=gn)))
+    return out
+
+
 class FakeWorker:
     def __init__(self, env):
         self.dir = os.path.join(env.dir, "fakerhythm")
@@ -715,6 +765,43 @@ class RhythmAnalyzeTest(RhythmBase):
             self.fw.write(stdout=out)
             self.assert_rhythm_failed("failed", "invalid_output")
 
+    def test_v50_genre_in_summary(self):
+        self.fw.write(stdout=json.dumps(RHYTHM_OUT_V50))
+        r = self.c.json("POST", AR, WAV)[1]["rhythm"]
+        self.assertEqual((r["status"], r["genre"]), ("done", GENRE_SUMMARY), r)  # windows: timeline only
+        self.assertEqual(r["lyric_repeats"], LYRIC)  # earlier fields unchanged
+        with open(self.rhythm_file()) as f:
+            self.assertEqual(json.load(f), dict(RHYTHM_OUT_V50, **self.ids()))
+        self.assertEqual(self.c.json("GET", "/report/" + RID64)[1]["rhythm"]["genre"], GENRE_SUMMARY)
+        g = GENRE_DONE
+        self.assertEqual([t["style"] for t in g["top"]],
+                         ["Parent07---Style007", "Parent07---Style022", "Parent08---Style008", "Parent00---Style000",
+                          "Parent01---Style001"])  # ties (0.01): lower class index
+        self.assertEqual(g["parents"][:2], [{"parent": "Parent07", "score": 0.6}, {"parent": "Parent08", "score": 0.2}])
+        self.assertEqual(g["windows"], [{"start": 0.0, "end": 6.0, "patches": 5, "top": g["top"][:3]}])
+        long = rw.genre_summary(genre_rows(70), [False] * 30 + [True] * 31 + [False] * 9, GENRE_LABELS, 70.0)
+        for gn in ({"status": "unavailable", "reason": "too_short"}, {"status": "unavailable", "reason": "model_missing"},
+                   {"status": "failed", "code": "inference_error"}, dict(g, silent_patches=1, windows=[
+                       dict(g["windows"][0], patches=4)])):
+            v = json.loads(json.dumps(dict(RHYTHM_OUT_V50, genre=gn)))
+            self.assertIs(server.check_rhythm(v), v, gn)
+            self.assertEqual(server.rhythm_summary(v)["genre"], gn if gn["status"] != "done" else
+                             dict({k: x for k, x in gn.items() if k != "windows"}, window_count=1))
+        v = json.loads(json.dumps(dict(RHYTHM_OUT_V50, duration=70.0, genre=long)))
+        self.assertIs(server.check_rhythm(v), v)
+        self.assertEqual(server.rhythm_summary(v)["genre"]["window_count"], 2)
+        v = json.loads(json.dumps(RHYTHM_OUT_V43))  # a 0.4.3/0.4.4 file (no genre) stays valid; summary null
+        self.assertIs(server.check_rhythm(v), v)
+        self.assertIsNone(server.rhythm_summary(v)["genre"])
+        for old in (RHYTHM_OUT, RHYTHM_OUT_V22, RHYTHM_OUT_V40):
+            v = json.loads(json.dumps(old))
+            self.assertIs(server.check_rhythm(v), v)
+
+    def test_v50_invalid_output(self):
+        for out in bad_v50():
+            self.fw.write(stdout=out)
+            self.assert_rhythm_failed("failed", "invalid_output")
+
     def test_words_from_result_file(self):
         # ASR failed / no words: an empty list goes to the worker; rhythm still runs
         self.write_result(words=[])
@@ -906,6 +993,24 @@ class RhythmCacheIdentityTest(RhythmBase):
         r = self.c.json("POST", AR, WAV)[1]["rhythm"]
         self.assertEqual((r["cache_hit"], r["melody"]), (True, {"status": "failed", "code": "non_finite"}))
         self.assertEqual(len(self.fw.calls()), n)
+
+    def test_genre_retry_rule(self):
+        # a model file missing/unreadable/off-pin or an environment error may pass later (retried, like tempo_cnn);
+        # too_short, no_audible_patches and deterministic failures stay cached
+        for gn, retry in (({"status": "unavailable", "reason": "model_missing"}, True),
+                          ({"status": "unavailable", "reason": "sha256_mismatch"}, True),
+                          ({"status": "unavailable", "reason": "not_regular_file"}, True),
+                          ({"status": "failed", "code": "inference_error"}, True),
+                          ({"status": "failed", "code": "dependency_missing"}, True),
+                          ({"status": "unavailable", "reason": "too_short"}, False),
+                          ({"status": "unavailable", "reason": "no_audible_patches"}, False),
+                          ({"status": "failed", "code": "non_finite"}, False),
+                          ({"status": "failed", "code": "class_count_mismatch"}, False), (GENRE_DONE, False)):
+            self.write_stored(dict(RHYTHM_OUT_V50, genre=gn, **self.ids()))
+            n = len(self.fw.calls())
+            r = self.c.json("POST", AR, WAV)[1]["rhythm"]
+            self.assertEqual((r["status"], r["cache_hit"]), ("done", not retry), gn)
+            self.assertEqual(len(self.fw.calls()), n + (1 if retry else 0), gn)
 
     def test_changed_words_recomputed(self):
         # the cache key includes the words payload: a re-run ASR (new words for the same result_id) recomputes
@@ -1108,8 +1213,14 @@ class RhythmReadTest(RhythmBase):
         self.assertEqual((r["melody"], r["lyric_repeats"]), (MELODY, None))  # 0.4.0-0.4.2 file: no lyric_repeats
         with open(self.rhythm_file(), "w") as f:
             f.write(json.dumps(RHYTHM_OUT_V43))
-        self.assertEqual(self.c.json("GET", "/report/" + RID64)[1]["rhythm"]["lyric_repeats"], LYRIC)
-        for bad in bad_v2() + bad_v21() + bad_v22() + bad_v30() + bad_v40() + bad_v41() + bad_v43():
+        r = self.c.json("GET", "/report/" + RID64)[1]["rhythm"]
+        self.assertEqual((r["lyric_repeats"], r["genre"]), (LYRIC, None))  # 0.4.3/0.4.4 file: no genre
+        st, b = self.tl("layer=genre")  # not stored before 0.5.0
+        self.assertEqual((st, b["error"]["code"]), (404, "rhythm_not_found"))
+        with open(self.rhythm_file(), "w") as f:
+            f.write(json.dumps(RHYTHM_OUT_V50))
+        self.assertEqual(self.c.json("GET", "/report/" + RID64)[1]["rhythm"]["genre"], GENRE_SUMMARY)
+        for bad in bad_v2() + bad_v21() + bad_v22() + bad_v30() + bad_v40() + bad_v41() + bad_v43() + bad_v50():
             with open(self.rhythm_file(), "w") as f:
                 f.write(bad)
             st, b = self.c.json("GET", "/report/" + RID64)
@@ -1200,6 +1311,27 @@ class RhythmReadTest(RhythmBase):
         b = self.tl("layer=melody&limit=200&cursor=5800")[1]
         self.assertEqual((b["total"], len(b["melody"]), b["continuation"]), (6000, 200, None))
         self.assertLess(len(json.dumps(b)), server.MAX_WIRE_PAGE + 2000)
+
+    def test_timeline_genre(self):
+        long = rw.genre_summary(genre_rows(70), [False] * 30 + [True] * 31 + [False] * 9, GENRE_LABELS, 70.0)
+        with open(self.rhythm_file(), "w") as f:
+            f.write(json.dumps(dict(RHYTHM_OUT_V50, duration=70.0, genre=long)))
+        calls = len(self.env.argv_log())
+        st, b = self.tl("layer=genre")
+        self.assertEqual(st, 200, b)
+        self.assertEqual(b["genre"], long["windows"])
+        self.assertEqual([(w["start"], w["end"], w["patches"]) for w in b["genre"]], [(0.0, 30.0, 30), (30.0, 70.0, 9)])
+        self.assertEqual((b["total"], b["truncated"], b["layer"], b["layer_status"], b["reliability"]),
+                         (2, False, "genre", "done", "model_estimate"))
+        self.assertEqual(self.tl("layer=genre&start=31&end=40")[1]["genre"], long["windows"][1:])  # overlapping
+        b = self.tl("layer=genre&limit=1")[1]
+        self.assertEqual((len(b["genre"]), b["continuation"]), (1, 1))
+        self.assertEqual(self.tl("layer=genre&cursor=3")[0], 400)
+        self.assertEqual(len(self.env.argv_log()), calls)  # served by the server, not ml
+        with open(self.rhythm_file(), "w") as f:  # unavailable genre: empty layer with its status
+            f.write(json.dumps(dict(RHYTHM_OUT_V50, genre={"status": "unavailable", "reason": "model_missing"})))
+        b = self.tl("layer=genre")[1]
+        self.assertEqual((b["genre"], b["total"], b["layer_status"]), ([], 0, "unavailable"))
 
     def test_timeline_errors_and_words_passthrough(self):
         for q, code in (("layer=beats&start=-1", "invalid_argument"), ("layer=beats&start=3&end=2", "invalid_argument"),
@@ -1417,6 +1549,91 @@ class WorkerLogicTest(unittest.TestCase):
         a, b = rw.patch_span(0)
         self.assertEqual((a, round(b, 3)), (0.0, 11.935))
         self.assertEqual(round(rw.patch_span(44)[0], 2), 261.55)  # the real song's failing last patch (274 s)
+
+
+class GenreLogicTest(unittest.TestCase):
+    """genre (worker 0.5.0): pure-Python parts; the models run only in RealWorkerTest."""
+
+    def test_patch_span_and_windows(self):
+        self.assertEqual(rw.genre_patch_span(0), (0.0, 2.032))
+        self.assertEqual(round(rw.genre_patch_span(602)[1], 3), 599.216)  # last of the 603 patches measured for 600 s
+        self.assertEqual(rw.key_windows(70.0, 30.0, 15.0), [(0.0, 30.0), (30.0, 70.0)])  # 10 s tail joins
+        self.assertEqual(rw.key_windows(75.0, 30.0, 15.0), [(0.0, 30.0), (30.0, 60.0), (60.0, 75.0)])
+        self.assertEqual(rw.key_windows(5.0, 30.0, 15.0), [(0.0, 5.0)])
+        self.assertEqual(rw.key_windows(45.0), [(0.0, 20.0), (20.0, 45.0)])  # key_sections defaults unchanged
+
+    def test_summary(self):
+        d = GENRE_DONE
+        self.assertEqual(set(d), server.GENRE_KEYS["done"])
+        self.assertEqual((d["patches"], d["silent_patches"], d["patch_hop_s"], d["window_s"], d["reliability"]),
+                         (5, 0, 0.992, 30.0, "model_estimate"))
+        self.assertEqual((d["model_sha256"], d["embedding_sha256"]), (rw.GENRE_HEAD_SHA256, rw.GENRE_EMBED_SHA256))
+        # song score = mean over audible patches; a silent patch is left out of the song and its window
+        rows = genre_rows(3) + genre_rows(1, hot=((9, 0.9),))
+        d = rw.genre_summary(rows, [False] * 4, GENRE_LABELS, 6.0)
+        self.assertEqual(d["top"][:3], [{"style": "Parent07---Style007", "score": 0.452},  # (3 x 0.6 + 0.01) / 4
+                                        {"style": "Parent09---Style009", "score": 0.233},
+                                        {"style": "Parent07---Style022", "score": 0.227}])
+        self.assertEqual(d["parents"][:2], [{"parent": "Parent07", "score": 0.452},  # max over its styles
+                                            {"parent": "Parent09", "score": 0.233}])
+        d = rw.genre_summary(rows, [False, False, False, True], GENRE_LABELS, 6.0)
+        self.assertEqual((d["top"][0], d["silent_patches"], d["windows"][0]["patches"]),
+                         ({"style": "Parent07---Style007", "score": 0.6}, 1, 3))
+        # windows: a patch joins the window holding its centre (i * 0.992 + 1.016 s); a silent window keeps its row
+        rows = genre_rows(30) + genre_rows(30, hot=((40, 0.7),))
+        d = rw.genre_summary(rows, [False] * 30 + [True] * 30, GENRE_LABELS, 61.0)
+        self.assertEqual([(w["start"], w["end"], w["patches"], w["top"]) for w in d["windows"]],
+                         [(0.0, 30.0, 30, d["top"][:3]), (30.0, 61.0, 0, [])])
+        d = rw.genre_summary(rows, [False] * 60, GENRE_LABELS, 61.0)
+        self.assertEqual(d["windows"][1]["top"][0], {"style": "Parent10---Style040", "score": 0.7})
+        self.assertEqual(d["windows"][1]["patches"], 30)
+        for v in (d, rw.genre_summary(rows, [False] * 30 + [True] * 30, GENRE_LABELS, 61.0)):
+            v = json.loads(json.dumps(dict(RHYTHM_OUT_V43, duration=61.0, genre=v)))
+            self.assertIs(server.check_rhythm(v), v)
+        # no patch / all silent / bad values never raise
+        self.assertEqual(rw.genre_summary([], [], GENRE_LABELS, 1.5), {"status": "unavailable", "reason": "too_short"})
+        self.assertEqual(rw.genre_summary(genre_rows(2), [True, True], GENRE_LABELS, 6.0),
+                         {"status": "unavailable", "reason": "no_audible_patches"})
+        bad = genre_rows(1)
+        bad[0][5] = float("nan")
+        self.assertEqual(rw.genre_summary(bad, [False], GENRE_LABELS, 6.0), {"status": "failed", "code": "non_finite"})
+        self.assertEqual(rw.genre_summary([[0.1] * 399], [False], GENRE_LABELS, 6.0),
+                         {"status": "failed", "code": "class_count_mismatch"})  # the head must give 400 columns
+        self.assertEqual(rw.genre_summary(genre_rows(1) + [[0.1] * 401], [False] * 2, GENRE_LABELS, 6.0),
+                         {"status": "failed", "code": "class_count_mismatch"})
+
+    def test_labels(self):
+        good = json.dumps({"name": "x", "classes": GENRE_LABELS}).encode()
+        self.assertEqual(rw.genre_labels(good), GENRE_LABELS)
+        for bad in (b"{", b"[]", json.dumps({"classes": GENRE_LABELS[:399]}).encode(),
+                    json.dumps({"classes": GENRE_LABELS[:399] + ["NoSeparator"]}).encode(),
+                    json.dumps({"classes": GENRE_LABELS[:399] + ["A---B---C"]}).encode(),
+                    json.dumps({"classes": GENRE_LABELS[:399] + ["---B"]}).encode(),
+                    json.dumps({"classes": GENRE_LABELS[:399] + [5]}).encode(), b"\xff"):
+            self.assertIsNone(rw.genre_labels(bad), bad[:40])
+
+    def test_pins_unavailable(self):
+        # every file is checked before any model loads (no numpy/essentia needed): missing, off-pin, symlink
+        d = tempfile.mkdtemp(prefix="mlgenre-")
+        try:
+            self.assertEqual(rw.genre(None, 6.0, [], d), {"status": "unavailable", "reason": "model_missing"})
+            for name in (rw.GENRE_EMBED_FILE, rw.GENRE_HEAD_FILE, rw.GENRE_LABELS_FILE):
+                with open(os.path.join(d, name), "wb") as f:
+                    f.write(b"not the pinned bytes")
+            self.assertEqual(rw.genre(None, 6.0, [], d), {"status": "unavailable", "reason": "sha256_mismatch"})
+            os.unlink(os.path.join(d, rw.GENRE_EMBED_FILE))
+            os.symlink(os.path.join(d, rw.GENRE_HEAD_FILE), os.path.join(d, rw.GENRE_EMBED_FILE))
+            self.assertEqual(rw.genre(None, 6.0, [], d), {"status": "unavailable", "reason": "not_regular_file"})
+            # read_pinned returns exactly the hashed bytes, or nothing
+            p = os.path.join(d, rw.GENRE_LABELS_FILE)
+            self.assertEqual(rw.read_pinned(p, sha(b"not the pinned bytes"), 100), (None, b"not the pinned bytes"))
+            self.assertEqual(rw.read_pinned(p, "00" * 32, 100), ("sha256_mismatch", None))
+            self.assertEqual(rw.read_pinned(p, sha(b"not the pinned bytes"), 5), ("model_too_large", None))
+            self.assertEqual(rw.read_pinned(os.path.join(d, rw.GENRE_EMBED_FILE), "00" * 32, 100),
+                             ("not_regular_file", None))
+            self.assertEqual(rw.read_pinned(p, sha(b"not the pinned bytes"), 100, keep=False), (None, None))
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
     def test_beat_chords_vote_and_merge(self):
         step = 0.05
@@ -1974,6 +2191,8 @@ class MelodyLogicTest(unittest.TestCase):
 
 
 MODEL_PRESENT = os.path.isfile(rw.TEMPO_CNN_MODEL)
+GENRE_PRESENT = all(os.path.isfile(os.path.join(rw.GENRE_DIR, f))
+                    for f in (rw.GENRE_EMBED_FILE, rw.GENRE_HEAD_FILE, rw.GENRE_LABELS_FILE))
 SYNTH_RUN = (60, 62, 64, 65, 67, 69, 71, 72, 71, 69, 67, 65, 64, 62, 60)  # synth_audio.RUN
 SYNTH_MELODY = (72, 74, 76, 79, 76, 74, 72, 71, 69, 71, 72, 74, 76, 77, 79, 81)  # synth_audio.MELODY (numpy-free copy)
 
@@ -2014,7 +2233,14 @@ class RealWorkerTest(unittest.TestCase):
             self.assertEqual((v["sample_rate"], v["chords_reliability"]), (44100, "low_reference"))
             self.assertIn(v["duration"], (30.0, 60.0))
             self.assertEqual(v["tool"]["essentia_version"], "2.1-beta6-dev")
-            self.assertEqual(v["tool"]["version"], "0.4.4")
+            self.assertEqual(v["tool"]["version"], "0.5.0")
+            g = v["genre"]
+            self.assertEqual(g["status"], "done" if GENRE_PRESENT else "unavailable", g)
+            if GENRE_PRESENT:  # measured: 29 patches for 30 s, 59 for 60 s (hop 0.992 s, first from ~2.04 s)
+                self.assertEqual((g["patches"], len(g["windows"]), g["patch_hop_s"]),
+                                 ({30.0: 29, 60.0: 59}[v["duration"]], int(v["duration"] // 30), 0.992))
+                self.assertEqual((len(g["top"]), len(g["parents"]), g["model"]),
+                                 (5, 5, "genre_discogs400-discogs-effnet-1"))
             self.assertEqual(v["lyric_repeats"], {"status": "unavailable", "reason": "no_words_input"})
             sd = v["structure_debug"]
             self.assertEqual([p["time"] for p in sd["peaks"] if p["selected"]], [x["start"] for x in v["sections"][1:]])
@@ -2099,6 +2325,39 @@ class RealWorkerTest(unittest.TestCase):
         shutil.copyfile(rw.TEMPO_CNN_MODEL, copy)
         self.assertEqual(run_worker(os.path.join(self.dir, "click.wav"), "--tempo-cnn-model", copy)["tempo_cnn"],
                          self.out["click"]["tempo_cnn"])
+
+    def test_genre_models_unavailable_rest_runs(self):
+        wav = os.path.join(self.dir, "click.wav")
+        off = os.path.join(self.dir, "genre-off")
+        links = os.path.join(self.dir, "genre-links")
+        os.mkdir(off)
+        os.mkdir(links)
+        for name in (rw.GENRE_EMBED_FILE, rw.GENRE_HEAD_FILE, rw.GENRE_LABELS_FILE):
+            shutil.copyfile(SYNTH, os.path.join(off, name))
+            os.symlink(os.path.join(rw.GENRE_DIR, name), os.path.join(links, name))
+        for d, reason in ((os.path.join(self.dir, "genre-missing"), "model_missing"), (off, "sha256_mismatch"),
+                          (links, "not_regular_file")):
+            v = run_worker(wav, "--genre-models", d)
+            self.assertEqual(v["genre"], {"status": "unavailable", "reason": reason})
+            self.assertIsNotNone(server.check_rhythm(v))
+            self.assertEqual(v, dict(self.out["click"], genre=v["genre"]))  # everything else identical
+
+    @unittest.skipUnless(GENRE_PRESENT, "Discogs genre models missing")
+    def test_genre_short_audio_and_copy(self):
+        short = os.path.join(self.dir, "short2.wav")
+        subprocess.run([ESSENTIA_PY, "-I", SYNTH, "chords", "1.5", short], check=True, timeout=120)
+        self.assertEqual(run_worker(short)["genre"], {"status": "unavailable", "reason": "too_short"})  # < 1 patch
+        three = os.path.join(self.dir, "three.wav")
+        subprocess.run([ESSENTIA_PY, "-I", SYNTH, "chords", "3", three], check=True, timeout=120)
+        g = run_worker(three)["genre"]
+        self.assertEqual((g["status"], g["patches"], [(w["start"], w["end"]) for w in g["windows"]]),
+                         ("done", 1, [(0.0, 3.0)]))
+        copy = os.path.join(self.dir, "genre-copy")  # byte-identical copies pass the pins
+        os.mkdir(copy)
+        for name in (rw.GENRE_EMBED_FILE, rw.GENRE_HEAD_FILE, rw.GENRE_LABELS_FILE):
+            shutil.copyfile(os.path.join(rw.GENRE_DIR, name), os.path.join(copy, name))
+        self.assertEqual(run_worker(os.path.join(self.dir, "chords.wav"), "--genre-models", copy)["genre"],
+                         self.out["chords"]["genre"])
 
     def test_double_tempo_evidence_midpoint_hits(self):
         a, b = self.out["kick100"], self.out["kick100mid"]
@@ -2300,6 +2559,8 @@ class RealWorkerTest(unittest.TestCase):
         self.assertEqual(v["melody"]["note_count"], 0)
         if MODEL_PRESENT:
             self.assertEqual(v["tempo_cnn"], {"status": "failed", "code": "no_audible_patches"})
+        if GENRE_PRESENT:
+            self.assertEqual(v["genre"], {"status": "unavailable", "reason": "no_audible_patches"})
 
     def test_sections_single_texture(self):
         # one loop, one texture: no boundary (interior novelty stays <= ~0.12, threshold 0.15)
@@ -2375,6 +2636,10 @@ class RealWorkerTest(unittest.TestCase):
                 self.assertEqual((st, t["total"], len(t["energy"])), (200, 30, 30))
                 st, t = Client(env, h.port).json("GET", "/timeline/%s?layer=melody&limit=200" % rid)
                 self.assertEqual((st, t["layer_status"], t["total"]), (200, "done", b["rhythm"]["melody"]["note_count"]))
+                st, t = Client(env, h.port).json("GET", "/timeline/%s?layer=genre" % rid)
+                self.assertEqual((st, t["layer_status"], t["genre"]), (200, stored["genre"]["status"],
+                                                                      stored["genre"].get("windows", [])))
+                self.assertNotIn("windows", b["rhythm"]["genre"])
             finally:
                 h.stop()
         finally:

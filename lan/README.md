@@ -13,7 +13,7 @@ Nothing here is installed. No LaunchAgent, firewall rule, certificate or key is 
 | File | Purpose |
 | --- | --- |
 | `server.py` | The server: config, en0/en1 address discovery, TLS 1.2+, strict framing, HMAC auth, durable nonce and receipt logs, pipeline gate, staging, afconvert, strict WAV check, hard-link promotion, `ml` calls by argv, error mapping, cleanup, logs |
-| `rhythm_worker.py` | Optional rhythm layer worker (Essentia DSP plus one pinned local TempoCNN model): BPM (+ half/double, + learned TempoCNN estimate), beats, key (+ 20 s sections), beat-grid chords, 1 s energy curve, repeated-section structure (A/B/...), melody feature summary (predominant pitch notes). Runs under the Essentia python, never in the listener |
+| `rhythm_worker.py` | Optional rhythm layer worker (Essentia DSP plus pinned local models: TempoCNN, Discogs-EffNet + genre head): BPM (+ half/double, + learned TempoCNN estimate), beats, key (+ 20 s sections), beat-grid chords, 1 s energy curve, repeated-section structure (A/B/...), melody feature summary (predominant pitch notes), genre/style estimate (song + 30 s windows). Runs under the Essentia python, never in the listener |
 | `limit_exec.py` | Sets RLIMIT_CPU 60 s / FSIZE 24 MiB / NOFILE 32, then `execv /usr/bin/afconvert -f WAVE -d LEI16@16000 -c 1 src dst` |
 | `sign.py` | Shared canonical-string and HMAC helper (server, tests, Python clients) |
 | `sign_vector.mjs` | Reference Node signer; prints or checks the fixed vector (`tests/vectors.json`) |
@@ -120,7 +120,7 @@ API:
   The worker also bounds itself (SIGALRM 330 s, RLIMIT_CPU 600 s) in case the server dies first.
 - Rhythm never fails the analyze: the reply stays 200 with the ASR fields unchanged plus `rhythm`:
   - success: the same compact summary as `/report` plus `cache_hit` and `stored` (no beat or chord rows; page
-    them with `/timeline` `layer=beats|chords|energy|melody`);
+    them with `/timeline` `layer=beats|chords|energy|melody|genre`);
   - `{"status":"busy","code":"busy"}` when the team lock is held (never waits);
   - `{"status":"timeout","code":"timeout"|"no_time_left"}`;
   - `{"status":"failed","code":...}` with the worker's error code (`invalid_audio`, `too_short`, `analysis_failed`,
@@ -140,7 +140,9 @@ API:
   `non_finite`, `inconsistent_output` and (0.4.1) `no_audible_patches` stay cached. The same applies to a melody
   `failed` with `analysis_error` or `dependency_missing` (recomputed; `non_finite` cached). Likewise (0.4.3) a `lyric_repeats` `unavailable` with reason
   `result_unreadable` (the ml result file could not be read: may work next time); every other lyric outcome is
-  deterministic for the same words and stays cached. While the model stays missing, every rhythm request therefore
+  deterministic for the same words and stays cached. And (0.5.0) a `genre` `unavailable` for any reason except
+  `too_short` / `no_audible_patches` (a Discogs model file missing, unreadable or off its pin) or `failed` with
+  `inference_error` / `dependency_missing`; `non_finite` and `class_count_mismatch` stay cached. While the model stays missing, every rhythm request therefore
   reruns the worker (about 15 s for a 4 min song). Only the worker file is tracked: a changed Essentia python with the same
   worker file is not detected (restart is needed after editing the worker in place). If the worker file cannot be
   read at start, its hash is null and nothing is reused (every rhythm request recomputes); that alone does not make
@@ -150,32 +152,35 @@ API:
   data with `stored: false`. The files are not pruned automatically (about 35-45 KB per 10 minutes of audio with
   worker 0.3.0: 34,114 B for the 600 s loop, 41,434 B for a 600 s file with 40 sections; worker 0.4.0 adds the
   melody notes, about 54 B per note: 46,911 B for the 600 s loop (225 notes), 103,330 B for the 600 s melody track
-  (1200 notes); at most 6000 notes, ~330 KB; cap `rhythm_output` 4 MiB).
+  (1200 notes); at most 6000 notes, ~330 KB; worker 0.5.0 adds `genre`, about 1 KB plus ~200 B per 30 s window,
+  1,189 B for 30 s, 4,864 B for the 600 s loop (20 windows); cap `rhythm_output` 4 MiB).
 - `GET /report/<id>` adds a `rhythm` summary (`status`, `bpm`, `bpm_confidence`, `bpm_confidence_band`,
   `bpm_estimates`, `bpm_alternatives`, `bpm_alternatives_note`, `double_tempo_evidence`,
   `double_tempo_evidence_note`, `tempo_cnn`, `key`, `key_sections`, `key_change_count`,
   `beat_count`, `chord_segment_count`, `chords_grid`, `energy_summary`, `sections`, `sections_method`,
-  `sections_reliability`, `melody`, `lyric_repeats`, `overview`, `downbeats`, `duration`, `tool`, `warnings`) when a stored file
+  `sections_reliability`, `melody`, `lyric_repeats`, `overview`, `genre`, `downbeats`, `duration`, `tool`, `warnings`) when a stored file
   exists, re-serializing the native JSON (number formatting may change). Files stored by worker 0.1.0 lack the
   0.2.0 fields and still load; the summary then has `bpm_alternatives`, `bpm_alternatives_note`, `key_sections`,
   `key_change_count` and `chords_grid` set to `null` (they are not recomputed; old chord rows stay frame-level).
   Files from 0.1.0 and 0.2.0 likewise give `double_tempo_evidence` and `double_tempo_evidence_note` as `null`, and
   files from before 0.2.2 give `tempo_cnn: null`, and files from before 0.3.0 give `energy_summary`, `sections`,
   `sections_method` and `sections_reliability` as `null`, and files from before 0.4.0 give `melody: null`, and files
-  from before 0.4.3 give `lyric_repeats: null` and `overview: null`. `structure_debug` is never in the summary (stored file only). A damaged file gives `rhythm: {"status":"failed","code":"invalid_result"}`.
+  from before 0.4.3 give `lyric_repeats: null` and `overview: null`, and files from before 0.5.0 give `genre: null`
+  (summary `genre` = the stored one without `windows`, plus `window_count`). `structure_debug` is never in the summary (stored file only). A damaged file gives `rhythm: {"status":"failed","code":"invalid_result"}`.
   No file: native bytes unchanged.
-- `GET /timeline/<id>?layer=beats|chords|energy|melody` is served by the server from the stored file with the native rules:
+- `GET /timeline/<id>?layer=beats|chords|energy|melody|genre` is served by the server from the stored file with the native rules:
   `start`/`end` 0..600 (default 0 and 600, `end >= start`), rows overlapping the range, `limit` 1..200 (default 100),
   `cursor` <= total, a ~43 KB page byte cap, `truncated` and `continuation`. Beats rows are `{"time"}`, chords rows
   `{start, end, label, strength}` (with `reliability: "low_reference"`), energy rows `{time, value}` (with `unit`
   and `step_s`; a row covers `[time, time + step_s)` and is selected when its `time` lies in `[start, end]`), melody
   rows `{start, end, midi, note}` (selected like chords: overlapping the range; with `reliability: "low_reference"`
   and `layer_status` = the stored melody `status`, so a `failed` melody gives `done`-shaped paging with no rows and
-  `layer_status: "failed"`).
+  `layer_status: "failed"`), genre rows `{start, end, patches, top}` (the 30 s windows overlapping the range, with
+  `reliability: "model_estimate"` and `layer_status` = the stored genre `status`; not `done`: no rows).
   No stored file: 404 `rhythm_not_found`. `layer=energy` on a file stored before worker 0.3.0 (no `energy` field)
   gives the same 404 `rhythm_not_found`: the request is valid, that layer is just not stored for this result, and a
   new `rhythm=1` analyze recomputes it (the worker hash changed); `invalid_argument` would wrongly blame the
-  request. `layer=melody` on a file stored before worker 0.4.0 gives the same 404. Sections are in the summary only (at most 40 rows), not a timeline layer.
+  request. `layer=melody` on a file stored before worker 0.4.0 and `layer=genre` before 0.5.0 give the same 404. Sections are in the summary only (at most 40 rows), not a timeline layer.
   `words`/`emotion` still go to `ml timeline` unchanged.
 - `GET /status`: when the layer is configured, adds `rhythm: {configured, python_present, worker_present,
   worker_sha256}` (file checks only, Essentia is not run; `worker_sha256` is the start-time hash, null if unreadable). Not configured: native bytes unchanged (no `rhythm` key means unavailable).
@@ -199,7 +204,7 @@ resampled from 16 kHz because RhythmExtractor2013 assumes 44.1 kHz), `duration`,
 only), `no_melody`, `melody_failed`, `melody_scale_degrees_unavailable`,
 `melody_notes_capped`, `lyric_repeats_capped` (0.4.3), `lyric_repeats_approx_capped` (0.4.4)), `energy`, `energy_summary`, `sections`, `sections_method`, `sections_reliability:
 "low_reference"` (see "Energy and sections" below), `melody` and `melody_notes` (see "Melody features" below), and (worker 0.4.3) `structure_debug` (stored file only, see
-"Energy and sections") and `lyric_repeats` (see "Lyric repeats"). Audio under 1 s is refused (`too_short`).
+"Energy and sections") and `lyric_repeats` (see "Lyric repeats"), and (worker 0.5.0) `genre` (see "Genre"). Audio under 1 s is refused (`too_short`).
 
 - Key sections: the same KeyExtractor (`bgate`, frame 4096, hop 2048) on fixed, non-overlapping 20 s windows (a last
   window under 10 s joins the previous one), then adjacent windows with the same tonic and scale merged; `strength`
@@ -593,6 +598,76 @@ repeats are reported on their own and clients compare the two.
   always a chorus (a repeated verse line, a refrain inside a verse). Word mode (English, Korean) is untested on real
   songs. Say "estimate" when relaying.
 
+### Genre (worker 0.5.0)
+
+Purpose: what kind of music this is (style and parent genre), for "compose using this song as a reference". A model
+estimate, not a label lookup.
+
+- Models: Essentia's Discogs-EffNet embedding `discogs-effnet-bs64-1` (Alonso-Jimenez, Serra & Bogdanov, ISMIR 2022;
+  2022-02-17) and the classification head `genre_discogs400-discogs-effnet-1` (2023-05-04: 400 Discogs styles in 15
+  parent genres), source https://essentia.upf.edu/models/, expected in
+  `/Users/songseunghun/tools/music-lens/models/discogs/` (directory and hashes are constants in the worker):
+  `discogs-effnet-bs64-1.pb` SHA-256 `3ed9af50d5367c0b9c795b294b00e7599e4943244f4cbd376869f3bfc87721b1` (17.5 MB),
+  `genre_discogs400-discogs-effnet-1.pb` `3885ba078a35249af94b8e5e4247689afac40deca4401a4bc888daf5a579c01c` (2.0 MB)
+  and its json `2d367319d9b782ffa10f69abf0e805b3ac4e10899025e5bdbaceda3919b243e0` (the 400 class names
+  `Parent---Style`, e.g. `Pop---J-pop`, `Rock---Heavy Metal`). Training data per the json: Discogs-4M (in-house,
+  unreleased; 3.3M tracks used, ROC-AUC 0.954, PR-AUC 0.206 as published). **License: CC BY-NC-ND 4.0
+  (noncommercial, no derivatives)**: team use only; check before any other use.
+- Pins: the three files are checked like TempoCNN (O_NOFOLLOW, regular file, <= 64 MiB, SHA-256; any failure ->
+  `{"status":"unavailable","reason"}` with the TempoCNN reason codes, everything else computed as before). The class
+  names come from the pinned json, parsed from exactly the bytes that matched the pin (one source of truth shipped
+  with the head, as fixed as a list in the worker, without 10 KB of literals); a json that does not hold 400
+  `Parent---Style` names, or a head output that is not 400 columns, gives `failed` `class_count_mismatch`.
+  `--genre-models /abs/dir` (tests and measurement only) selects another directory; the pins are not overridable.
+- Method: `TensorflowPredictEffnetDiscogs` (output `PartitionedCall:1`, the 1280-d embedding; batch 64, patch 128 mel
+  frames, patch hop 62, last patch discarded, all passed explicitly) on the 16 kHz source itself (the models' rate),
+  then `TensorflowPredict2D` (input `serving_default_model_Placeholder`, output `PartitionedCall:0`): one 400-class
+  sigmoid row per patch. Measured here (2026-10-31): frames hop 256 = 16 ms, a patch covers 128 frames (frame centres
+  2.032 s apart) and the patch hop is 62 frames = **0.992 s**; the first patch exists from ~2.04 s of audio (2.0 s:
+  none, 3.04 s: 2), 29 patches for 30 s, 59 for 60 s, 603 for 600 s. Near-silent patches (more than half of the 1 s
+  energy windows in the patch's frame-centre span below -60 dBFS, the tempo_cnn rule) are excluded and counted in
+  `silent_patches`. Song score per style = mean of the audible patch rows; `top` = 5 styles; `parents` = 5 parent
+  genres, parent score = the max over its styles (so `parents[0].score == top[0].score`); ties: lower class index,
+  parent name. `windows`: fixed 30 s windows (a last window under 15 s joins the previous, the key_sections rule; at
+  most 20 for 600 s), each patch in the window holding its centre (i x 0.992 + 1.016 s), with the window's `patches`
+  and top 3 styles (`[]` when every patch in it was silent). 30 s matches the clip length the accuracy below was
+  measured on; shorter windows hold fewer patches of a release-level label.
+- Output `done`: `{status, model, model_sha256, embedding_model, embedding_sha256, reliability: "model_estimate",
+  patches, silent_patches, patch_hop_s: 0.992, window_s: 30, top: [{style, score}], parents: [{parent, score}],
+  windows: [{start, end, patches, top}], note}` (scores 3 decimals). The summary (`/report`, analyze) carries it
+  without `windows`, plus `window_count`; windows come from `/timeline layer=genre`. `unavailable` `{status,
+  reason}`: the pin reasons above, `too_short` (no patch, audio under ~2.04 s), `no_audible_patches` (all silent).
+  `failed` `{status, code}`: `class_count_mismatch`, `non_finite`, `inference_error`, `dependency_missing`; never
+  fails the worker. Server checks: exact key sets per status, scores 0..1 non-increasing, distinct names, styles
+  `Parent---Style`, best parent = best style score and no listed style above its listed parent, windows contiguous
+  0..duration (<= 21), top empty exactly when `patches` is 0, window patches summing to `patches - silent_patches`.
+- Scores are **mean sigmoid activations, multi-label, not probabilities**: they do not sum to 1, several styles can be
+  high at once, and the absolute level differs between styles (a top score of 0.15 can still be a clear first
+  place). Compare the ranking, not the number.
+- Accuracy (measured by Claude-Mac 2026-10-31, not re-derived here; first 30 s of each clip at 16 kHz; the 400 styles
+  mapped to each dataset's labels by a fixed rule, max over a style set; wiki note
+  `Research/music-genre-zero-shot-gemma-vs-discogs.md`):
+
+  | Test set | Classes (chance top 1) | Discogs top 1 / top 3 | EmbeddingGemma 2 zero-shot top 1 / top 3 |
+  | --- | --- | --- | --- |
+  | GTZAN, 20 clips x 10 genres | 10 (0.10) | 0.745 / 0.965 | 0.495 / 0.830 |
+  | FMA-small validation shard 0, 399 clips | 6 (0.17) | 0.576 / 0.823 | 0.463 / 0.733 |
+
+  EmbeddingGemma zero-shot was worse on both and changed with the prompt wording, so it is not used. Caveats: GTZAN
+  tracks may overlap the Discogs training data (the GTZAN number may be optimistic); FMA's "Pop" class scored about
+  0.04 (a noisy label); Discogs labels are release-level, so a
+  per-window genre is less reliable than the whole-song one. Not measured on the team's own songs (J-pop and similar).
+  Check here (worker code on 21 of those clips, read-only): the worker's top style equals the reference script's on
+  21 of 21, top score within 0.0005 (the reference loaded audio with MonoLoader; the worker reads the s16 WAV).
+- Runtime (synthetic C-Am-F-G loop, full worker, 2 runs each, same session, 2026-10-31): 30 s 1.41-1.45 s and
+  1.32-1.34 GB peak RSS vs 1.07-1.08 s and 0.33-0.35 GB with genre unavailable; 600 s 10.82-10.94 s and 1.54-1.69 GB
+  vs 9.84-9.87 s and 1.13 GB. So genre adds about +0.4 s (30 s) to +1.0 s (600 s) and up to ~1 GB peak memory even on
+  short audio (the bs64 graph always runs a batch of 64 patches). The genre call alone on 600 s: 603 patches, embedding
+  1.2 s, head 0.02 s.
+- Honest limits: a style is a Discogs release tag, not the song's own genre; mixed or uncommon styles share score
+  across several tags; per-window rows can flip between related styles; Korean/Japanese pop is covered by `Pop---K-pop`
+  and `Pop---J-pop` but accuracy on them is unmeasured. Say "estimate" when relaying.
+
 ### Overview (server, read time)
 
 Purpose: one ordered list of song parts for agents, built from data the stored file already holds. Computed by the
@@ -751,7 +826,7 @@ cleanup, so it alone does not prove the pipeline is idle).
    check (including 0 < duration <= 600 s) and no-overwrite hard link. A canonical WAV (PCM mono 16 kHz s16) skips
    afconvert. A conversion failure gives 400 `invalid_audio`; size limits, magic-byte detection and framing are
    unchanged.
-12. Optional rhythm layer (not in v0.6): `rhythm=1` on `/analyze`, a `rhythm` summary in `/report`, `layer=beats|chords|energy|melody`
+12. Optional rhythm layer (not in v0.6): `rhythm=1` on `/analyze`, a `rhythm` summary in `/report`, `layer=beats|chords|energy|melody|genre`
    on `/timeline`, and a `rhythm` object in `/status` (see "Optional rhythm layer"). New rhythm work and the `/status`
    field need the `rhythm` config key; `/report` and `/timeline` read stored files whenever they exist. The receipt
    records the ASR outcome only; the rhythm result lives in `results-rhythm/`. The worker runs while the API gate is

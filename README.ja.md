@@ -85,9 +85,10 @@ npm run dev -- --host 127.0.0.1
 | [Whisper](https://huggingface.co/Xenova/whisper-base)（`Xenova/whisper-base`・`whisper-small`、必要なときにブラウザーがダウンロード） | 歌詞の単語の書き起こし（任意） | Apache-2.0（モデルカードによる） |
 | [SOME](https://github.com/openvpi/SOME)（モデルは別途用意） | ソロボーカルの音符（任意） | コード MIT、モデル CC BY-NC-SA 4.0 |
 | [Essentia](https://essentia.upf.edu/) と TempoCNN モデル（Mac サーバーに別途インストール） | 任意のリズム層 | Essentia AGPL-3.0、モデルの条件は未確認 |
+| Essentia Discogs-EffNet・genre_discogs400 モデル（Mac サーバーに別途インストール） | 任意のリズム層のジャンル推定 | CC BY-NC-ND 4.0 |
 | Transformers.js・ONNX Runtime Web・TensorFlow.js | ブラウザーでのモデル実行 | Apache-2.0・MIT・Apache-2.0 |
 
-- SOME モデルには非商用の条件（CC BY-NC-SA 4.0）があります。
+- SOME モデル（CC BY-NC-SA 4.0）と Discogs ジャンルモデル（CC BY-NC-ND 4.0）には非商用の条件があります。
 - 同梱した構成のライセンス原文は [public/licenses/](public/licenses/README.md) と [models/beat-this/](models/beat-this/README.md) にあります。
 
 ## もっと見る
