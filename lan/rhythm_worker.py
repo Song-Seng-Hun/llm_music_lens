@@ -5,6 +5,8 @@ Usage: <essentia python> -I rhythm_worker.py [--words-stdin] WAV
        <essentia python> -I rhythm_worker.py --tempo-cnn-model /abs/model.pb [--words-stdin] WAV   (tests and
        measurement only; the server never passes --tempo-cnn-model. The SHA-256 pin is not overridable, so the
        option can only select a byte-identical copy or make tempo_cnn unavailable.)
+       --genre-models /abs/dir (0.5.0; tests and measurement only, same rule: the three pinned Discogs files are
+       looked up by name in that directory and their SHA-256 pins are not overridable)
 WAV is the server's already-validated canonical file (PCM mono 16 kHz s16, 0 < duration <= 600 s).
 --words-stdin (0.4.3; the server always passes it): stdin holds one JSON object {"words": [[text, start, end], ...]}
 (the ASR words of the same result) or {"words": null, "reason": code} (the server could not provide them), at most
@@ -142,6 +144,17 @@ Choices:
   Reason: Whisper large-v3-turbo misspells a chorus differently each time, so exact 8-grams found only 36% of the
   repeated reference-lyric characters on 7 J-pop songs; this rule found 65% at precision 0.97 (scratch check
   2026-10-28, j-lyric references; tuned on those 7 songs only).
+- genre (0.5.0, reliability "model_estimate"): Essentia's Discogs-EffNet embedding (discogs-effnet-bs64-1) plus the
+  genre_discogs400 head, both pinned like TempoCNN (O_NOFOLLOW, regular file, <= 64 MiB, SHA-256), on the 16 kHz
+  source itself (the models' rate). The 400 class names ("Parent---Style", 15 parents) are read from the head's
+  pinned json and parsed from exactly the bytes that matched the pin: one source of truth shipped with the model,
+  as fixed as an embedded list, without 10 KB of literals here. Patches: 128 mel frames (hop 256 = 16 ms), patch hop
+  62 frames = 0.992 s (measured 2026-10-31: 1 patch from ~2.04 s, 29 for 30 s, 603 for 600 s); near-silent patches
+  (the tempo_cnn rule on the frame-centre span) are excluded. Scores = mean per-patch sigmoid (multi-label, not
+  probabilities); top 5 styles, top 5 parents (parent = max over its styles), and per fixed 30 s window (last under
+  15 s joins the previous, the key_sections rule; a patch belongs to the window holding its centre) the top 3
+  styles. No patch -> unavailable too_short; all silent -> unavailable no_audible_patches; head output not 400
+  columns -> failed class_count_mismatch; any exception -> failed; never fails the worker.
 """
 import errno
 import hashlib
@@ -157,7 +170,7 @@ import sys
 import unicodedata
 import wave
 
-TOOL = {"name": "music-lens-rhythm-worker", "version": "0.4.4"}
+TOOL = {"name": "music-lens-rhythm-worker", "version": "0.5.0"}
 SRC_RATE = 16000
 RATE = 44100
 MAX_SECONDS = 600.0
@@ -197,6 +210,25 @@ TEMPO_CNN_PATCH_HOP = 128  # both algorithms' default, passed explicitly so the 
 TEMPO_CNN_LAST_PATCH = "discard"
 TC_FRAME_HOP, TC_PATCH_FRAMES, TC_FRAME = 512, 256, 1024  # TensorflowInputTempoCNN at 11025 Hz (fixed in Essentia)
 TEMPO_CNN_NOTE = "learned estimate, uncalibrated on team songs; compare with bpm and bpm_alternatives"
+GENRE_DIR = "/Users/songseunghun/tools/music-lens/models/discogs"
+GENRE_EMBED_FILE, GENRE_EMBED_SHA256 = ("discogs-effnet-bs64-1.pb",
+                                        "3ed9af50d5367c0b9c795b294b00e7599e4943244f4cbd376869f3bfc87721b1")
+GENRE_HEAD_FILE, GENRE_HEAD_SHA256 = ("genre_discogs400-discogs-effnet-1.pb",
+                                      "3885ba078a35249af94b8e5e4247689afac40deca4401a4bc888daf5a579c01c")
+GENRE_LABELS_FILE, GENRE_LABELS_SHA256 = ("genre_discogs400-discogs-effnet-1.json",  # the head's metadata: 400 classes
+                                          "2d367319d9b782ffa10f69abf0e805b3ac4e10899025e5bdbaceda3919b243e0")
+GENRE_EMBED_NAME, GENRE_HEAD_NAME = "discogs-effnet-bs64-1", "genre_discogs400-discogs-effnet-1"
+GENRE_EMBED_OUTPUT = "PartitionedCall:1"  # the 1280-d embedding (PartitionedCall:0 is the effnet's own 400 sigmoids)
+GENRE_HEAD_INPUT, GENRE_HEAD_OUTPUT = "serving_default_model_Placeholder", "PartitionedCall:0"
+GENRE_LABELS_MAX_BYTES = 1024 * 1024
+GENRE_CLASSES = 400
+GENRE_SEP = "---"  # class names are "Parent---Style"
+GENRE_TOP, GENRE_PARENTS, GENRE_WINDOW_TOP = 5, 5, 3
+GENRE_WINDOW = 30.0  # s; fixed windows for the per-window estimate
+GENRE_MIN_TAIL = 15.0  # s; a last window shorter than this joins the previous one (the key_sections rule)
+GD_FRAME_HOP, GD_PATCH_FRAMES, GD_PATCH_HOP = 256, 128, 62  # TensorflowPredictEffnetDiscogs at 16 kHz (defaults)
+GENRE_NOTE = ("model estimate; scores are mean per-patch sigmoid activations (multi-label, not probabilities); "
+              "Discogs labels are release-level, so windows are less reliable than the whole song")
 ENERGY_UNIT = "dBFS"
 ENERGY_STEP = 1.0  # s; one RMS value per non-overlapping 1 s window of the 16 kHz source
 ENERGY_FLOOR = -120.0  # dB; digital silence and anything quieter
@@ -286,13 +318,13 @@ def bpm_alternatives(bpm):
     return [a for a in (round(bpm / 2.0, 2), round(bpm * 2.0, 2)) if ALT_MIN_BPM <= a <= ALT_MAX_BPM]
 
 
-def key_windows(duration):
-    """[(start, end)] of KEY_WINDOW s covering [0, duration]; a last window under KEY_MIN_TAIL joins the previous."""
+def key_windows(duration, size=KEY_WINDOW, min_tail=KEY_MIN_TAIL):
+    """[(start, end)] of `size` s covering [0, duration]; a last window under `min_tail` joins the previous."""
     out, t = [], 0.0
     while t < duration:
-        out.append([t, min(t + KEY_WINDOW, duration)])
-        t += KEY_WINDOW
-    if len(out) > 1 and out[-1][1] - out[-1][0] < KEY_MIN_TAIL:
+        out.append([t, min(t + size, duration)])
+        t += size
+    if len(out) > 1 and out[-1][1] - out[-1][0] < min_tail:
         last = out.pop()
         out[-1][1] = last[1]
     return [tuple(w) for w in out]
@@ -423,30 +455,40 @@ def double_tempo_evidence(env, hop_s, beats, half=DTE_WINDOW):
 def verify_model(path, expected=TEMPO_CNN_SHA256, cap=TEMPO_CNN_MAX_BYTES):
     """None when path is a regular file (not a symlink, not a FIFO), <= cap bytes, whose SHA-256 is `expected`;
     otherwise a short reason code."""
+    return read_pinned(path, expected, cap, keep=False)[0]
+
+
+def read_pinned(path, expected, cap, keep=True):
+    """(reason, data): reason None when path passes verify_model's checks; data = the hashed bytes when keep (so a
+    small metadata file is parsed from exactly the bytes that matched the pin), else None."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except (FileNotFoundError, NotADirectoryError):
-        return "model_missing"
+        return "model_missing", None
     except OSError as e:
-        return "not_regular_file" if e.errno in (errno.ELOOP, errno.EISDIR) else "model_unreadable"
-    h = hashlib.sha256()
+        return ("not_regular_file" if e.errno in (errno.ELOOP, errno.EISDIR) else "model_unreadable"), None
+    h, parts = hashlib.sha256(), []
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             os.close(fd)
-            return "not_regular_file"
+            return "not_regular_file", None
         with os.fdopen(fd, "rb") as f:
             if st.st_size > cap:
-                return "model_too_large"
+                return "model_too_large", None
             n = 0
             for chunk in iter(lambda: f.read(65536), b""):
                 n += len(chunk)
                 if n > cap:
-                    return "model_too_large"
+                    return "model_too_large", None
                 h.update(chunk)
+                if keep:
+                    parts.append(chunk)
     except OSError:
-        return "model_unreadable"
-    return None if h.hexdigest() == expected else "sha256_mismatch"
+        return "model_unreadable", None
+    if h.hexdigest() != expected:
+        return "sha256_mismatch", None
+    return None, (b"".join(parts) if keep else None)
 
 
 def tempo_cnn_summary(preds, patch_silent, sha256=TEMPO_CNN_SHA256):
@@ -504,6 +546,108 @@ def tempo_cnn(x16, model, energy):
                                                         lastPatchMode=TEMPO_CNN_LAST_PATCH)(a), dtype=np.float64)
         rows = preds.tolist() if preds.size else []
         return tempo_cnn_summary(rows, [section_silent(energy, *patch_span(i)) for i in range(len(rows))])
+    except Exception as e:  # missing TensorFlow algorithms, graph load or inference error
+        return {"status": "failed", "code": "dependency_missing" if isinstance(e, (ImportError, AttributeError))
+                else "inference_error"}
+
+
+def genre_labels(data):
+    """The head json's 400 class names ("Parent---Style"), or None when the (pinned) file does not hold them."""
+    try:
+        c = json.loads(data.decode("utf-8")).get("classes")
+    except (ValueError, AttributeError):
+        return None
+    if not (isinstance(c, list) and len(c) == GENRE_CLASSES
+            and all(isinstance(x, str) and 0 < len(x) <= 64 and x.count(GENRE_SEP) == 1
+                    and all(x.split(GENRE_SEP)) for x in c)):
+        return None
+    return c
+
+
+def genre_patch_span(i):
+    """(first, last) frame centre in s of effnet patch i: frames hop 256 at 16 kHz (16 ms), 128 frames per patch,
+    patch hop 62 frames (0.992 s); measured: the first patch exists from ~2.04 s of audio, 603 patches for 600 s."""
+    a = i * GD_PATCH_HOP * GD_FRAME_HOP / float(SRC_RATE)
+    return a, a + (GD_PATCH_FRAMES - 1) * GD_FRAME_HOP / float(SRC_RATE)
+
+
+def _genre_top(mean, labels, k):
+    idx = sorted(range(len(mean)), key=lambda i: (-mean[i], i))[:k]  # ties: lower class index
+    return [{"style": labels[i], "score": round(min(1.0, max(0.0, mean[i])), 3)} for i in idx]
+
+
+def genre_summary(preds, patch_silent, labels, duration):
+    """preds: per-patch sigmoid rows (lists of GENRE_CLASSES floats); patch_silent: one bool per row (True = near
+    silent, excluded). Song scores = mean of the audible rows; parent score = max over its styles; windows: fixed
+    GENRE_WINDOW s (key_windows rule), each patch in the window holding its centre. Plain lists in, the genre dict
+    out."""
+    if not preds:
+        return {"status": "unavailable", "reason": "too_short"}
+    if not all(math.isfinite(float(x)) for row in preds for x in row):
+        return {"status": "failed", "code": "non_finite"}
+    if any(len(row) != GENRE_CLASSES for row in preds):
+        return {"status": "failed", "code": "class_count_mismatch"}
+    audible = [i for i, quiet in enumerate(patch_silent) if not quiet]
+    if not audible:
+        return {"status": "unavailable", "reason": "no_audible_patches"}
+
+    def mean_of(ix):
+        return [sum(col) / float(len(ix)) for col in zip(*(preds[i] for i in ix))]
+
+    mean = mean_of(audible)
+    parents = {}
+    for i, name in enumerate(labels):
+        p = name.split(GENRE_SEP)[0]
+        parents[p] = max(parents.get(p, 0.0), mean[i])
+    wins = key_windows(duration, GENRE_WINDOW, GENRE_MIN_TAIL)
+    members = [[] for _ in wins]
+    for i in audible:
+        c = sum(genre_patch_span(i)) / 2.0
+        k = next((k for k, (ws, we) in enumerate(wins) if c < we), len(wins) - 1)
+        members[k].append(i)
+    windows = [{"start": r3(ws), "end": r3(we), "patches": len(ix),
+                "top": _genre_top(mean_of(ix), labels, GENRE_WINDOW_TOP) if ix else []}
+               for (ws, we), ix in zip(wins, members)]
+    return {"status": "done", "model": GENRE_HEAD_NAME, "model_sha256": GENRE_HEAD_SHA256,
+            "embedding_model": GENRE_EMBED_NAME, "embedding_sha256": GENRE_EMBED_SHA256,
+            "reliability": "model_estimate", "patches": len(preds), "silent_patches": len(preds) - len(audible),
+            "patch_hop_s": GD_PATCH_HOP * GD_FRAME_HOP / float(SRC_RATE), "window_s": GENRE_WINDOW,
+            "top": _genre_top(mean, labels, GENRE_TOP),
+            "parents": [{"parent": p, "score": round(min(1.0, max(0.0, s)), 3)}
+                        for p, s in sorted(parents.items(), key=lambda kv: (-kv[1], kv[0]))[:GENRE_PARENTS]],
+            "windows": windows, "note": GENRE_NOTE}
+
+
+def genre(x16, duration, energy, model_dir=GENRE_DIR):
+    """genre dict for the 16 kHz source (the models' inference rate); never raises."""
+    paths = [os.path.join(model_dir, f) for f in (GENRE_EMBED_FILE, GENRE_HEAD_FILE, GENRE_LABELS_FILE)]
+    for p, h in zip(paths[:2], (GENRE_EMBED_SHA256, GENRE_HEAD_SHA256)):
+        reason = verify_model(p, h)
+        if reason:
+            return {"status": "unavailable", "reason": reason}
+    reason, data = read_pinned(paths[2], GENRE_LABELS_SHA256, GENRE_LABELS_MAX_BYTES)
+    if reason:
+        return {"status": "unavailable", "reason": reason}
+    labels = genre_labels(data)
+    if labels is None:
+        return {"status": "failed", "code": "class_count_mismatch"}
+    try:
+        import essentia.standard as es
+        import numpy as np
+        a = np.ascontiguousarray(x16, dtype=np.float32)
+        emb = np.asarray(es.TensorflowPredictEffnetDiscogs(
+            graphFilename=paths[0], output=GENRE_EMBED_OUTPUT, batchSize=64, patchSize=GD_PATCH_FRAMES,
+            patchHopSize=GD_PATCH_HOP, lastPatchMode="discard")(a), dtype=np.float32)
+        if emb.size == 0:
+            rows = []
+        else:
+            preds = np.asarray(es.TensorflowPredict2D(graphFilename=paths[1], input=GENRE_HEAD_INPUT,
+                                                      output=GENRE_HEAD_OUTPUT)(emb), dtype=np.float64)
+            if preds.ndim != 2:
+                return {"status": "failed", "code": "class_count_mismatch"}
+            rows = preds.tolist()
+        return genre_summary(rows, [section_silent(energy, *genre_patch_span(i)) for i in range(len(rows))],
+                             labels, duration)
     except Exception as e:  # missing TensorFlow algorithms, graph load or inference error
         return {"status": "failed", "code": "dependency_missing" if isinstance(e, (ImportError, AttributeError))
                 else "inference_error"}
@@ -1180,7 +1324,7 @@ def read_wav(path):
     return x, len(x) / float(SRC_RATE)
 
 
-def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None):
+def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None, genre_dir=GENRE_DIR):
     import essentia
     import essentia.standard as es
     import numpy as np
@@ -1218,6 +1362,7 @@ def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None):
         warnings.append(dte_warn)
     energy = energy_values(x16, duration)
     tc = tempo_cnn(x16, model, energy)
+    gn = genre(x16, r3(duration), energy, genre_dir)
 
     tonic, scale, kstrength = es.KeyExtractor(profileType=KEY_PROFILE, sampleRate=RATE, frameSize=FRAME,
                                               hopSize=HOP)(audio)
@@ -1314,6 +1459,7 @@ def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None):
         "melody_notes": mel_notes,
         "structure_debug": sec_debug,
         "lyric_repeats": lyr,
+        "genre": gn,
         "sample_rate": RATE,
         "source_sample_rate": SRC_RATE,
         "duration": r3(duration),
@@ -1325,10 +1471,14 @@ def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None):
 
 def main(argv):
     model, use_model, use_words, rest = TEMPO_CNN_MODEL, False, False, list(argv[1:])
-    usage = "usage: rhythm_worker.py [--tempo-cnn-model /abs/model.pb] [--words-stdin] /absolute/path.wav"
+    genre_dir, use_genre = GENRE_DIR, False
+    usage = ("usage: rhythm_worker.py [--tempo-cnn-model /abs/model.pb] [--genre-models /abs/dir] [--words-stdin] "
+             "/absolute/path.wav")
     while len(rest) > 1:
         if rest[0] == "--tempo-cnn-model" and not use_model and len(rest) > 2 and os.path.isabs(rest[1]):
             model, use_model, rest = rest[1], True, rest[2:]
+        elif rest[0] == "--genre-models" and not use_genre and len(rest) > 2 and os.path.isabs(rest[1]):
+            genre_dir, use_genre, rest = rest[1], True, rest[2:]
         elif rest[0] == "--words-stdin" and not use_words:
             use_words, rest = True, rest[1:]
         else:
@@ -1348,7 +1498,7 @@ def main(argv):
     except (ValueError, OSError):
         pass
     try:
-        out = analyze(rest[0], model, words, words_reason)
+        out = analyze(rest[0], model, words, words_reason, genre_dir)
     except Fail as e:
         fail_out(e.code, e.message)
     except ImportError as e:

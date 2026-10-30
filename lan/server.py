@@ -56,7 +56,7 @@ CONFIG_KEYS = {"bind", "port", "allow", "clients", "cert", "key", "ml", "root", 
                "launchd_logs", "test_mode", "limits", "test_ready_file", "rhythm"}
 RHYTHM_KEYS = {"python", "worker"}
 RHYTHM_DIR = "results-rhythm"  # under root: <result_id>.json, 0600, written atomically
-RHYTHM_LAYERS = ("beats", "chords", "energy", "melody")
+RHYTHM_LAYERS = ("beats", "chords", "energy", "melody", "genre")
 RHYTHM_MAX_BEATS = 5000
 RHYTHM_MAX_CHORDS = 20000
 RHYTHM_MAX_KEY_SECTIONS = 64  # worker 0.2.0 emits <= 30 (20 s windows over 600 s)
@@ -910,7 +910,8 @@ def check_rhythm(v):
             if not isinstance(e, dict) or not _num(e.get("bpm"), 0, 1000) or not _num(e.get("share"), 0, 1):
                 return None
         if (not _rhythm_v2_ok(v, dur) or not _rhythm_v21_ok(v) or not _rhythm_v22_ok(v)
-                or not _rhythm_v30_ok(v, dur) or not _rhythm_v40_ok(v, dur) or not _rhythm_v43_ok(v, dur)):
+                or not _rhythm_v30_ok(v, dur) or not _rhythm_v40_ok(v, dur) or not _rhythm_v43_ok(v, dur)
+                or not _rhythm_v50_ok(v, dur)):
             return None
         for k in ("worker_sha256", "words_sha256"):  # server-added identities
             if k in v and not (isinstance(v[k], str) and RE_HEX64.match(v[k])):
@@ -1372,6 +1373,80 @@ def _rhythm_v43_ok(v, dur):
     return "lyric_repeats" not in v or _lyric_repeats_ok(v["lyric_repeats"], dur)
 
 
+GENRE_KEYS = {"done": {"status", "model", "model_sha256", "embedding_model", "embedding_sha256", "reliability",
+                       "patches", "silent_patches", "patch_hop_s", "window_s", "top", "parents", "windows", "note"},
+              "unavailable": {"status", "reason"}, "failed": {"status", "code"}}
+GENRE_SEP = "---"  # class names are "Parent---Style"
+GENRE_MAX_PATCHES = 700  # worker 0.5.0: one patch per 0.992 s, 603 for 600 s
+GENRE_MAX_WINDOWS = 21  # 30 s windows over <= 600.5 s
+# unavailable reasons that cannot change for the same audio and worker; every other unavailable (a model file
+# missing, unreadable or not matching its pin) and failed inference_error/dependency_missing are recomputed
+GENRE_FINAL_REASONS = frozenset(("too_short", "no_audible_patches"))
+
+
+def _genre_scores_ok(rows, key, n):
+    """Up to n {key, score} rows, distinct names, scores 0..1 in non-increasing order."""
+    if not (isinstance(rows, list) and len(rows) <= n):
+        return False
+    prev, seen = 1.0, set()
+    for r in rows:
+        if not (isinstance(r, dict) and set(r) == {key, "score"} and _short_str(r[key], 64) and r[key] not in seen
+                and _num(r["score"], 0, prev)):
+            return False
+        if key == "style" and not (r[key].count(GENRE_SEP) == 1 and all(r[key].split(GENRE_SEP))):
+            return False
+        seen.add(r[key])
+        prev = r["score"]
+    return True
+
+
+def _genre_ok(d, dur, duration):
+    """genre (worker 0.5.0): exact key set per status; done: top 1..5 styles and 1..5 parents sorted by score, the
+    best parent's score = the best style's (parent score = max over its styles) and no listed style above its
+    listed parent, windows contiguous 0..duration with top 3 (empty exactly when the window had no audible patch),
+    window patch counts summing to the audible patches."""
+    if not isinstance(d, dict) or d.get("status") not in GENRE_KEYS or set(d) != GENRE_KEYS[d["status"]]:
+        return False
+    if d["status"] != "done":
+        c = d["reason" if d["status"] == "unavailable" else "code"]
+        return isinstance(c, str) and bool(RE_CODE.match(c))
+    top, par, wins = d["top"], d["parents"], d["windows"]
+    if not (_short_str(d["model"], 64) and _short_str(d["embedding_model"], 64) and _short_str(d["note"], 200)
+            and all(isinstance(d[k], str) and RE_HEX64.match(d[k]) for k in ("model_sha256", "embedding_sha256"))
+            and d["reliability"] == "model_estimate" and _count(d["patches"], GENRE_MAX_PATCHES)
+            and _count(d["silent_patches"], GENRE_MAX_PATCHES) and d["silent_patches"] < d["patches"]
+            and _num(d["patch_hop_s"], 0.01, 60) and _num(d["window_s"], 1, 600)
+            and _genre_scores_ok(top, "style", 5) and _genre_scores_ok(par, "parent", 5) and top and par
+            and par[0]["score"] == top[0]["score"]
+            and isinstance(wins, list) and 1 <= len(wins) <= GENRE_MAX_WINDOWS):
+        return False
+    ps = {p["parent"]: p["score"] for p in par}
+    if any(t["score"] > ps.get(t["style"].split(GENRE_SEP)[0], 1.0) for t in top):
+        return False
+    prev, used = 0.0, 0
+    for w in wins:
+        if not (isinstance(w, dict) and set(w) == {"start", "end", "patches", "top"} and w["start"] == prev
+                and _num(w["end"], 0, dur) and w["end"] > w["start"] and _count(w["patches"], GENRE_MAX_PATCHES)
+                and _genre_scores_ok(w["top"], "style", 3) and (len(w["top"]) == 0) == (w["patches"] == 0)):
+            return False
+        prev, used = w["end"], used + w["patches"]
+    return used == d["patches"] - d["silent_patches"] and abs(prev - duration) <= 0.002
+
+
+def _rhythm_v50_ok(v, dur):
+    """genre (worker 0.5.0); absent in older files, valid when present."""
+    return "genre" not in v or _genre_ok(v["genre"], dur, v["duration"])
+
+
+def genre_view(g):
+    """Summary form of a stored genre: windows only from /timeline layer=genre (window_count instead)."""
+    if not isinstance(g, dict) or g.get("status") != "done":
+        return g
+    out = {k: x for k, x in g.items() if k != "windows"}
+    out["window_count"] = len(g["windows"])
+    return out
+
+
 def lyric_words_payload(data, rid):
     """ml result file bytes (or None when missing) -> the --words-stdin object for the worker: {"words": [[text,
     start, end], ...]} or {"words": null, "reason": code}. Strict: any malformed word makes the whole list invalid."""
@@ -1419,12 +1494,14 @@ TEMPO_CNN_RETRY_CODES = frozenset(("inference_error", "dependency_missing"))
 
 def _rhythm_retry(v):
     """True when a stored file with the current worker must still be recomputed: an optional stage (tempo_cnn or,
-    worker 0.4.0+, melody, or 0.4.3 lyric_repeats) ended in an outcome whose cause can change without a worker
-    change."""
-    m, ly = v.get("melody"), v.get("lyric_repeats")
+    worker 0.4.0+, melody, or 0.4.3 lyric_repeats, or 0.5.0 genre) ended in an outcome whose cause can change
+    without a worker change."""
+    m, ly, g = v.get("melody"), v.get("lyric_repeats"), v.get("genre")
     return (_tempo_cnn_retry(v) or (isinstance(m, dict) and m.get("status") == "failed"
                                     and m.get("code") in MELODY_RETRY_CODES)
-            or (isinstance(ly, dict) and ly.get("status") == "unavailable" and ly.get("reason") in LYRIC_RETRY_REASONS))
+            or (isinstance(ly, dict) and ly.get("status") == "unavailable" and ly.get("reason") in LYRIC_RETRY_REASONS)
+            or (isinstance(g, dict) and ((g.get("status") == "unavailable" and g.get("reason") not in GENRE_FINAL_REASONS)
+                                         or (g.get("status") == "failed" and g.get("code") in TEMPO_CNN_RETRY_CODES))))
 
 
 def _tempo_cnn_retry(v):
@@ -1439,8 +1516,9 @@ def rhythm_summary(v, overview=None):
     """Compact view for analyze and /report; beats and chord rows stay in the stored file (/timeline).
     Fields from worker 0.2.0 (bpm_alternatives[_note], key_sections, key_change_count, chords_grid) and 0.2.1
     (double_tempo_evidence[_note]) and 0.2.2 (tempo_cnn) and 0.3.0 (energy_summary, sections, sections_method,
-    sections_reliability) and 0.4.0 (melody) and 0.4.3 (lyric_repeats) are null when the stored file predates them.
-    Energy values and melody notes come only from /timeline; structure_debug stays in the stored file.
+    sections_reliability) and 0.4.0 (melody) and 0.4.3 (lyric_repeats) and 0.5.0 (genre) are null when the stored
+    file predates them. Energy values, melody notes and genre windows come only from /timeline; structure_debug
+    stays in the stored file.
     `overview` is computed by the caller (App.rhythm_overview, read time, never stored); null before 0.4.3."""
     return {"status": "done", "bpm": v["bpm"], "bpm_confidence": v["bpm_confidence"],
             "bpm_confidence_band": confidence_band(v["bpm_confidence"]),
@@ -1454,6 +1532,7 @@ def rhythm_summary(v, overview=None):
             "energy_summary": v.get("energy_summary"), "sections": v.get("sections"),
             "sections_method": v.get("sections_method"), "sections_reliability": v.get("sections_reliability"),
             "melody": v.get("melody"), "lyric_repeats": v.get("lyric_repeats"), "overview": overview,
+            "genre": genre_view(v.get("genre")),
             "downbeats": v["downbeats"],
             "duration": v["duration"], "tool": v["tool"],
             "warnings": v["warnings"]}
@@ -1942,6 +2021,9 @@ def rhythm_page(rid, v, layer, start, end, cursor, limit):
         e = v["energy"]
         rows = [{"time": round(i * e["step_s"], 3), "value": x} for i, x in enumerate(e["values"])
                 if start <= i * e["step_s"] <= end]
+    elif layer == "genre":  # 30 s windows overlapping [start, end]; none unless the genre status is done
+        g = v["genre"]
+        rows = [w for w in g.get("windows", []) if w["end"] >= start and w["start"] <= end]
     else:
         src = v["melody_notes"] if layer == "melody" else v["chords"]
         rows = [c for c in src if c["end"] >= start and c["start"] <= end]
@@ -1964,6 +2046,9 @@ def rhythm_page(rid, v, layer, start, end, cursor, limit):
     elif layer == "melody":
         out["layer_status"] = v["melody"]["status"]
         out["reliability"] = "low_reference"
+    elif layer == "genre":
+        out["layer_status"] = v["genre"]["status"]
+        out["reliability"] = "model_estimate"
     return out
 
 
@@ -2727,7 +2812,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(200, v)
 
     def rhythm_timeline(self, app, rid, q):
-        """layer=beats|chords|energy|melody, served from the stored rhythm file with the native range/limit/cursor rules."""
+        """layer=beats|chords|energy|melody|genre, served from the stored rhythm file with the native range/limit/cursor rules."""
         vals = {}
         for k, default in (("start", 0.0), ("end", 600.0)):
             if k in q:
@@ -2758,6 +2843,8 @@ class Handler(BaseHTTPRequestHandler):
         if q["layer"] == "energy" and "energy" not in v:  # stored before worker 0.3.0: that layer is not stored
             raise HttpError("rhythm_not_found")
         if q["layer"] == "melody" and "melody_notes" not in v:  # stored before worker 0.4.0
+            raise HttpError("rhythm_not_found")
+        if q["layer"] == "genre" and "genre" not in v:  # stored before worker 0.5.0
             raise HttpError("rhythm_not_found")
         self.send_json(200, rhythm_page(rid, v, q["layer"], vals["start"], vals["end"], cursor, limit))
 

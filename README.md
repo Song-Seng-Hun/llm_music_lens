@@ -85,9 +85,10 @@ npm run dev -- --host 127.0.0.1
 | [Whisper](https://huggingface.co/Xenova/whisper-base) (`Xenova/whisper-base`·`whisper-small`, 필요할 때 브라우저가 내려받음) | 가사 단어 전사 (선택) | Apache-2.0 (모델 카드 기준) |
 | [SOME](https://github.com/openvpi/SOME) (모델은 따로 준비) | 솔로 보컬 음표 (선택) | 코드 MIT, 모델 CC BY-NC-SA 4.0 |
 | [Essentia](https://essentia.upf.edu/)와 TempoCNN 모델 (Mac 서버에 따로 설치) | 선택 리듬 층 | Essentia AGPL-3.0, 모델 조건은 확인 안 됨 |
+| Essentia Discogs-EffNet·genre_discogs400 모델 (Mac 서버에 따로 설치) | 선택 리듬 층의 장르 추정 | CC BY-NC-ND 4.0 |
 | Transformers.js · ONNX Runtime Web · TensorFlow.js | 브라우저에서 모델 실행 | Apache-2.0 · MIT · Apache-2.0 |
 
-- SOME 모델에는 비상업적 이용 조건(CC BY-NC-SA 4.0)이 있습니다.
+- SOME 모델(CC BY-NC-SA 4.0)과 Discogs 장르 모델(CC BY-NC-ND 4.0)에는 비상업적 이용 조건이 있습니다.
 - 포함된 구성의 라이선스 원문은 [public/licenses/](public/licenses/README.md)와 [models/beat-this/](models/beat-this/README.md)에 있습니다.
 
 ## 더 보기

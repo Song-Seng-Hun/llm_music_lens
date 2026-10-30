@@ -85,9 +85,10 @@ Once the site is published and connected to an AI, the AI calls these tools duri
 | [Whisper](https://huggingface.co/Xenova/whisper-base) (`Xenova/whisper-base` or `whisper-small`, downloaded by the browser when needed) | Lyric word transcription (optional) | Apache-2.0 (per the model card) |
 | [SOME](https://github.com/openvpi/SOME) (model prepared separately) | Solo-voice notes (optional) | Code MIT, model CC BY-NC-SA 4.0 |
 | [Essentia](https://essentia.upf.edu/) and a TempoCNN model (installed separately on the Mac server) | Optional rhythm layer | Essentia AGPL-3.0; model terms not verified |
+| Essentia Discogs-EffNet and genre_discogs400 models (installed separately on the Mac server) | Genre estimate in the optional rhythm layer | CC BY-NC-ND 4.0 |
 | Transformers.js · ONNX Runtime Web · TensorFlow.js | Running models in the browser | Apache-2.0 · MIT · Apache-2.0 |
 
-- The SOME model may only be used non-commercially (CC BY-NC-SA 4.0).
+- The SOME model (CC BY-NC-SA 4.0) and the Discogs genre models (CC BY-NC-ND 4.0) may only be used non-commercially.
 - License texts for the included components are in [public/licenses/](public/licenses/README.md) and [models/beat-this/](models/beat-this/README.md).
 
 ## More
