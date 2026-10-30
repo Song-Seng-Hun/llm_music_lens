@@ -522,7 +522,7 @@ def load_config(path):
     try:
         allow = ipaddress.ip_network(raw.get("allow"), strict=True)
     except (TypeError, ValueError):
-        raise ConfigError("allow must be an IPv4 network like 172.30.1.0/24")
+        raise ConfigError("allow must be an IPv4 network like 192.0.2.0/24")
     if allow.version != 4:
         raise ConfigError("allow must be IPv4")
     if not test_mode:

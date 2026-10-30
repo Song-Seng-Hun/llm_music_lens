@@ -1234,7 +1234,7 @@ class RhythmConfigTest(unittest.TestCase):
 
     def test_absent_ok_and_valid(self):
         self.assertIsNone(self.load()["rhythm"])
-        prod = self.load(test_mode=False, bind=["en0"], port=8765, allow="172.30.1.0/24")
+        prod = self.load(test_mode=False, bind=["en0"], port=8765, allow="192.0.2.0/24")
         self.assertIsNone(prod["rhythm"])
         cfg = self.load(rhythm={"python": PY, "worker": self.fw.path})
         self.assertEqual(cfg["rhythm"], {"python": PY, "worker": self.fw.path})

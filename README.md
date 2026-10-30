@@ -45,14 +45,14 @@ The canonical string is the UTF-8 bytes of 8 fields joined by LF, with no traili
 
 ## Windows client note (name resolution)
 
-On Windows, Node 22 `getaddrinfo` may return `ENOTFOUND` for `songseunghun-ui-MacStudio.local`. The client may then
+On Windows, Node 22 `getaddrinfo` may return `ENOTFOUND` for `<mac-host>.local`. The client may then
 resolve the name through the Windows DnsClient (`Resolve-DnsName -Type A`) or an optional configured address list.
 It keeps only A records inside the `allow` /24, connects by IP with TLS `servername` set to the `.local` name, and
 keeps the CA, the hostname check and the certificate pin unchanged.
 
 ## User-only install steps (not done; commands written, never run)
 
-Do these only after approving an always-on listener (RunAtLoad + KeepAlive, en0/en1, port 8765, 172.30.1.0/24).
+Do these only after approving an always-on listener (RunAtLoad + KeepAlive, en0/en1, port 8765, 192.0.2.0/24).
 
 1. Copy the code:
    ```sh
@@ -61,12 +61,12 @@ Do these only after approving an always-on listener (RunAtLoad + KeepAlive, en0/
    ```
 2. Create the TLS certificate and key by hand. They must have a DNS SAN and **named-curve** P-256 parameters.
    The system LibreSSL writes explicit curve parameters by default, and Python 3.9's TLS then fails with
-   "no shared cipher". Run:
+   "no shared cipher". Run (`<mac-host>` is `scutil --get LocalHostName`; addresses and LAN ranges in these docs are placeholders, the real ones live only in the local `api.json` and client config):
    ```sh
    mkdir -p ~/.music-lens/tls ~/.music-lens/keys && chmod 700 ~/.music-lens ~/.music-lens/tls ~/.music-lens/keys
    /usr/bin/openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -pkeyopt ec_param_enc:named_curve \
-     -days 825 -nodes -subj "/CN=songseunghun-ui-MacStudio.local" \
-     -addext "subjectAltName=DNS:songseunghun-ui-MacStudio.local" \
+     -days 825 -nodes -subj "/CN=<mac-host>.local" \
+     -addext "subjectAltName=DNS:<mac-host>.local" \
      -keyout ~/.music-lens/tls/server.key -out ~/.music-lens/tls/server.pem
    chmod 600 ~/.music-lens/tls/server.key
    /usr/bin/openssl x509 -in ~/.music-lens/tls/server.pem -noout -fingerprint -sha256   # the pin for Windows
