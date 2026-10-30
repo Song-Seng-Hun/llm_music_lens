@@ -1,5 +1,12 @@
 <p align="center"><a href="README.md">한국어</a> · <b>English</b> · <a href="README.ja.md">日本語</a></p>
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/banner-dark.svg">
+    <img src="assets/banner-light.svg" width="640" alt="Pixel-art banner: on an analysis screen a playhead runs over a waveform, beat marks and a piano roll at 120 BPM, lighting each beat and note and showing the chords C, Am, F and G, then reports BPM 120 and the key C major. Below, a speaker pulses on the beat and Claude nods along in headphones, then receives the report.">
+  </picture>
+</p>
+
 # Music Lens — a music analysis room
 
 A program that pulls time, beat, harmony, note, word and energy cues out of audio and hands them to an **LLM as evidence for music analysis**. The same material can be reused for composition references, style reading and video direction. The goal is **a tool where the Sites server does the analysis and the AI team receives the results over MCP**. It is being built so that it needs neither a personal model API key nor an open browser.

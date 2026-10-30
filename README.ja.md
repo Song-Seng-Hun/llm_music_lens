@@ -1,5 +1,12 @@
 <p align="center"><a href="README.md">한국어</a> · <a href="README.en.md">English</a> · <b>日本語</b></p>
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/banner-dark.svg">
+    <img src="assets/banner-light.svg" width="640" alt="ピクセルアートのバナー。分析画面で再生バーが 120 BPM で波形・拍の印・ピアノロールの上を進み、拍と音符を光らせて C・Am・F・G のコードを表示したあと、BPM 120 とハ長調を報告します。下ではスピーカーが拍に合わせて鳴り、ヘッドホンをした Claude がうなずきながら分析結果を受け取ります。">
+  </picture>
+</p>
+
 # Music Lens — 音楽分析室
 
 音源から時間・拍・和音・音符・単語・エネルギーの手がかりを取り出し、**LLM の音楽分析の根拠**として渡すプログラムです。作曲の参考、スタイルの解釈、映像演出などで同じ資料を使い回せます。目標は **Sites のサーバーが分析し、AI チームが MCP で結果を受け取るツール** です。個人のモデル API キーや開いたブラウザーを必要としない方向で開発しています。

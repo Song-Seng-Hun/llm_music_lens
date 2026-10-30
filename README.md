@@ -1,5 +1,12 @@
 <p align="center"><b>한국어</b> · <a href="README.en.md">English</a> · <a href="README.ja.md">日本語</a></p>
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/banner-dark.svg">
+    <img src="assets/banner-light.svg" width="640" alt="픽셀아트 배너. 분석 화면에서 재생 막대가 120 BPM으로 파형·박 표시·피아노롤을 지나가며 박과 음표를 밝히고 C·Am·F·G 코드를 띄운 뒤, BPM 120과 C 장조를 보고합니다. 아래에서는 스피커가 박자에 맞춰 울리고, 헤드폰을 쓴 Claude가 고개를 끄덕이다 분석 결과를 받습니다.">
+  </picture>
+</p>
+
 # Music Lens — 음악 분석실
 
 음원에서 시간·박자·화음·음표·단어·에너지 단서를 뽑아 **LLM의 음악 분석 근거**로 제공하는 프로그램입니다. 작곡 레퍼런스, 스타일 해석, 영상 연출 등에서 같은 자료를 재사용할 수 있습니다. 목표는 **Sites 서버가 분석하고 AI 팀이 MCP로 결과를 받는 도구**입니다. 개인 모델 API 키나 열린 브라우저를 요구하지 않는 방향으로 개발합니다.
