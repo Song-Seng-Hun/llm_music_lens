@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { MAX_DURATION, summaryOf, timelineOf, type MusicReport } from "./report.ts";
+import { MAX_DURATION, MAX_REPORT_BYTES, reportSchema, summaryOf, timelineOf, type MusicReport } from "./report.ts";
 import { AppError } from "./validation.ts";
 import { contourSummary } from "./pitch-contour.ts";
 import { TIMING_TOOL, timingInputSchema } from "./music-timing.ts";
@@ -10,13 +10,21 @@ export const MCP_TOOLS = [
   TIMING_TOOL,
   STRUCTURE_TOOL,
   CONTINUITY_TOOL,
+  { name: "import_music_report", description: "Save one <=1.9 MB Music Lens JSON report to the authenticated user's private library. Accepts local Whisper/emotion exports; no audio upload, URL fetch or hosted emotion inference. Imported estimates remain unvalidated. Returns only the saved summary; read bounded timelines separately.", inputSchema: { type: "object", properties: { report: { type: "object", description: "Complete music-lens/1 export, optionally with music-lens-local/2 localAnalysis." } }, required: ["report"], additionalProperties: false }, annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false } },
   { name: "list_music_reports", description: "List up to 30 music reports saved by the authenticated user. No audio, lyrics or credentials returned.", inputSchema: { type: "object", properties: {}, additionalProperties: false }, annotations: { readOnlyHint: true, openWorldHint: false } },
   { name: "get_music_report", description: "Read a bounded summary and evidence-linked musical interpretations. All estimates remain unvalidated; a report is not precise transcription proof.", inputSchema: { type: "object", properties: { id: { type: "string", format: "uuid" } }, required: ["id"], additionalProperties: false }, annotations: { readOnlyHint: true, openWorldHint: false } },
-  { name: "get_music_timeline", description: "Read <=120 seconds: words, beat offsets, note/chord candidates, band attacks, dynamics, transcript density, energy, tempo support and 1 s acoustic texture/band balance. Each layer <=200; inspect total/truncated. Solo-vocal native pitchContour frames use nextStart continuation with the same end; null=model-unvoiced, not silence. Pulse support is not meter; overlap is not vocal note identity; missing is unknown. Smaller intervals recover truncated layers.", inputSchema: { type: "object", properties: { id: { type: "string", format: "uuid" }, start: { type: "number", minimum: 0 }, end: { type: "number", maximum: 600 } }, required: ["id", "start", "end"], additionalProperties: false }, annotations: { readOnlyHint: true, openWorldHint: false } },
+  { name: "get_music_timeline", description: "Read <=120 seconds: browser words, separate localWords/localEmotion native estimates, beat offsets, note/chord candidates, band attacks, dynamics, transcript density, energy, tempo support and 1 s acoustic texture/band balance. Each layer <=200; inspect total/truncated and narrow the range if needed. Local word probabilities are uncalibrated; arousal scales depend on voice/music mode. Missing is unknown, not neutral. Solo-vocal pitchContour uses nextStart continuation; null=model-unvoiced, not silence. No certified note identity or emotion accuracy.", inputSchema: { type: "object", properties: { id: { type: "string", format: "uuid" }, start: { type: "number", minimum: 0 }, end: { type: "number", maximum: 600 } }, required: ["id", "start", "end"], additionalProperties: false }, annotations: { readOnlyHint: true, openWorldHint: false } },
 ];
 
-export type McpServices = { list: () => Promise<unknown>; get: (id: string) => Promise<MusicReport>; analyzeTiming?: (args: unknown) => Promise<unknown> };
+export type McpServices = { list: () => Promise<unknown>; get: (id: string) => Promise<MusicReport>; analyzeTiming?: (args: unknown) => Promise<unknown>; importReport?: (report: MusicReport) => Promise<MusicReport> };
 export async function callMusicTool(name: string, args: unknown, services: McpServices) {
+  if (name === "import_music_report") {
+    const { report } = z.object({ report: z.unknown() }).strict().parse(args);
+    if (new TextEncoder().encode(JSON.stringify(report)).byteLength > MAX_REPORT_BYTES) throw new AppError(413, "REPORT_TOO_LARGE", "분석 JSON은 1.9 MB 이하여야 합니다.");
+    const parsed = reportSchema.parse(report);
+    if (!services.importReport) throw new AppError(503, "IMPORT_UNAVAILABLE", "이 서버에서 결과 저장을 사용할 수 없습니다.");
+    return summaryOf(await services.importReport(parsed));
+  }
   if (name === "compose_music_timeline") return composeMusicTimeline(args);
   if (name === "analyze_music_structure") return analyzeMusicStructure(args);
   if (name === "analyze_music_timing") {
@@ -49,3 +57,4 @@ export async function callMusicTool(name: string, args: unknown, services: McpSe
   }
   throw new AppError(400, "UNKNOWN_TOOL", "지원하지 않는 도구입니다.");
 }
+
