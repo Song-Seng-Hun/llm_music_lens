@@ -97,6 +97,6 @@ One actual600s comparator call54.9471ms (guard500ms), fixed real-input extractio
 - [vocadito v3](https://zenodo.org/records/5578807): human unaccompanied singing and two musician annotations.
 - [ChoraleBricks1.0.1](https://zenodo.org/records/15463260): wind quartet performance/reference data, CC BY4.0. Local mixtures preserve source timing; score MIDI is not assumed to be aligned performance truth.
 - [SOME preparation and license](vocal-specialist.md): code and weights have separate licenses; released weights are CC BY-NC-SA4.0. Weights are downloaded explicitly, never in this Git history.
-- PinocchioP/Yamaha excerpts were local investigation inputs. No creator-aligned PinocchioP note ground truth was verified. No sample audio or proprietary annotation is redistributed with this repository.
+- Officially released Vocaloid excerpts were local investigation inputs. No creator-aligned note ground truth was verified for them. No sample audio or proprietary annotation is redistributed with this repository.
 
 Future comparison follows Pilot→Confirm→Close with frozen splits, metrics, candidates, budget and a meaningful-gain threshold. Existing failures remain failures; deployment and real team MCP authentication still require separate verification.
