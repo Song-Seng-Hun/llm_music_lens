@@ -1,7 +1,7 @@
 {
   "bind": ["en0", "en1"],
   "port": 8765,
-  "allow": "172.30.1.0/24",
+  "allow": "192.0.2.0/24",
   "clients": {
     "claude-window": "/Users/songseunghun/.music-lens/keys/claude-window.key",
     "codex-window": "/Users/songseunghun/.music-lens/keys/codex-window.key"

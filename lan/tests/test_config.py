@@ -35,19 +35,19 @@ class ConfigTest(unittest.TestCase):
         self.assertTrue(cfg["test_mode"])
 
     def test_production_refuses_loopback_and_any(self):
-        self.assertRefused(test_mode=False, bind=["127.0.0.1"], port=8765, allow="172.30.1.0/24")
-        self.assertRefused(test_mode=False, bind=["0.0.0.0"], port=8765, allow="172.30.1.0/24")
+        self.assertRefused(test_mode=False, bind=["127.0.0.1"], port=8765, allow="192.0.2.0/24")
+        self.assertRefused(test_mode=False, bind=["0.0.0.0"], port=8765, allow="192.0.2.0/24")
         self.assertRefused(test_mode=False, bind=["en0"], port=8765, allow="127.0.0.0/8")
         self.assertRefused(test_mode=False, bind=["en0"], port=8765, allow="0.0.0.0/0")
         self.assertRefused(test_mode=False, bind=["en0"], port=8765, allow="8.8.8.0/24")
         self.assertRefused(test_mode=False, bind=["en0"], port=8765, allow="172.16.0.0/12")
         self.assertRefused(test_mode=True, bind=["0.0.0.0"])
-        cfg = self.load(test_mode=False, bind=["en0", "en1"], port=8765, allow="172.30.1.0/24")
+        cfg = self.load(test_mode=False, bind=["en0", "en1"], port=8765, allow="192.0.2.0/24")
         self.assertFalse(cfg["test_mode"])
 
     def test_production_refuses_test_only_keys(self):
-        self.assertRefused(test_mode=False, bind=["en0"], port=8765, allow="172.30.1.0/24", limits={"skew": 5})
-        self.assertRefused(test_mode=False, bind=["en0"], port=0, allow="172.30.1.0/24")
+        self.assertRefused(test_mode=False, bind=["en0"], port=8765, allow="192.0.2.0/24", limits={"skew": 5})
+        self.assertRefused(test_mode=False, bind=["en0"], port=0, allow="192.0.2.0/24")
 
     def test_file_modes_and_keys(self):
         self.assertRefused(mode=0o644)
@@ -79,14 +79,14 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(p.returncode, 2)
 
     def test_address_discovery_dedup_and_allow(self):
-        cfg = self.load(test_mode=False, bind=["en0", "en1", "en2"], port=8765, allow="172.30.1.0/24")
-        table = {"en0": ipaddress.ip_address("172.30.1.22"), "en1": ipaddress.ip_address("172.30.1.22"),
+        cfg = self.load(test_mode=False, bind=["en0", "en1", "en2"], port=8765, allow="192.0.2.0/24")
+        table = {"en0": ipaddress.ip_address("192.0.2.22"), "en1": ipaddress.ip_address("192.0.2.22"),
                  "en2": ipaddress.ip_address("10.0.0.5")}
         log = Log()
-        self.assertEqual(server.discover_addresses(cfg, log, lookup=table.get), ["172.30.1.22"])
+        self.assertEqual(server.discover_addresses(cfg, log, lookup=table.get), ["192.0.2.22"])
         self.assertIn({"event": "bind_skip", "iface": "en2", "reason": "outside_allow"}, log.events)
-        table = {"en0": None, "en1": ipaddress.ip_address("172.30.1.9"), "en2": None}
-        self.assertEqual(server.discover_addresses(cfg, Log(), lookup=table.get), ["172.30.1.9"])
+        table = {"en0": None, "en1": ipaddress.ip_address("192.0.2.9"), "en2": None}
+        self.assertEqual(server.discover_addresses(cfg, Log(), lookup=table.get), ["192.0.2.9"])
         self.assertEqual(server.discover_addresses(cfg, Log(), lookup=lambda n: None), [])
 
     def test_no_address_exits(self):
