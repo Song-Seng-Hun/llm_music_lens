@@ -76,6 +76,20 @@ Once the site is published and connected to an AI, the AI calls these tools duri
 - Instruments, genre and emotion are not decided automatically. Reading the style is the AI's job, citing sources and time ranges.
 - Publishing the site, connecting the team and per-user report access have not yet been confirmed over a real authenticated connection.
 
+## Models and licenses
+
+| Component | Used for | License |
+|---|---|---|
+| [Beat This!](https://github.com/CPJKU/beat_this) small0 (converted to ONNX, included in `models/beat-this/`) | Server beats and BPM | MIT |
+| [Spotify Basic Pitch](https://github.com/spotify/basic-pitch-ts) (with its model) | Notes in the browser | Apache-2.0 |
+| [Whisper](https://huggingface.co/Xenova/whisper-base) (`Xenova/whisper-base` or `whisper-small`, downloaded by the browser when needed) | Lyric word transcription (optional) | Apache-2.0 (per the model card) |
+| [SOME](https://github.com/openvpi/SOME) (model prepared separately) | Solo-voice notes (optional) | Code MIT, model CC BY-NC-SA 4.0 |
+| [Essentia](https://essentia.upf.edu/) and a TempoCNN model (installed separately on the Mac server) | Optional rhythm layer | Essentia AGPL-3.0; model terms not verified |
+| Transformers.js · ONNX Runtime Web · TensorFlow.js | Running models in the browser | Apache-2.0 · MIT · Apache-2.0 |
+
+- The SOME model may only be used non-commercially (CC BY-NC-SA 4.0).
+- License texts for the included components are in [public/licenses/](public/licenses/README.md) and [models/beat-this/](models/beat-this/README.md).
+
 ## More
 
 - [Full guide](docs/guide.md): each server tool, the browser analysis steps, connecting over MCP, the full scope of input and accuracy, and development notes

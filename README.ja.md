@@ -76,6 +76,20 @@ npm run dev -- --host 127.0.0.1
 - 楽器・ジャンル・感情は自動では判断しません。スタイルの解釈は、出所と時間範囲を挙げる AI の役目です。
 - サイトの公開、チームとの接続、ユーザーごとのレポート参照は、実際の認証付き接続ではまだ確認していません。
 
+## 使用モデルとライセンス
+
+| 構成 | 使う場所 | ライセンス |
+|---|---|---|
+| [Beat This!](https://github.com/CPJKU/beat_this) small0（ONNX に変換して `models/beat-this/` に同梱） | サーバーの拍・BPM | MIT |
+| [Spotify Basic Pitch](https://github.com/spotify/basic-pitch-ts)（モデル同梱） | ブラウザーの音符 | Apache-2.0 |
+| [Whisper](https://huggingface.co/Xenova/whisper-base)（`Xenova/whisper-base`・`whisper-small`、必要なときにブラウザーがダウンロード） | 歌詞の単語の書き起こし（任意） | Apache-2.0（モデルカードによる） |
+| [SOME](https://github.com/openvpi/SOME)（モデルは別途用意） | ソロボーカルの音符（任意） | コード MIT、モデル CC BY-NC-SA 4.0 |
+| [Essentia](https://essentia.upf.edu/) と TempoCNN モデル（Mac サーバーに別途インストール） | 任意のリズム層 | Essentia AGPL-3.0、モデルの条件は未確認 |
+| Transformers.js・ONNX Runtime Web・TensorFlow.js | ブラウザーでのモデル実行 | Apache-2.0・MIT・Apache-2.0 |
+
+- SOME モデルには非商用の条件（CC BY-NC-SA 4.0）があります。
+- 同梱した構成のライセンス原文は [public/licenses/](public/licenses/README.md) と [models/beat-this/](models/beat-this/README.md) にあります。
+
 ## もっと見る
 
 詳しい文書は英語です。
