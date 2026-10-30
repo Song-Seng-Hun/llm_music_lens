@@ -30,6 +30,7 @@ There are two ways to use it.
 - **Server analysis tools (MCP)**: beat and BPM, waveform dynamics, spectral texture, attacks against the beat, pitch of an isolated vocal, whole-song transition candidates, and a timeline joining several segments
 - **Save and import**: a per-user library for signed-in users (up to 1.9 MB of UTF-8 JSON). Audio is not stored.
 - **Mac analysis server (`lan/`)**: a separate server that lets AI teammates on the same router use the Mac's analysis through signed requests
+- **Genre estimate (Mac analysis server, optional)**: Discogs styles (e.g. Pop---J-pop) and parent genres (Pop, Rock, ...) with scores, for the whole song and every 30 s window.
 
 ## Quick start
 
@@ -56,6 +57,15 @@ When the page opens, choose a file and press **정밀 분석 시작** (start det
 2. Click the piano roll and words to check them against the original audio.
 3. Export the "AI 팀 전달문" or the JSON into your conversation with the AI. The on-screen summary and the hand-off note do not replace the full JSON.
 
+### Reading the genre estimate (Mac analysis server)
+
+When you ask the Mac analysis server for rhythm analysis as well (`rhythm=1`), the result carries `genre`.
+
+- **Whole song**: the top 5 Discogs styles (written "Parent---Style", e.g. `Pop---J-pop`) and the top 5 parent genres (Pop, Rock, Electronic, ...)
+- **Per 30 s window**: the top 3 styles of each window, fetched with the timeline call (`layer=genre`).
+- **Reading the scores**: each genre is scored on its own, so the scores do not add up to 1 and are not probabilities. Read the ranking, not the number.
+- The first pick is wrong for about one or two songs in four, but the right genre is usually in the top 3. Genres with blurry edges such as Pop, and per-window results, are less reliable. Measurements: [Genre estimate accuracy](docs/genre-accuracy.md).
+
 ### Let an AI analyze on the server (MCP)
 
 Once the site is published and connected to an AI, the AI calls these tools during the conversation.
@@ -73,7 +83,7 @@ Once the site is published and connected to an AI, the AI calls these tools duri
 - Every result is `accuracy: unvalidated`. Measurements on synthetic audio, public speech and a few songs do not stand for accuracy on real songs in general.
 - Notes can include accompaniment, overtones and false detections, so they are not a real score. Chords and keys are withheld when the evidence is thin.
 - Lyric transcription can make up or miss words in singing, fast rap and multiple voices.
-- Instruments, genre and emotion are not decided automatically. Reading the style is the AI's job, citing sources and time ranges.
+- Instruments and emotion are not decided automatically. Genre comes only as a model estimate from the Mac analysis server's rhythm layer, not from the web app or the site's MCP tools. Reading the style is the AI's job, citing sources and time ranges.
 - Publishing the site, connecting the team and per-user report access have not yet been confirmed over a real authenticated connection.
 
 ## Models and licenses
@@ -98,4 +108,5 @@ Once the site is published and connected to an AI, the AI calls these tools duri
 - Server tool docs: [beat and BPM](docs/server-timing.md) · [waveform](docs/waveform-dynamics.md) · [spectral texture](docs/spectral-texture.md) · [attacks against the beat](docs/attack-beat.md) · [vocal pitch](docs/server-vocal-pitch.md) · [song structure](docs/music-structure.md) · [timeline](docs/music-continuity.md)
 - [Preparing solo-voice analysis](docs/vocal-specialist.md)
 - [Mac analysis server](lan/README.md)
+- [Genre estimate accuracy](docs/genre-accuracy.md)
 - Development checks: `npm run typecheck`, `npm test`, `npm run build`
