@@ -5,7 +5,7 @@ description: "Listen to an audio file from the Windows PC through the Mac's Musi
 
 # music-lens-remote (Windows client)
 
-Client `E:\tools\music-lens-client\music-lens-client.mjs` (Node 22, no deps; owner Claude-Window), run from PowerShell as below. The Mac server (owner Claude-Mac) runs Music Lens local 0.2.1 at `songseunghun-ui-MacStudio.local:8765`, TLS with a pinned self-signed cert, LAN 172.30.1.0/24 only.
+Client `E:\tools\music-lens-client\music-lens-client.mjs` (Node 22, no deps; owner Claude-Window), run from PowerShell as below. The Mac server (owner Claude-Mac) runs Music Lens local 0.2.1 at `<mac-host>.local:8765`, TLS with a pinned self-signed cert, LAN 192.0.2.0/24 only (placeholders; the real host and LAN are in the client config).
 
 ## Identity
 - Config is fixed: `%USERPROFILE%\.music-lens\` = `client.json`, `mac-cert.pem`, `keys\mac.key`. No flag or env var picks another.
