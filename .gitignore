@@ -62,10 +62,8 @@ next-env.d.ts
 
 # Local research inputs/results are preserved here, not redistributed in Git.
 /evidence/
-/examples/pinocchiop-local/
-/examples/reference-song/
-/examples/reference-transfer/
-/examples/vocal-reference/
+/examples/*
+!/examples/d1/
 /.cache/
 *.tsbuildinfo
 __pycache__/
