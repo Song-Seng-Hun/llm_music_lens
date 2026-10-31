@@ -23,8 +23,10 @@
        The drain may be interrupted; kill timing and descendant termination are untested. See README Stopping. -->
   <key>ExitTimeOut</key>
   <integer>660</integer>
+  <!-- Standard, not Background: Background confines the job and its analyze children to efficiency cores with
+       throttled I/O (measured 2026-10-31: the same 261 s song took 230.9 s instead of 27.9 s). -->
   <key>ProcessType</key>
-  <string>Background</string>
+  <string>Standard</string>
   <key>WorkingDirectory</key>
   <string>/</string>
   <key>StandardOutPath</key>
