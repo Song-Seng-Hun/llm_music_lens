@@ -1,9 +1,9 @@
-<p align="center"><a href="README.md">한국어</a> · <a href="README.en.md">English</a> · <b>日本語</b></p>
+<p align="center"><a href="../README.md">한국어</a> · <a href="README.en.md">English</a> · <b>日本語</b></p>
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/banner-dark.svg">
-    <img src="assets/banner-light.svg" width="640" alt="ピクセルアートのバナー。分析画面で再生バーが 120 BPM で波形・拍の印・ピアノロールの上を進み、拍と音符を光らせて C・Am・F・G のコードを表示したあと、BPM 120 とハ長調を報告します。下ではスピーカーが拍に合わせて鳴り、ヘッドホンをした Claude がうなずきながら分析結果を受け取ります。">
+    <source media="(prefers-color-scheme: dark)" srcset="../assets/banner-dark.svg">
+    <img src="../assets/banner-light.svg" width="640" alt="ピクセルアートのバナー。分析画面で再生バーが 120 BPM で波形・拍の印・ピアノロールの上を進み、拍と音符を光らせて C・Am・F・G のコードを表示したあと、BPM 120 とハ長調を報告します。下ではスピーカーが拍に合わせて鳴り、ヘッドホンをした Claude がうなずきながら分析結果を受け取ります。">
   </picture>
 </p>
 
@@ -64,7 +64,7 @@ Mac 分析サーバーにリズム分析も頼むと（`rhythm=1`）、結果に
 - **曲全体**：Discogs のスタイル上位 5 件（`Pop---J-pop` のように「大分類---スタイル」）と大分類上位 5 件（Pop、Rock、Electronic など）
 - **30 秒区間ごと**：区間ごとのスタイル上位 3 件。タイムライン取得（`layer=genre`）で受け取ります。
 - **スコアの読み方**：ジャンルごとに別々に付けたモデル推定なので、合計は 1 にならず、確率でもありません。数値より順位を見てください。
-- 1 位は 4 曲に 1〜2 曲ほど外れますが、正解はたいてい上位 3 件に入ります。Pop のように境界があいまいなジャンルや 30 秒区間ごとの結果は信頼度が下がります。測定結果は [ジャンル推定の精度](docs/genre-accuracy.md) にあります。
+- 1 位は 4 曲に 1〜2 曲ほど外れますが、正解はたいてい上位 3 件に入ります。Pop のように境界があいまいなジャンルや 30 秒区間ごとの結果は信頼度が下がります。測定結果は [ジャンル推定の精度](genre-accuracy.md) にあります。
 
 ### AI がサーバーで直接分析する（MCP）
 
@@ -99,16 +99,16 @@ Mac 分析サーバーにリズム分析も頼むと（`rhythm=1`）、結果に
 | Transformers.js・ONNX Runtime Web・TensorFlow.js | ブラウザーでのモデル実行 | Apache-2.0・MIT・Apache-2.0 |
 
 - SOME モデル（CC BY-NC-SA 4.0）と Discogs ジャンルモデル（CC BY-NC-ND 4.0）には非商用の条件があります。
-- 同梱した構成のライセンス原文は [web/public/licenses/](web/public/licenses/README.md) と [web/models/beat-this/](web/models/beat-this/README.md) にあります。
+- 同梱した構成のライセンス原文は [web/public/licenses/](../web/public/licenses/README.md) と [web/models/beat-this/](../web/models/beat-this/README.md) にあります。
 
 ## もっと見る
 
 詳しい文書は英語です。
 
-- [全体のガイド](docs/guide.md)：サーバーツールごとの説明、ブラウザー分析の手順、MCP での接続、入力と精度の範囲の全体、開発メモ
-- [研究の状況と限界](docs/research-status.md)：測定の要約
-- サーバーツールの文書：[拍・BPM](docs/server-timing.md) · [波形](docs/waveform-dynamics.md) · [スペクトルの質感](docs/spectral-texture.md) · [拍に対するアタック](docs/attack-beat.md) · [ボーカルの音高](docs/server-vocal-pitch.md) · [曲の構成](docs/music-structure.md) · [時間軸](docs/music-continuity.md)
-- [ソロボーカル分析の準備](docs/vocal-specialist.md)
-- [Mac の分析サーバー](lan/README.md)
-- [ジャンル推定の精度](docs/genre-accuracy.md)
+- [全体のガイド](guide.md)：サーバーツールごとの説明、ブラウザー分析の手順、MCP での接続、入力と精度の範囲の全体、開発メモ
+- [研究の状況と限界](research-status.md)：測定の要約
+- サーバーツールの文書：[拍・BPM](server-timing.md) · [波形](waveform-dynamics.md) · [スペクトルの質感](spectral-texture.md) · [拍に対するアタック](attack-beat.md) · [ボーカルの音高](server-vocal-pitch.md) · [曲の構成](music-structure.md) · [時間軸](music-continuity.md)
+- [ソロボーカル分析の準備](vocal-specialist.md)
+- [Mac の分析サーバー](../lan/README.md)
+- [ジャンル推定の精度](genre-accuracy.md)
 - 開発の確認（`web/` で）：`npm run typecheck`、`npm test`、`npm run build`
