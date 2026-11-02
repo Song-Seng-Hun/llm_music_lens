@@ -24,13 +24,14 @@ Nothing here is installed. No LaunchAgent, firewall rule, certificate or key is 
 ## Tests
 
 ```sh
-cd ~/dev/music-lens-lan
+cd lan
 /usr/bin/python3 -m unittest discover -s tests -v            # offline; uses a fake ml and a temp root
-MUSIC_LENS_LIVE=1 /usr/bin/python3 -m unittest discover -s tests -p test_live.py -v   # real wrapper, once
+MUSIC_LENS_LIVE=1 MUSIC_LENS_FIXTURE_WAV=/abs/fixture-en.wav /usr/bin/python3 -m unittest discover -s tests -p test_live.py -v   # real wrapper, once
 ```
 
-The real-worker tests in `tests/test_rhythm.py` run `rhythm_worker.py` under the Essentia python of the emotion pilot
-runtime and skip cleanly when that path is missing.
+The real-worker tests in `tests/test_rhythm.py` run `rhythm_worker.py` under the Essentia python named by
+`MUSIC_LENS_ESSENTIA_PYTHON` and skip cleanly without it. `MUSIC_LENS_FIXTURE_WAV` adds a real WAV to the strict
+WAV check, and `NODE` (or `node` on PATH) runs the signer vector test.
 
 Tests bind 127.0.0.1 only through the test-only `"test_mode": true` config flag. A production config (no
 `test_mode`) refuses loopback, `0.0.0.0`, literal bind IPs, port 0, `limits` overrides and `test_ready_file`.
@@ -77,7 +78,8 @@ Do these only after approving an always-on listener (RunAtLoad + KeepAlive, en0/
    (umask 077; /usr/bin/openssl rand -hex 32 > ~/.music-lens/keys/codex-window.key)
    ```
    Keep these separate from the snap-annotate keys. Never print them in a shared log or chat.
-4. Write the config: `cp ~/dev/music-lens-lan/examples/api.example.json ~/.music-lens/api.json && chmod 600 ~/.music-lens/api.json`.
+4. Write the config from this `lan/` folder (the example uses `/Users/YOU`; the server needs absolute paths):
+   `(umask 077; sed "s|/Users/YOU|$HOME|g" examples/api.example.json > ~/.music-lens/api.json)`.
 5. Firewall (needs an admin password; the user does this): allow incoming connections for `/usr/bin/python3` in
    System Settings > Network > Firewall > Options, or run
    `sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add /usr/bin/python3`.
@@ -88,7 +90,7 @@ Do these only after approving an always-on listener (RunAtLoad + KeepAlive, en0/
    `icacls "%USERPROFILE%\.music-lens" /inheritance:r /grant:r "%USERNAME%:F"`.
 7. Load the LaunchAgent:
    ```sh
-   cp ~/dev/music-lens-lan/examples/com.music-lens.lan-api.plist.template ~/Library/LaunchAgents/com.music-lens.lan-api.plist
+   sed "s|/Users/YOU|$HOME|g" examples/com.music-lens.lan-api.plist.template > ~/Library/LaunchAgents/com.music-lens.lan-api.plist
    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.music-lens.lan-api.plist
    ```
    To unload it: `launchctl bootout gui/$(id -u)/com.music-lens.lan-api`. Unloading sends SIGTERM; see
@@ -99,8 +101,8 @@ Do these only after approving an always-on listener (RunAtLoad + KeepAlive, en0/
 Off unless the config has a `rhythm` key. Without it the server loads and behaves exactly as before.
 
 ```json
-"rhythm": {"python": "/Users/songseunghun/Documents/Codex/2026-09-27-window-pc-pc/outputs/music-lens-emotion-pilot-20261025/runtime/bin/python",
-           "worker": "/Users/songseunghun/tools/music-lens/api/rhythm_worker.py"}
+"rhythm": {"python": "/Users/YOU/path/to/essentia-runtime/bin/python",
+           "worker": "/Users/YOU/tools/music-lens/api/rhythm_worker.py"}
 ```
 
 Both paths must be absolute regular files, not group- or world-writable, and `python` must be executable; any other
@@ -262,7 +264,7 @@ the same file: 6.3 s, 0.99 GB).
   Model: TempoCNN `deeptemp-k16-3` (Schreiber & Mueller, SMC 2019; Essentia model by Pablo Alonso, version 1,
   2020-08-04), source https://essentia.upf.edu/models/tempo/tempocnn/deeptemp-k16-3.pb, SHA-256
   `21c328332a221695dd6e8572728c617373064df882e8f81da6d88dc3a821e3b3`, expected at
-  `/Users/songseunghun/tools/music-lens/models/tempocnn/deeptemp-k16-3.pb` (path and hash are constants in the
+  `~/tools/music-lens/models/tempocnn/deeptemp-k16-3.pb` (path and hash are constants in the
   worker; the model json sits beside it). Training data per the model json: Extended Ballroom, LMDTempo and
   MTGTempo (3826 30 s, 3611 30 s and 1158 2 min excerpts). License: the json has no license field; Essentia models
   are published under their own terms, so check them before any non-team use (no specific license is verified here).
@@ -606,7 +608,7 @@ estimate, not a label lookup.
 - Models: Essentia's Discogs-EffNet embedding `discogs-effnet-bs64-1` (Alonso-Jimenez, Serra & Bogdanov, ISMIR 2022;
   2022-02-17) and the classification head `genre_discogs400-discogs-effnet-1` (2023-05-04: 400 Discogs styles in 15
   parent genres), source https://essentia.upf.edu/models/, expected in
-  `/Users/songseunghun/tools/music-lens/models/discogs/` (directory and hashes are constants in the worker):
+  `~/tools/music-lens/models/discogs/` (directory and hashes are constants in the worker):
   `discogs-effnet-bs64-1.pb` SHA-256 `3ed9af50d5367c0b9c795b294b00e7599e4943244f4cbd376869f3bfc87721b1` (17.5 MB),
   `genre_discogs400-discogs-effnet-1.pb` `3885ba078a35249af94b8e5e4247689afac40deca4401a4bc888daf5a579c01c` (2.0 MB)
   and its json `2d367319d9b782ffa10f69abf0e805b3ac4e10899025e5bdbaceda3919b243e0` (the 400 class names

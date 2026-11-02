@@ -59,7 +59,7 @@ different FFT/hop/windowing means browser/server candidates need not match.
 
 ## Evaluation scope
 
-Pilot → frozen confirmation → close is recorded in `TASKS.md`; local raw
+Pilot → frozen confirmation → close is recorded in the local work log; local raw
 evidence stays under `evidence/attack-beat-13/`. Known synthetic starts test
 candidate timing and false detections. Existing waveform region/rise starts
 are a capability comparator, not a competing onset model. Real recordings

@@ -197,7 +197,7 @@ DTE_MIN_PAIRS = 7  # ~8 beats
 DTE_MIN_BEAT_MEDIAN = 1e-3  # of the envelope maximum; below this the ratio is null (ratio therefore <= 1000)
 DTE_GAP = (0.12, 1.5)  # beat pairs outside this gap (s) are skipped (tracker range 40..208 BPM is 0.29..1.5 s)
 DTE_NOTE = "diagnostic only, uncalibrated, untested on real songs; do not pick a tempo from it alone"
-TEMPO_CNN_MODEL = "/Users/songseunghun/tools/music-lens/models/tempocnn/deeptemp-k16-3.pb"
+TEMPO_CNN_MODEL = os.path.expanduser("~/tools/music-lens/models/tempocnn/deeptemp-k16-3.pb")
 TEMPO_CNN_SHA256 = "21c328332a221695dd6e8572728c617373064df882e8f81da6d88dc3a821e3b3"
 TEMPO_CNN_NAME = "deeptemp-k16-3"
 TEMPO_CNN_RATE = 11025
@@ -210,7 +210,7 @@ TEMPO_CNN_PATCH_HOP = 128  # both algorithms' default, passed explicitly so the 
 TEMPO_CNN_LAST_PATCH = "discard"
 TC_FRAME_HOP, TC_PATCH_FRAMES, TC_FRAME = 512, 256, 1024  # TensorflowInputTempoCNN at 11025 Hz (fixed in Essentia)
 TEMPO_CNN_NOTE = "learned estimate, uncalibrated on team songs; compare with bpm and bpm_alternatives"
-GENRE_DIR = "/Users/songseunghun/tools/music-lens/models/discogs"
+GENRE_DIR = os.path.expanduser("~/tools/music-lens/models/discogs")
 GENRE_EMBED_FILE, GENRE_EMBED_SHA256 = ("discogs-effnet-bs64-1.pb",
                                         "3ed9af50d5367c0b9c795b294b00e7599e4943244f4cbd376869f3bfc87721b1")
 GENRE_HEAD_FILE, GENRE_HEAD_SHA256 = ("genre_discogs400-discogs-effnet-1.pb",

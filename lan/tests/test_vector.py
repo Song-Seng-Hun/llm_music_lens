@@ -1,11 +1,12 @@
 import json
 import os
+import shutil
 import subprocess
 import unittest
 
 from helpers import REPO, sign
 
-NODE = "/Users/songseunghun/.local/node-v22.23.4-darwin-arm64/bin/node"
+NODE = os.environ.get("NODE") or shutil.which("node") or ""
 
 
 class VectorTest(unittest.TestCase):

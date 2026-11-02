@@ -56,7 +56,7 @@ Extracting the shared arithmetic preserves that browser path's prior values.
 ## Evidence
 
 Frozen scope, fixtures, numerical tolerances and cost guards are recorded in
-`TASKS.md`, with local raw receipts under `evidence/spectral-texture-12/`.
+the local work log, with local raw receipts under `evidence/spectral-texture-12/`.
 Independent NumPy FFT arithmetic checks and source/timing parity establish only
 these measurements. They do not establish broad real-song perceptual accuracy.
 Hosted Sites execution and whole-isolate peak memory remain unverified.

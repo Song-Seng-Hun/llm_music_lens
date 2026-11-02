@@ -44,8 +44,7 @@ class StrictWavTest(unittest.TestCase):
         self.assertTrue(self.check(make_wav_bytes(0.2)))
         fllr = b"FLLR" + struct.pack("<I", 4) + b"\x00" * 4
         self.assertTrue(self.check(wav_with(extra=b"LIST" + struct.pack("<I", 3) + b"abc\x00")))
-        fixture = ("/Users/songseunghun/Documents/Codex/2026-09-27-window-pc-pc/outputs/"
-                   "music-lens-integration-20261026/assets/fixture-en.wav")
+        fixture = os.environ.get("MUSIC_LENS_FIXTURE_WAV", "")
         if os.path.exists(fixture):
             self.assertTrue(server.strict_wav_check(fixture))
         self.assertTrue(fllr)

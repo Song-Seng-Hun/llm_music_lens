@@ -68,3 +68,6 @@ next-env.d.ts
 *.tsbuildinfo
 __pycache__/
 *.pyc
+
+# AI work log, kept local
+/TASKS.md
