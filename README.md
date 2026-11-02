@@ -40,7 +40,7 @@ Windows에서는 이 폴더의 `Start-MusicLens.cmd`를 실행하고 `http://127
 
 ```sh
 git clone https://github.com/Song-Seng-Hun/llm_music_lens.git
-cd llm_music_lens
+cd llm_music_lens/web
 npm run install:ci
 npm run build
 npm run db:local
@@ -90,7 +90,7 @@ Mac 분석 서버에 리듬 분석을 함께 요청하면(`rhythm=1`) 결과에 
 
 | 구성 | 쓰는 곳 | 라이선스 |
 |---|---|---|
-| [Beat This!](https://github.com/CPJKU/beat_this) small0 (ONNX로 변환해 `models/beat-this/`에 포함) | 서버 박·BPM | MIT |
+| [Beat This!](https://github.com/CPJKU/beat_this) small0 (ONNX로 변환해 `web/models/beat-this/`에 포함) | 서버 박·BPM | MIT |
 | [Spotify Basic Pitch](https://github.com/spotify/basic-pitch-ts) (모델 포함) | 브라우저 음표 | Apache-2.0 |
 | [Whisper](https://huggingface.co/Xenova/whisper-base) (`Xenova/whisper-base`·`whisper-small`, 필요할 때 브라우저가 내려받음) | 가사 단어 전사 (선택) | Apache-2.0 (모델 카드 기준) |
 | [SOME](https://github.com/openvpi/SOME) (모델은 따로 준비) | 솔로 보컬 음표 (선택) | 코드 MIT, 모델 CC BY-NC-SA 4.0 |
@@ -99,7 +99,7 @@ Mac 분석 서버에 리듬 분석을 함께 요청하면(`rhythm=1`) 결과에 
 | Transformers.js · ONNX Runtime Web · TensorFlow.js | 브라우저에서 모델 실행 | Apache-2.0 · MIT · Apache-2.0 |
 
 - SOME 모델(CC BY-NC-SA 4.0)과 Discogs 장르 모델(CC BY-NC-ND 4.0)에는 비상업적 이용 조건이 있습니다.
-- 포함된 구성의 라이선스 원문은 [public/licenses/](public/licenses/README.md)와 [models/beat-this/](models/beat-this/README.md)에 있습니다.
+- 포함된 구성의 라이선스 원문은 [web/public/licenses/](web/public/licenses/README.md)와 [web/models/beat-this/](web/models/beat-this/README.md)에 있습니다.
 
 ## 더 보기
 
@@ -111,4 +111,4 @@ Mac 분석 서버에 리듬 분석을 함께 요청하면(`rhythm=1`) 결과에 
 - [솔로 보컬 분석 준비](docs/vocal-specialist.md)
 - [Mac 분석 서버](lan/README.md)
 - [장르 추정 정확도](docs/genre-accuracy.md)
-- 개발 확인: `npm run typecheck`, `npm test`, `npm run build`
+- 개발 확인(`web/`에서): `npm run typecheck`, `npm test`, `npm run build`

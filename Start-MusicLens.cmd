@@ -1,2 +1,2 @@
 @echo off
-powershell.exe -NoProfile -File "%~dp0Start-MusicLens.ps1"
+powershell.exe -NoProfile -File "%~dp0web\Start-MusicLens.ps1"

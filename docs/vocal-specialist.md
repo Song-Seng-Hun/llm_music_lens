@@ -9,8 +9,8 @@ The selected model runs locally in the browser (ONNX/WASM), with no API key or a
 From the project root:
 
 ```text
-python scripts/prepare-vocal-model.py
-node scripts/prepare-analysis.mjs
+python web/scripts/prepare-vocal-model.py
+node web/scripts/prepare-analysis.mjs
 ```
 
 An existing `some-0.0.1.oudep` can be passed as the Python script's first argument. The script verifies archive and source-model SHA256, extracts only the literal ONNX member, and adds three output descriptors to expose the existing frame-rest mask, note mapping and fractional frame MIDI. Nodes and weights stay unchanged. The derived graph has its own SHA256; no downloaded installer or Python is executed. Re-run both commands when upgrading an existing installation; an old graph is rejected instead of silently using the old decoder. The optional model is about 450 MiB and is not committed. Missing model => visible failed note stage, no hidden replacement by another model. Cancellation terminates the worker.

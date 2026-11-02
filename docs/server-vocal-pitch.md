@@ -1,7 +1,7 @@
 # Server vocal pitch
 
-`POST /mcp` -> `analyze_music_timing` -> `lib/server/music-timing.ts` ->
-`analysis/vocal-pitch.mjs` -> `lib/vocal-pitch-context.ts`.
+`POST /mcp` -> `analyze_music_timing` -> `web/lib/server/music-timing.ts` ->
+`web/analysis/vocal-pitch.mjs` -> `web/lib/vocal-pitch-context.ts`.
 Set `sourceKind: "isolated-vocal"` with the usual mono22050Hz PCM16 input,
 1–30seconds. This caller declaration enables the tracker; the server does
 not verify isolation or separate a singer. Default mixture returns
@@ -112,7 +112,7 @@ deployment and whole-isolate memory peak remain unverified.
 ## Initial tracker comparison, 2026-10-14 (before the refinement)
 
 Question: is this complete server recipe useful compared with the unchanged
-cheap `public/audio-engine.mjs` quick pitch intervals at bounded local cost?
+cheap `web/public/audio-engine.mjs` quick pitch intervals at bounded local cost?
 The old server had no pitch; absence was not scored as a competing model.
 No superiority comparison against SOME, neural trackers or pYIN was run.
 

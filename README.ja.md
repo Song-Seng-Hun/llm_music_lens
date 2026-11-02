@@ -40,7 +40,7 @@ Windows では、このフォルダーの `Start-MusicLens.cmd` を実行して 
 
 ```sh
 git clone https://github.com/Song-Seng-Hun/llm_music_lens.git
-cd llm_music_lens
+cd llm_music_lens/web
 npm run install:ci
 npm run build
 npm run db:local
@@ -90,7 +90,7 @@ Mac 分析サーバーにリズム分析も頼むと（`rhythm=1`）、結果に
 
 | 構成 | 使う場所 | ライセンス |
 |---|---|---|
-| [Beat This!](https://github.com/CPJKU/beat_this) small0（ONNX に変換して `models/beat-this/` に同梱） | サーバーの拍・BPM | MIT |
+| [Beat This!](https://github.com/CPJKU/beat_this) small0（ONNX に変換して `web/models/beat-this/` に同梱） | サーバーの拍・BPM | MIT |
 | [Spotify Basic Pitch](https://github.com/spotify/basic-pitch-ts)（モデル同梱） | ブラウザーの音符 | Apache-2.0 |
 | [Whisper](https://huggingface.co/Xenova/whisper-base)（`Xenova/whisper-base`・`whisper-small`、必要なときにブラウザーがダウンロード） | 歌詞の単語の書き起こし（任意） | Apache-2.0（モデルカードによる） |
 | [SOME](https://github.com/openvpi/SOME)（モデルは別途用意） | ソロボーカルの音符（任意） | コード MIT、モデル CC BY-NC-SA 4.0 |
@@ -99,7 +99,7 @@ Mac 分析サーバーにリズム分析も頼むと（`rhythm=1`）、結果に
 | Transformers.js・ONNX Runtime Web・TensorFlow.js | ブラウザーでのモデル実行 | Apache-2.0・MIT・Apache-2.0 |
 
 - SOME モデル（CC BY-NC-SA 4.0）と Discogs ジャンルモデル（CC BY-NC-ND 4.0）には非商用の条件があります。
-- 同梱した構成のライセンス原文は [public/licenses/](public/licenses/README.md) と [models/beat-this/](models/beat-this/README.md) にあります。
+- 同梱した構成のライセンス原文は [web/public/licenses/](web/public/licenses/README.md) と [web/models/beat-this/](web/models/beat-this/README.md) にあります。
 
 ## もっと見る
 
@@ -111,4 +111,4 @@ Mac 分析サーバーにリズム分析も頼むと（`rhythm=1`）、結果に
 - [ソロボーカル分析の準備](docs/vocal-specialist.md)
 - [Mac の分析サーバー](lan/README.md)
 - [ジャンル推定の精度](docs/genre-accuracy.md)
-- 開発の確認：`npm run typecheck`、`npm test`、`npm run build`
+- 開発の確認（`web/` で）：`npm run typecheck`、`npm test`、`npm run build`

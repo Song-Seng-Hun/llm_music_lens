@@ -1,73 +1,22 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+# The web app keeps its own ignore rules in web/.gitignore.
 
-# dependencies
-/node_modules
-/.pnp
-.pnp.*
-.yarn/*
-!.yarn/patches
-!.yarn/plugins
-!.yarn/releases
-!.yarn/versions
-
-# testing
-/coverage
-
-# next.js
-/.next/
-/.vinext/
-/out/
-
-# misc
 .DS_Store
 *.pem
-
-# debug
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.pnpm-debug.log*
-
-# env files (can opt-in for committing if needed)
 .env*
 !.env.example
-/.dev.vars*
+__pycache__/
+*.pyc
 
-# vercel
-.vercel
-
-# typescript
-next-env.d.ts
-
-# Maintained Vite plugin and worker sources.
-!/build/
-/build/*
-!/build/connector-preview-plugin.mjs
-!/build/connector-preview-worker.mjs
-!/build/sites-vite-plugin.LICENSE
-!/build/sites-vite-plugin.ts
-!/build/sites-worker.ts
-
-/dist/
-/.wrangler/
-# Checkout-local execution profile and tool state; never publish them.
-/.sites-runtime/
+# Checkout-local tool state; never publish it.
 /.agents/
 /.codex/
+/.cache/
 /outputs/
 /work/
-/public/models/
-/public/precision-worker.mjs
-/public/precision-worker.mjs.LEGAL.txt
 
 # Local research inputs/results are preserved here, not redistributed in Git.
 /evidence/
-/examples/*
-!/examples/d1/
-/.cache/
-*.tsbuildinfo
-__pycache__/
-*.pyc
+/examples/
 
 # AI work log, kept local
 /TASKS.md

@@ -3,9 +3,9 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { parseArgs } from 'node:util';
-import { analyzeRhythm } from '../../../public/precision-rhythm.mjs';
-import { beatFeatures } from '../../../lib/server/beat-frontend.mjs';
-import { analyzeBeatPcm } from '../../../lib/server/beat-analysis.mjs';
+import { analyzeRhythm } from '../../../web/public/precision-rhythm.mjs';
+import { beatFeatures } from '../../../web/lib/server/beat-frontend.mjs';
+import { analyzeBeatPcm } from '../../../web/lib/server/beat-analysis.mjs';
 
 const { values } = parseArgs({ options: {
   root: { type: 'string' }, mode: { type: 'string' }, model: { type: 'string' },
@@ -20,8 +20,8 @@ const featureInfo = await readJson(join(root, 'features.json'));
 const output = { mode, createdAt: new Date().toISOString(), cases: [], failures: [] };
 if (mode === 'parity') {
   output.tolerance = { absolute: 2e-4, relative: 1e-4 };
-  output.frontendSha256 = hash(await readFile(resolve('lib/server/beat-frontend.mjs')));
-  try { output.constantsSha256 = hash(await readFile(resolve('lib/server/beat-frontend-constants.mjs'))); }
+  output.frontendSha256 = hash(await readFile(resolve('web/lib/server/beat-frontend.mjs')));
+  try { output.constantsSha256 = hash(await readFile(resolve('web/lib/server/beat-frontend-constants.mjs'))); }
   catch (error) { if (error.code !== 'ENOENT') throw error; }
 }
 const outputPath = join(root, `${mode}.json`);

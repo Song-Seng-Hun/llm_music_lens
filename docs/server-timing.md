@@ -1,7 +1,7 @@
 # Server music timing
 
-`POST /mcp` → `analyze_music_timing` → `lib/server/music-timing.ts` →
-`lib/server/beat-analysis.mjs`. The actual tool executes the model on the server;
+`POST /mcp` → `analyze_music_timing` → `web/lib/server/music-timing.ts` →
+`web/lib/server/beat-analysis.mjs`. The actual tool executes the model on the server;
 it does not launch a browser, call a paid API or depend on a separate local
 inference service. The same built Worker is the Sites deployment target.
 Local workerd/MCP execution is verified; hosted Sites publication, whole-isolate
@@ -135,13 +135,13 @@ to audio-derived beats, while reporting this missing acoustic stage.
 
 ## Packaging
 
-The MIT small0-derived9,426,750byte ONNX is tracked under `models/beat-this/`.
+The MIT small0-derived9,426,750byte ONNX is tracked under `web/models/beat-this/`.
 `prepareServerBeat()` checks all model/runtime hashes and generates the
 project-local loader. Vite packages ONNX as Data and WASM as CompiledWasm;
 no Python or runtime WASM compilation is required on Sites.
 
 The450MiB optional browser-only SOME model remains on local disk and works in
-local Vite preview. `public/.assetsignore` excludes it from Workers static
+local Vite preview. `web/public/.assetsignore` excludes it from Workers static
 deployment because it exceeds the25MiB per-asset limit. It is not a server note
 model. Existing browser analysis and saved-report reads remain supported
 consumers; their full migration is not claimed.

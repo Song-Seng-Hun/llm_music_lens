@@ -40,7 +40,7 @@ For a first setup you need Node.js 22.13 or later and a GitHub account with acce
 
 ```sh
 git clone https://github.com/Song-Seng-Hun/llm_music_lens.git
-cd llm_music_lens
+cd llm_music_lens/web
 npm run install:ci
 npm run build
 npm run db:local
@@ -90,7 +90,7 @@ Once the site is published and connected to an AI, the AI calls these tools duri
 
 | Component | Used for | License |
 |---|---|---|
-| [Beat This!](https://github.com/CPJKU/beat_this) small0 (converted to ONNX, included in `models/beat-this/`) | Server beats and BPM | MIT |
+| [Beat This!](https://github.com/CPJKU/beat_this) small0 (converted to ONNX, included in `web/models/beat-this/`) | Server beats and BPM | MIT |
 | [Spotify Basic Pitch](https://github.com/spotify/basic-pitch-ts) (with its model) | Notes in the browser | Apache-2.0 |
 | [Whisper](https://huggingface.co/Xenova/whisper-base) (`Xenova/whisper-base` or `whisper-small`, downloaded by the browser when needed) | Lyric word transcription (optional) | Apache-2.0 (per the model card) |
 | [SOME](https://github.com/openvpi/SOME) (model prepared separately) | Solo-voice notes (optional) | Code MIT, model CC BY-NC-SA 4.0 |
@@ -99,7 +99,7 @@ Once the site is published and connected to an AI, the AI calls these tools duri
 | Transformers.js · ONNX Runtime Web · TensorFlow.js | Running models in the browser | Apache-2.0 · MIT · Apache-2.0 |
 
 - The SOME model (CC BY-NC-SA 4.0) and the Discogs genre models (CC BY-NC-ND 4.0) may only be used non-commercially.
-- License texts for the included components are in [public/licenses/](public/licenses/README.md) and [models/beat-this/](models/beat-this/README.md).
+- License texts for the included components are in [web/public/licenses/](web/public/licenses/README.md) and [web/models/beat-this/](web/models/beat-this/README.md).
 
 ## More
 
@@ -109,4 +109,4 @@ Once the site is published and connected to an AI, the AI calls these tools duri
 - [Preparing solo-voice analysis](docs/vocal-specialist.md)
 - [Mac analysis server](lan/README.md)
 - [Genre estimate accuracy](docs/genre-accuracy.md)
-- Development checks: `npm run typecheck`, `npm test`, `npm run build`
+- Development checks (in `web/`): `npm run typecheck`, `npm test`, `npm run build`
