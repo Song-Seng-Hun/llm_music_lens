@@ -21,13 +21,13 @@ def main():
     if keys != expected or len(parity["cases"]) != 12 or any("error" in case for case in parity["cases"]):
         raise ValueError("Exact12 dataset and completed all-case frontend diagnostic required")
     digest = lambda path: hashlib.sha256(Path(path).read_bytes()).hexdigest()
-    if digest("lib/server/beat-frontend.mjs") != parity["frontendSha256"]:
+    if digest("web/lib/server/beat-frontend.mjs") != parity["frontendSha256"]:
         raise ValueError("Frontend changed since parity")
-    if digest("lib/server/beat-frontend-constants.mjs") != parity["constantsSha256"]:
+    if digest("web/lib/server/beat-frontend-constants.mjs") != parity["constantsSha256"]:
         raise ValueError("Frontend constants changed since parity")
-    paths = ["public/precision-rhythm.mjs", "public/analysis/tempo-grid.mjs", "public/analysis/acoustics.mjs",
-             "lib/server/beat-analysis.mjs", "lib/server/beat-frontend.mjs", "lib/server/beat-frontend-constants.mjs",
-             "lib/server/beat-postprocess.mjs", "lib/server/beat-runtime.mjs", "research/timing/beats/beat_eval.py"]
+    paths = ["web/public/precision-rhythm.mjs", "web/public/analysis/tempo-grid.mjs", "web/public/analysis/acoustics.mjs",
+             "web/lib/server/beat-analysis.mjs", "web/lib/server/beat-frontend.mjs", "web/lib/server/beat-frontend-constants.mjs",
+             "web/lib/server/beat-postprocess.mjs", "web/lib/server/beat-runtime.mjs", "research/timing/beats/beat_eval.py"]
     paths += [str(path) for path in Path("research/timing/comparison").glob("*.py")]
     paths += ["research/timing/comparison/run.mjs", str(root / "data.json"), str(root / "features.json"), str(root / "parity.json")]
     paths += [str(root / case["pcm_path"]) for case in data["cases"]]

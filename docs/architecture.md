@@ -6,7 +6,7 @@ Actual flow: local file -> browser AudioContext decode -> 16 kHz mono analysis b
 
 ChatGPT/other supported agents consume saved evidence using the Site MCP tools and interpret it in their own conversation. Sites owns the hosted identity/OAuth connection. This is not an internal-model invocation API. The supplied official Sites reference documents this direction; hosted publication and actual caller identity are not verified yet.
 
-Entrypoints: app/page.tsx -> components/music-lens.tsx + report-view.tsx -> lib/browser-audio.ts -> public/audio-worker.mjs. lib/handoff.ts builds a bounded packet with disclosed sampling; the full report JSON retains detail. app/api/reports and app/mcp -> lib/server/reports.ts + shared lib/report.ts/lib/mcp.ts. app/api/status reports local mode and storage availability.
+Entrypoints: web/app/page.tsx -> web/components/music-lens.tsx + report-view.tsx -> web/lib/browser-audio.ts -> web/public/audio-worker.mjs. web/lib/handoff.ts builds a bounded packet with disclosed sampling; the full report JSON retains detail. web/app/api/reports and web/app/mcp -> web/lib/server/reports.ts + shared web/lib/report.ts/lib/mcp.ts. web/app/api/status reports local mode and storage availability.
 
 Compatibility: retain existing report interpretations/model provenance for import/read only, and the inert analysis_requests table/initial migration to preserve storage. No request handler uses that table. Removal requires a separately scoped migration; no parallel provider implementation is retained.
 

@@ -8,7 +8,7 @@ explicitly releases code and published model weights under MIT; see LICENSE.
 - Checkpoint SHA256: `6074be2c4d490c5f6101fcc374a1ec72ae93456e23bb6019783b849f5dc7d47b`
 - Derived ONNX SHA256: `2c61c460654723857fc8dface211d133e6c983efec4c5e91b576bfca746182f1`
 - Bytes: 9,426,750; opset17; float32 features `[1,250,128]`.
-- Conversion: `research/timing/sites/export-beat.py`, Torch2.8.0+cpu,
+- Conversion: `research/timing/sites/export-beat.py` (repo root), Torch2.8.0+cpu,
   ONNX1.16.1, BeatThis1.1.0. Architecture/weights unchanged; fixed5s context.
 - `.bin` allows Cloudflare to package the bytes as a Data module; the runtime
   cannot depend on Python or files in the research evidence directory.

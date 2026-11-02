@@ -1,7 +1,7 @@
 # Song-clock evidence composition
 
-`POST /mcp` -> `compose_music_timeline` -> `lib/music-continuity.ts` ->
-`analysis/music-continuity.mjs`. This read-only tool assembles existing observations;
+`POST /mcp` -> `compose_music_timeline` -> `web/lib/music-continuity.ts` ->
+`web/analysis/music-continuity.mjs`. This read-only tool assembles existing observations;
 it does not rerun a model, read audio, save state or change the pitch/beat detector.
 It complements `analyze_music_structure` (1s texture/transition evidence) and
 `get_music_timeline` (saved report lookup).

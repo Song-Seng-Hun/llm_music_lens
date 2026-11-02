@@ -34,7 +34,7 @@ Node.js 22.13 or later is required. In a new working folder, prepare it in this 
 
 ```sh
 git clone https://github.com/Song-Seng-Hun/llm_music_lens.git
-cd llm_music_lens
+cd llm_music_lens/web
 npm run install:ci
 npm run build
 npm run db:local
@@ -93,9 +93,11 @@ There is no shared URL yet. Before publishing, results can be handed over as fil
 - Notes at the same time as a word may be accompaniment. Confirmed lyric-to-vocal-note matching, source separation, instrument classification and automatic rap classification are not provided. An empty result is not a judgement of silence or no vocals.
 - Style and strengths are for the LLM to interpret, citing sources and time ranges. If it has not heard the actual audio, it must not say it has. Every result is `accuracy: unvalidated`; runs on synthetic audio and public speech are not real-song accuracy checks.
 
-Model/runtime versions: Basic Pitch 1.0.1, TFJS/WASM 3.21.0, Transformers.js 3.8.1, ONNX Runtime Web 1.22.0-dev.20250409-89f8206ba4. Whisper's pinned revision is in `analysis/models.mjs`, the SHA-256 of static files in `public/models/manifest.json`, and licenses in `public/licenses/`. Basic Pitch and Whisper Base were run in a real browser; Small and the accuracy on Korean singing/rap are not yet verified.
+Model/runtime versions: Basic Pitch 1.0.1, TFJS/WASM 3.21.0, Transformers.js 3.8.1, ONNX Runtime Web 1.22.0-dev.20250409-89f8206ba4. Whisper's pinned revision is in `web/analysis/models.mjs`, the SHA-256 of static files in `web/public/models/manifest.json`, and licenses in `web/public/licenses/`. Basic Pitch and Whisper Base were run in a real browser; Small and the accuracy on Korean singing/rap are not yet verified.
 
 ## Development and verification
+
+Run these in `web/`.
 
 ```powershell
 npm run typecheck
@@ -107,13 +109,13 @@ npm run dev -- --host 127.0.0.1
 
 `db:local` creates only the initial schema. The old `analysis_requests` table and initial migration remain to preserve data but are not used by running code. The model-call path, key input and `analyze_youtube` were removed. Dropping the table later is a separate data migration.
 
-Records of the chord/key and rhythm/timbre checks, and of earlier versions, are kept locally and apart. `tests/browser-precision.cjs` checks the real model/UI/MCP, and `tests/browser-lyrics.cjs` checks a transcription run with public speech. `MUSIC_EVIDENCE_DIR` sets the results folder, and `MUSIC_REAL_FIXTURE` a local music sample whose terms of use you have checked. `PLAYWRIGHT_MODULE` and `BROWSER_EXECUTABLE` reuse an existing install. `tests/precision-storage.mjs` checks large JSON, size rejection and user isolation, and cleans up only the IDs it created.
+Records of the chord/key and rhythm/timbre checks, and of earlier versions, are kept locally and apart. `web/tests/browser-precision.cjs` checks the real model/UI/MCP, and `web/tests/browser-lyrics.cjs` checks a transcription run with public speech. `MUSIC_EVIDENCE_DIR` sets the results folder, and `MUSIC_REAL_FIXTURE` a local music sample whose terms of use you have checked. `PLAYWRIGHT_MODULE` and `BROWSER_EXECUTABLE` reuse an existing install. `web/tests/precision-storage.mjs` checks large JSON, size rejection and user isolation, and cleans up only the IDs it created.
 
-Real server path: `app/mcp/route.ts` → `lib/mcp.ts` → `lib/server/music-timing.ts` → `lib/server/beat-analysis.mjs`. [Server analysis guide](server-timing.md). The existing browser path is `components/music-lens.tsx` → `lib/browser-detail.ts` → `public/precision-worker.mjs` (source `analysis/precision-worker.mjs`) and is kept. The optional `detail` of the shared report `lib/report.ts` preserves earlier JSON. Storage is `lib/server/reports.ts`.
+Real server path: `web/app/mcp/route.ts` → `web/lib/mcp.ts` → `web/lib/server/music-timing.ts` → `web/lib/server/beat-analysis.mjs`. [Server analysis guide](server-timing.md). The existing browser path is `web/components/music-lens.tsx` → `web/lib/browser-detail.ts` → `web/public/precision-worker.mjs` (source `web/analysis/precision-worker.mjs`) and is kept. The optional `detail` of the shared report `web/lib/report.ts` preserves earlier JSON. Storage is `web/lib/server/reports.ts`.
 
-Detailed tempo was replaced by a single `public/analysis/tempo-grid.mjs`. The acoustic summary aggregates measurements from the same FFT in `public/analysis/acoustics.mjs`. The earlier peak-autocorrelation selection function was removed, and old JSON can still be read even without the selection fields. Unconfirmed values in detailed results are not replaced with older signal values.
+Detailed tempo was replaced by a single `web/public/analysis/tempo-grid.mjs`. The acoustic summary aggregates measurements from the same FFT in `web/public/analysis/acoustics.mjs`. The earlier peak-autocorrelation selection function was removed, and old JSON can still be read even without the selection fields. Unconfirmed values in detailed results are not replaced with older signal values.
 
-Chords and major/minor keys are computed by `public/analysis/harmony.mjs` after the note model, and `detail.harmony` is the source of truth. The compatibility fields `rhythm.key/chords` project the same result. The calculation that used the strongest triad as the whole-song key was removed. Check the evidence in the UI's **Pitch · Harmony** tab, JSON/Markdown, the AI team hand-off note and the MCP summary/timeline. This feature is produced by rerunning detailed analysis and does not quietly recompute past reports.
+Chords and major/minor keys are computed by `web/public/analysis/harmony.mjs` after the note model, and `detail.harmony` is the source of truth. The compatibility fields `rhythm.key/chords` project the same result. The calculation that used the strongest triad as the whole-song key was removed. Check the evidence in the UI's **Pitch · Harmony** tab, JSON/Markdown, the AI team hand-off note and the MCP summary/timeline. This feature is produced by rerunning detailed analysis and does not quietly recompute past reports.
 
 A real wind-quartet performance with ground-truth notes serves as the reference sample. It is public CC BY 4.0 material, and its audio, individual parts, score MIDI/MusicXML and note annotations stay local. Measured once with the current browser analyzer over 57 seconds and 231 reference notes, note onset/pitch F1 was 50.47% (50 ms / 50 cents), with 39.56% precision and 69.70% recall. Conditions, raw results and limits are kept in local records. This one song cannot support claims of general real-song accuracy or improvement, and lyrics, rap and drum accuracy were not evaluated. The next improvement keeps this baseline and fixes the comparison conditions and budget first.
 
