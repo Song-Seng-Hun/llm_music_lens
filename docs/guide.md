@@ -1,6 +1,6 @@
 # Music Lens: full guide
 
-The [README](../README.en.md) gives the overview and a quick start. This page keeps the full reference that used to be the README: every server tool, the browser analysis, connecting over MCP, the scope of input and accuracy, and development notes.
+The [README](README.en.md) gives the overview and a quick start. This page keeps the full reference that used to be the README: every server tool, the browser analysis, connecting over MCP, the scope of input and accuracy, and development notes.
 
 A program that pulls time, beat, harmony, note, word and energy cues out of audio and hands them to an **LLM as evidence for music analysis**. The same material can be reused for composition references, style reading and video direction. The goal is **a tool where the Sites server does the analysis and the AI team receives the results over MCP**. It is being built so that it needs neither a personal model API key nor an open browser.
 

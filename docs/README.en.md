@@ -1,9 +1,9 @@
-<p align="center"><a href="README.md">한국어</a> · <b>English</b> · <a href="README.ja.md">日本語</a></p>
+<p align="center"><a href="../README.md">한국어</a> · <b>English</b> · <a href="README.ja.md">日本語</a></p>
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/banner-dark.svg">
-    <img src="assets/banner-light.svg" width="640" alt="Pixel-art banner: on an analysis screen a playhead runs over a waveform, beat marks and a piano roll at 120 BPM, lighting each beat and note and showing the chords C, Am, F and G, then reports BPM 120 and the key C major. Below, a speaker pulses on the beat and Claude nods along in headphones, then receives the report.">
+    <source media="(prefers-color-scheme: dark)" srcset="../assets/banner-dark.svg">
+    <img src="../assets/banner-light.svg" width="640" alt="Pixel-art banner: on an analysis screen a playhead runs over a waveform, beat marks and a piano roll at 120 BPM, lighting each beat and note and showing the chords C, Am, F and G, then reports BPM 120 and the key C major. Below, a speaker pulses on the beat and Claude nods along in headphones, then receives the report.">
   </picture>
 </p>
 
@@ -64,7 +64,7 @@ When you ask the Mac analysis server for rhythm analysis as well (`rhythm=1`), t
 - **Whole song**: the top 5 Discogs styles (written "Parent---Style", e.g. `Pop---J-pop`) and the top 5 parent genres (Pop, Rock, Electronic, ...)
 - **Per 30 s window**: the top 3 styles of each window, fetched with the timeline call (`layer=genre`).
 - **Reading the scores**: each genre is scored on its own, so the scores do not add up to 1 and are not probabilities. Read the ranking, not the number.
-- The first pick is wrong for about one or two songs in four, but the right genre is usually in the top 3. Genres with blurry edges such as Pop, and per-window results, are less reliable. Measurements: [Genre estimate accuracy](docs/genre-accuracy.md).
+- The first pick is wrong for about one or two songs in four, but the right genre is usually in the top 3. Genres with blurry edges such as Pop, and per-window results, are less reliable. Measurements: [Genre estimate accuracy](genre-accuracy.md).
 
 ### Let an AI analyze on the server (MCP)
 
@@ -99,14 +99,14 @@ Once the site is published and connected to an AI, the AI calls these tools duri
 | Transformers.js · ONNX Runtime Web · TensorFlow.js | Running models in the browser | Apache-2.0 · MIT · Apache-2.0 |
 
 - The SOME model (CC BY-NC-SA 4.0) and the Discogs genre models (CC BY-NC-ND 4.0) may only be used non-commercially.
-- License texts for the included components are in [web/public/licenses/](web/public/licenses/README.md) and [web/models/beat-this/](web/models/beat-this/README.md).
+- License texts for the included components are in [web/public/licenses/](../web/public/licenses/README.md) and [web/models/beat-this/](../web/models/beat-this/README.md).
 
 ## More
 
-- [Full guide](docs/guide.md): each server tool, the browser analysis steps, connecting over MCP, the full scope of input and accuracy, and development notes
-- [Research status and limits](docs/research-status.md): a summary of measurements
-- Server tool docs: [beat and BPM](docs/server-timing.md) · [waveform](docs/waveform-dynamics.md) · [spectral texture](docs/spectral-texture.md) · [attacks against the beat](docs/attack-beat.md) · [vocal pitch](docs/server-vocal-pitch.md) · [song structure](docs/music-structure.md) · [timeline](docs/music-continuity.md)
-- [Preparing solo-voice analysis](docs/vocal-specialist.md)
-- [Mac analysis server](lan/README.md)
-- [Genre estimate accuracy](docs/genre-accuracy.md)
+- [Full guide](guide.md): each server tool, the browser analysis steps, connecting over MCP, the full scope of input and accuracy, and development notes
+- [Research status and limits](research-status.md): a summary of measurements
+- Server tool docs: [beat and BPM](server-timing.md) · [waveform](waveform-dynamics.md) · [spectral texture](spectral-texture.md) · [attacks against the beat](attack-beat.md) · [vocal pitch](server-vocal-pitch.md) · [song structure](music-structure.md) · [timeline](music-continuity.md)
+- [Preparing solo-voice analysis](vocal-specialist.md)
+- [Mac analysis server](../lan/README.md)
+- [Genre estimate accuracy](genre-accuracy.md)
 - Development checks (in `web/`): `npm run typecheck`, `npm test`, `npm run build`
