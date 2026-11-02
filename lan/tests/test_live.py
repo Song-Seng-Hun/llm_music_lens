@@ -12,15 +12,14 @@ import unittest
 from helpers import Client, Env, SubprocessServer
 
 LIVE = os.environ.get("MUSIC_LENS_LIVE") == "1"
-ML = "/Users/songseunghun/tools/music-lens/ml"
-INBOX = "/Users/songseunghun/AI-Listen/inbox"
-RESULTS = "/Users/songseunghun/AI-Listen/results"
-FIXTURE = ("/Users/songseunghun/Documents/Codex/2026-09-27-window-pc-pc/outputs/"
-           "music-lens-integration-20261026/assets/fixture-en.wav")
+ML = os.path.expanduser("~/tools/music-lens/ml")
+INBOX = os.path.expanduser("~/AI-Listen/inbox")
+RESULTS = os.path.expanduser("~/AI-Listen/results")
+FIXTURE = os.environ.get("MUSIC_LENS_FIXTURE_WAV", "")
 A = "/analyze?language=en&emotion_mode=voice&name=fixture-en"
 
 
-@unittest.skipUnless(LIVE, "set MUSIC_LENS_LIVE=1 for the single live run")
+@unittest.skipUnless(LIVE and FIXTURE, "set MUSIC_LENS_LIVE=1 and MUSIC_LENS_FIXTURE_WAV for the single live run")
 class LiveTest(unittest.TestCase):
     def test_live_end_to_end(self):
         env = Env()

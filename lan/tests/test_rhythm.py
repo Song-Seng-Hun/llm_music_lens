@@ -18,8 +18,7 @@ import rhythm_worker as rw  # noqa: E402  (stdlib-only at import time; numpy/ess
 A = "/analyze?language=en&emotion_mode=voice"
 AR = A + "&rhythm=1"
 WAV = silent_wav_bytes(0.5)
-ESSENTIA_PY = ("/Users/songseunghun/Documents/Codex/2026-09-27-window-pc-pc/outputs/"
-               "music-lens-emotion-pilot-20261025/runtime/bin/python")
+ESSENTIA_PY = os.environ.get("MUSIC_LENS_ESSENTIA_PYTHON", "")
 WORKER = os.path.join(REPO, "rhythm_worker.py")
 SYNTH = os.path.join(REPO, "tests", "synth_audio.py")
 

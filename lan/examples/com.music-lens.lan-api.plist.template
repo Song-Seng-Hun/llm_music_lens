@@ -9,9 +9,9 @@
   <array>
     <string>/usr/bin/python3</string>
     <string>-I</string>
-    <string>/Users/songseunghun/tools/music-lens/api/server.py</string>
+    <string>/Users/YOU/tools/music-lens/api/server.py</string>
     <string>--config</string>
-    <string>/Users/songseunghun/.music-lens/api.json</string>
+    <string>/Users/YOU/.music-lens/api.json</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -30,8 +30,8 @@
   <key>WorkingDirectory</key>
   <string>/</string>
   <key>StandardOutPath</key>
-  <string>/Users/songseunghun/AI-Listen/logs/launchd.out</string>
+  <string>/Users/YOU/AI-Listen/logs/launchd.out</string>
   <key>StandardErrorPath</key>
-  <string>/Users/songseunghun/AI-Listen/logs/launchd.err</string>
+  <string>/Users/YOU/AI-Listen/logs/launchd.err</string>
 </dict>
 </plist>

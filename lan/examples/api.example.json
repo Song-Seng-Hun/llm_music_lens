@@ -3,14 +3,14 @@
   "port": 8765,
   "allow": "192.0.2.0/24",
   "clients": {
-    "claude-window": "/Users/songseunghun/.music-lens/keys/claude-window.key",
-    "codex-window": "/Users/songseunghun/.music-lens/keys/codex-window.key"
+    "claude-window": "/Users/YOU/.music-lens/keys/claude-window.key",
+    "codex-window": "/Users/YOU/.music-lens/keys/codex-window.key"
   },
-  "cert": "/Users/songseunghun/.music-lens/tls/server.pem",
-  "key": "/Users/songseunghun/.music-lens/tls/server.key",
-  "ml": "/Users/songseunghun/tools/music-lens/ml",
-  "root": "/Users/songseunghun/AI-Listen",
-  "inbox": "/Users/songseunghun/AI-Listen/inbox",
-  "limit_exec": "/Users/songseunghun/tools/music-lens/api/limit_exec.py",
-  "launchd_logs": ["/Users/songseunghun/AI-Listen/logs/launchd.out", "/Users/songseunghun/AI-Listen/logs/launchd.err"]
+  "cert": "/Users/YOU/.music-lens/tls/server.pem",
+  "key": "/Users/YOU/.music-lens/tls/server.key",
+  "ml": "/Users/YOU/tools/music-lens/ml",
+  "root": "/Users/YOU/AI-Listen",
+  "inbox": "/Users/YOU/AI-Listen/inbox",
+  "limit_exec": "/Users/YOU/tools/music-lens/api/limit_exec.py",
+  "launchd_logs": ["/Users/YOU/AI-Listen/logs/launchd.out", "/Users/YOU/AI-Listen/logs/launchd.err"]
 }
