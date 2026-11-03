@@ -177,7 +177,7 @@ API:
 - `GET /timeline/<id>?layer=beats|chords|energy|melody|genre|bass|drums` is served by the server from the stored file with the native rules:
   `start`/`end` 0..600 (default 0 and 600, `end >= start`), rows overlapping the range, `limit` 1..200 (default 100),
   `cursor` <= total, a ~43 KB page byte cap, `truncated` and `continuation`. Beats rows are `{"time"}`, chords rows
-  `{start, end, label, strength}`, with `one_beat: true` on some BTC rows (with `reliability`: `low_reference`, or
+  `{start, end, label, strength}`, with `display` from worker 0.10.0 and `one_beat: true` on some BTC rows (with `reliability`: `low_reference`, or
   `reference_candidate` for BTC chords), energy rows `{time, value}` (with `unit`
   and `step_s`; a row covers `[time, time + step_s)` and is selected when its `time` lies in `[start, end]`), melody
   rows `{start, end, midi, note}` (selected like chords: overlapping the range; with `reliability: "low_reference"`
@@ -608,9 +608,9 @@ Copy `btc_model.py` next to `rhythm_worker.py`. Nothing is downloaded: take `tes
 `weights_only`. The rhythm python needs torch and librosa.
 
 What changes: `chords` rows use names like `Am7`, `C#maj7`, `Gsus4`, `Bm7b5`, plus `N` (no chord) and `X` (unknown).
-Sharps only; BTC has no flats, so `A#` may mean `Bb`. `strength` is null. Rows keep following the beat vote, and a row with
+These `label` names are sharps only because BTC has no flats; `display` gives the spelling for the key (see "Chord display"). `strength` is null. Rows keep following the beat vote, and a row with
 no beat inside it has `one_beat: true`: treat these as less certain. Without beats the rows are frame-level and unmarked. `chords_reliability` is `reference_candidate` and
-`chord_vocabulary` names the vocabulary. BTC does not report bass notes, so slash chords do not appear.
+`chord_vocabulary` names the vocabulary.
 
 If BTC cannot run, chords stay major/minor triads with the warning `chord_model_unavailable: models_invalid|btc_failed`.
 With `chord_model` set, a stored result without BTC chords is recomputed on the next analyze, so a failed run is retried.
@@ -650,6 +650,20 @@ notes remain.
 | Part | Terms | Notes |
 |---|---|---|
 | Basic Pitch code and `nmp.onnx` | Apache-2.0 (spotify/basic-pitch) | Installed separately |
+
+### Chord display (worker 0.10.0)
+
+Every `/timeline` `layer=chords` row gets `display`, the name to show a person: `Bb7`, `F#m`, `C/E`, `Bbm7/Db`. No config is needed.
+`label` is unchanged and stays the value to compare, with the sharps-only BTC names; section `top_chord` and the overview use it.
+
+- Spelling: the root and the slash note follow the key section at the middle of the segment. A key whose relative major is
+  F, Bb, Eb, Ab or Db uses flats; C major and A minor use Db, Eb, F#, Ab and Bb; the others use sharps. A wrong key
+  gives the wrong spelling of the right pitch.
+- Slash: added when one bass pitch class from the bass layer sounds for at least half of the segment and is a chord tone other
+  than the root. Without a bass layer, as on a 16 kHz upload, no slash appears.
+
+Limits: slashes are conservative, so many real inversions get none, and some that appear are wrong. A bass note outside
+the chord, such as `C/D`, is never written. These were measured with BTC chords only. `N` and `X` are copied as they are.
 
 ### Drum hits (worker 0.9.0)
 
