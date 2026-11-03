@@ -43,24 +43,24 @@ class RereadTests(unittest.TestCase):
         self.assertEqual(rereads[0]["reason"], "loop")
         self.assertEqual(rereads[0]["shift_seconds"], 6)
 
-    def test_unfixable_window_drops_only_junk_words(self):
-        segs = [seg(0, (" real", 1.0), (" Thank you for watching", 20.0), text=" real Thank you for watching")]
+    def test_unfixable_window_drops_only_marker_runs(self):
+        segs = [seg(0, (" I", 1.0), (" love", 2.0), (" you", 3.0), (" Thank", 20.0), (" you", 20.5), (" for", 21.0), (" watching", 21.5))]
         out, rereads = m.reread_windows(segs, 30.0, FakeTranscribe({}))
-        self.assertEqual([w["word"] for s in out for w in s["words"]], [" real"])
+        self.assertEqual([w["word"] for s in out for w in s["words"]], [" I", " love", " you"])
         self.assertEqual(rereads, [{"start": 0.0, "end": 30.0, "reason": "marker", "shift_seconds": None}])
 
-    def test_wordless_window_and_short_tail(self):
-        segs = [seg(0, (" a", 1.0)), {"seek": 3000, "text": "", "words": []}]
+    def test_wordless_window_left_alone_and_short_tail(self):
+        segs = [{"seek": 0, "text": "", "words": []}, seg(3000, ("ご", 31.0), ("視聴", 31.3))]
         fake = FakeTranscribe({})
         out, rereads = m.reread_windows(segs, 34.5, fake)
-        self.assertEqual(fake.calls, ["32.0,34.5"])  # 34.0,34.5 is too short to try
-        self.assertEqual(rereads[0]["reason"], "no_words")
-        self.assertEqual([w["word"] for s in out for w in s["words"]], [" a"])
+        self.assertEqual(fake.calls, ["32.0,34.5"])  # no retry for the wordless window; 34.0,34.5 is too short to try
+        self.assertEqual(rereads, [{"start": 30.0, "end": 34.5, "reason": "marker", "shift_seconds": None}])
+        self.assertEqual([w["word"] for s in out for w in s["words"]], [])
 
     def test_checked_rereads_rejects_bad_entries(self):
         ok = [{"start": 30.0, "end": 60.0, "reason": "loop", "shift_seconds": 2}]
         self.assertEqual(m.checked_rereads(ok, 90.0), ok)
-        for bad in ([{"start": 30.0, "end": 60.0, "reason": "other", "shift_seconds": 2}],
+        for bad in ([{"start": 30.0, "end": 60.0, "reason": "no_words", "shift_seconds": 2}],
                     [{"start": 30.0, "end": 60.0, "reason": "loop", "shift_seconds": 3}], "x"):
             with self.assertRaises(m.Failure):
                 m.checked_rereads(bad, 90.0)

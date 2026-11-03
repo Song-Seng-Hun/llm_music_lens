@@ -125,9 +125,9 @@ hashes give 0.2.3 its own cache identity.
 
 Window re-read (0.2.4): after one Whisper pass, a 30 s decoder window is decoded again
 when its text has a known end-of-video phrase (ja/en/ko), a word longer than 40
-characters (a decoder loop), or no words. The retry starts 2, 4, 6, 8 or 10 s later in
-the window; the first clean retry replaces it. If none is clean, only the phrase and
-loop words are dropped. `window_rereads` in the report lists each window, the reason
+characters (a decoder loop). The retry starts 2, 4, 6, 8 or 10 s later in the window;
+the first clean retry replaces it. If none is clean, only the loop words and the words
+that spell the phrase are dropped. Windows without words are not retried. `window_rereads` in the report lists each window, the reason
 and the shift used. Cost: a few seconds per bad window. The phrase list comes from
 observed failures, so a phrase not on it stays in the output.
 

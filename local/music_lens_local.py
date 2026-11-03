@@ -216,7 +216,7 @@ def checked_rereads(rows, duration):
         raise Failure("invalid_output", "Invalid window re-read list")
     out = []
     for r in rows:
-        if not isinstance(r, dict) or r.get("reason") not in ("marker", "loop", "no_words") or not (r.get("shift_seconds") is None or r.get("shift_seconds") in REREAD_SHIFTS):
+        if not isinstance(r, dict) or r.get("reason") not in ("marker", "loop") or not (r.get("shift_seconds") is None or r.get("shift_seconds") in REREAD_SHIFTS):
             raise Failure("invalid_output", "Invalid window re-read entry")
         out.append({"start": number(r.get("start"), "reread.start", 0, duration), "end": number(r.get("end"), "reread.end", 0, duration + END_TOLERANCE),
                     "reason": r["reason"], "shift_seconds": r["shift_seconds"]})
@@ -720,8 +720,8 @@ class LocalLens:
                         raise Failure("dependency_missing", "ASR dependency unavailable")
                     self.infer(audio_file, output_file, cancel)
                     raw = self.read_child_output(output_file)
+                    rereads = checked_rereads(raw.get("rereads", []), audio["duration_seconds"])  # before words: a failure must leave none
                     words, warnings, detected, timing_notes = normalize(raw, audio["duration_seconds"])
-                    rereads = checked_rereads(raw.get("rereads", []), audio["duration_seconds"])
                     asr_status = "partial" if warnings else "complete"
                 except (Failure, OSError, ValueError, TypeError) as e:
                     if isinstance(e, Failure) and e.code in ("cancelled", "timeout"):
@@ -801,14 +801,26 @@ class LocalLens:
 def reread_windows(segments, duration, transcribe):
     """Re-decode 30 s windows that hallucinated, looped or kept no words, starting later inside the window.
 
-    A window is one decoder seek. It is bad when its text has a REREAD_MARKERS phrase, a word longer than
-    REREAD_LOOP_CHARS, or no words. transcribe(clip) is retried with clip "start+k,end"; the first retry
-    with words and no marker or loop replaces the window. If none works, only the marker and loop words go.
+    A window is one decoder seek. It is bad when its text has a REREAD_MARKERS phrase or a word longer than
+    REREAD_LOOP_CHARS. transcribe(clip) is retried with clip "start+k,end"; the first retry with words and
+    no marker or loop replaces the window. If none works, only the loop words and the runs of words that
+    spell a marker go. Wordless windows are left alone: a retry there tends to invent text.
     Returns (segments, rereads); rereads lists each bad window and the shift used (null: words dropped).
     """
     looped = lambda w: len(w["word"].strip()) > REREAD_LOOP_CHARS
     marked = lambda text: any(m in text for m in REREAD_MARKERS)
-    junk = lambda w: looped(w) or any(m in w["word"] or w["word"].strip() in m for m in REREAD_MARKERS)
+
+    def clean(words):
+        drop = {i for i, w in enumerate(words) if looped(w)}
+        for j in range(len(words)):  # shortest run ending at j whose text holds a marker
+            text = ""
+            for i in range(j, -1, -1):
+                text = words[i]["word"] + text
+                if marked(text):
+                    drop.update(range(i, j + 1))
+                    break
+        return [w for i, w in enumerate(words) if i not in drop]
+
     seeks = sorted({s["seek"] for s in segments})
     out, rereads = [], []
     for seek, nxt in zip(seeks, seeks[1:] + [None]):
@@ -816,7 +828,7 @@ def reread_windows(segments, duration, transcribe):
         window = [s for s in segments if s["seek"] == seek]
         words = [w for s in window for w in s.get("words") or []]
         reason = ("marker" if marked("".join(s.get("text", "") for s in window)) else
-                  "loop" if any(looped(w) for w in words) else "no_words" if not words else None)
+                  "loop" if any(looped(w) for w in words) else None)
         if reason is None:
             out += window
             continue
@@ -831,7 +843,7 @@ def reread_windows(segments, duration, transcribe):
                 out.append({"seek": seek, "words": new})
                 break
         if fixed is None:
-            out += [{"seek": seek, "words": [w for w in words if not junk(w)]}]
+            out += [{"seek": seek, "words": clean(words)}]
         rereads.append({"start": start, "end": end, "reason": reason, "shift_seconds": fixed})
     return out, rereads
 
