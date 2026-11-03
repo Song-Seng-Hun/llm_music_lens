@@ -1,6 +1,6 @@
 # Local Music Lens (macOS)
 
-Version 0.2.1 combines native Whisper word times and optional voice emotion or
+Version 0.2.3 combines native Whisper word times and optional voice emotion or
 music-mood windows in one analysis. It runs per job; no daemon, automatic download,
 upload, installation or global client configuration is added. Voice models are
 unvalidated for singing; music-mood accuracy is unmeasured. Scores are model
@@ -118,6 +118,11 @@ deterministic cache and never overwrites the partial. Deterministic empty ASR an
 short-tail partials remain reusable. Version/runner hashes prevent0.2.0 failed
 cache entries being selected by0.2.1; old files stay readable and untouched.
 
+Heavy work (analyze, optional rhythm, eye look) shares one lease, `~/AI-Listen/.analyze.lock`
+(heavy_job.py). A second job gets busy at once; there is no queue or retry. Voice
+emotion runs on CPU in equal-length batches of 8. New version, runner and worker
+hashes give 0.2.3 its own cache identity.
+
 ## MCP and verification
 
 serve exposes status/analyze/report/timeline as newline JSON-RPC on stdin/stdout.
@@ -126,7 +131,7 @@ work and waits. Notifications get no reply; diagnostics use stderr. No network
 listener or settings writes.
 
 ```sh
-python3 -m unittest -v test_music_lens_local.py
+python3 -m unittest discover -v -s . -p 'test_*.py'
 ```
 
 Eleven focused stdlib checks retain seven previous regressions and add layer

@@ -5,6 +5,7 @@ import contextlib
 from datetime import datetime, timezone
 import hashlib
 import importlib.metadata
+import importlib.util
 import io
 import json
 import math
@@ -21,7 +22,7 @@ import time
 import wave
 import uuid
 
-VERSION = "0.2.1"
+VERSION = "0.2.3"
 SCHEMA_VERSION = "music-lens-local/2"
 END_TOLERANCE = 0.05
 MAX_AUDIO = 64 * 1024 * 1024
@@ -259,8 +260,25 @@ def normalize(raw, duration):
     return words, warnings, detected, timing_notes
 
 
+def compute_helper():
+    """Load the release-local cooperative lease under isolated Python (-I)."""
+    cached = globals().get('_compute_helper')
+    if cached is None:
+        path = Path(__file__).with_name('heavy_job.py')
+        spec = importlib.util.spec_from_file_location('music_lens_heavy_job', path)
+        if spec is None or spec.loader is None:
+            raise Failure('configuration', 'Release compute-lock helper unavailable')
+        cached = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(cached)
+        except (OSError, ValueError) as exc:
+            raise Failure('configuration', 'Release compute-lock helper unavailable') from exc
+        globals()['_compute_helper'] = cached
+    return cached
+
+
 class LocalLens:
-    def __init__(self, audio_root, result_root, model_dir, timeout=300, emotion_python=None, emotion_assets=None):
+    def __init__(self, audio_root, result_root, model_dir, timeout=300, emotion_python=None, emotion_assets=None, heavy_lock=None):
         self.audio_root = Path(audio_root).resolve(strict=True)
         self.model_dir = Path(model_dir).resolve(strict=True)
         self.result_root = Path(result_root).absolute()
@@ -269,6 +287,7 @@ class LocalLens:
         if not all(p.is_dir() for p in (self.audio_root, self.model_dir, self.result_root)):
             raise Failure("configuration", "Configured roots must be directories")
         self.timeout = number(timeout, "timeout", 1, 1800)
+        self.heavy_lock = str(heavy_lock) if heavy_lock is not None else str(Path.home() / "AI-Listen/.analyze.lock")
         # Keep the venv spelling: resolving its Python symlink selects the base runtime.
         self.emotion_python = Path(emotion_python).absolute() if emotion_python else None
         self.emotion_assets = Path(emotion_assets).resolve(strict=True) if emotion_assets else None
@@ -295,15 +314,8 @@ class LocalLens:
                 path = self.emotion_assets / directory / name
                 if path.is_symlink() or not path.is_file() or (self.emotion_assets / directory).is_symlink():
                     return dict(base, availability="unavailable", reason="emotion_model_missing")
-                size_bytes = path.stat().st_size
-                if size_bytes > 4 * 1024**3:
-                    raise Failure("configuration", "Emotion model file exceeds size limit")
-                h = hashlib.sha256()
-                with path.open("rb") as f:
-                    for chunk in iter(lambda: f.read(1024 * 1024), b""):
-                        self.check_budget()
-                        h.update(chunk)
-                manifest.append({"file": directory + "/" + name, "sha256": h.hexdigest(), "bytes": size_bytes})
+                sha256, size_bytes = self.asset_digest(path, 4 * 1024**3)
+                manifest.append({"file": directory + "/" + name, "sha256": sha256, "bytes": size_bytes})
         env = self.child_environment()
         self.check_budget()
         remaining = getattr(self, "_deadline", time.monotonic() + 30) - time.monotonic()
@@ -336,6 +348,51 @@ class LocalLens:
         except importlib.metadata.PackageNotFoundError:
             raise Failure("dependency_missing", "mlx-whisper is not installed in this Python environment")
 
+    @staticmethod
+    def asset_identity(info):
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+    def asset_digest(self, path, max_bytes):
+        """Full first read; unchanged inode/content metadata permits a stat-only reuse.
+        ctime catches same-size rewrites whose mtime is restored. Identity is checked
+        before/after reading and against the current path; no global/disk digest cache.
+        """
+        self.check_budget()
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode):
+            raise Failure("configuration", "Model assets must be materialized regular files")
+        if before.st_size > max_bytes:
+            raise Failure("configuration", "Model asset exceeds manifest size limit")
+        identity = self.asset_identity(before)
+        cache = self.__dict__.setdefault("_asset_digests", {})
+        key = str(path)
+        entry = cache.get(key)
+        if entry is not None and entry[0] == identity:
+            if self.asset_identity(path.lstat()) != identity:
+                raise Failure("model_changed", "Model asset changed during fingerprint check")
+            self.check_budget()
+            return entry[1], before.st_size
+        h = hashlib.sha256()
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as stream:
+            if self.asset_identity(os.fstat(stream.fileno())) != identity:
+                raise Failure("model_changed", "Model asset changed before hashing")
+            read_bytes = 0
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                self.check_budget()
+                read_bytes += len(chunk)
+                h.update(chunk)
+            if (read_bytes != before.st_size or self.asset_identity(os.fstat(stream.fileno())) != identity
+                    or self.asset_identity(path.lstat()) != identity):
+                raise Failure("model_changed", "Model asset changed during hashing")
+        self.check_budget()
+        sha256 = h.hexdigest()
+        # One entry per path, bounded even if an owner repeatedly replaces a model tree.
+        if key not in cache and len(cache) >= 8192:
+            del cache[next(iter(cache))]
+        cache[key] = (identity, sha256)
+        return sha256, before.st_size
+
     def model_manifest(self):
         self.check_budget()
         if not (self.model_dir / "config.json").is_file():
@@ -347,15 +404,11 @@ class LocalLens:
                 raise Failure("configuration", "Model directory must contain materialized files, not symlinks")
             if not path.is_file():
                 continue
-            total += path.stat().st_size
-            if len(manifest) >= 4096 or total > 16 * 1024**3:
+            if len(manifest) >= 4096:
                 raise Failure("configuration", "Model assets exceed manifest bounds")
-            h = hashlib.sha256()
-            with path.open("rb") as f:
-                for chunk in iter(lambda: f.read(1024 * 1024), b""):
-                    self.check_budget()
-                    h.update(chunk)
-            manifest.append({"file": path.relative_to(self.model_dir).as_posix(), "sha256": h.hexdigest(), "bytes": path.stat().st_size})
+            sha256, size_bytes = self.asset_digest(path, 16 * 1024**3 - total)
+            total += size_bytes
+            manifest.append({"file": path.relative_to(self.model_dir).as_posix(), "sha256": sha256, "bytes": size_bytes})
         if not any(x["file"].endswith((".npz", ".safetensors")) for x in manifest):
             raise Failure("configuration", "Local model needs predownloaded .npz or .safetensors weights")
         return manifest
@@ -540,8 +593,11 @@ class LocalLens:
         if hasattr(self, "_deadline") and time.monotonic() >= deadline:
             raise Failure("timeout", "Analysis exceeded configured timeout")
         with tempfile.TemporaryFile() as log:
+            lease = getattr(self, '_compute_lease', None)
+            env = lease.child_env(self.child_environment()) if lease is not None else self.child_environment()
+            inherited = lease.pass_fds() if lease is not None else ()
             process = subprocess.Popen(command, stdin=subprocess.PIPE,
-                                       stdout=log, stderr=log, env=self.child_environment(), start_new_session=True)
+                                       stdout=log, stderr=log, env=env, pass_fds=inherited, start_new_session=True)
             try:
                 process.stdin.write(request)
                 process.stdin.close()
@@ -575,15 +631,22 @@ class LocalLens:
 
     def analyze(self, audio_path, language, cancel=None, emotion_mode="none"):
         cancel = cancel or threading.Event()
+        helper = compute_helper()
         absent = object()
-        previous = {key: getattr(self, key, absent) for key in ("_analysis_cancel", "_deadline")}
+        previous = {key: getattr(self, key, absent) for key in ("_analysis_cancel", "_deadline", "_compute_lease")}
         self._analysis_cancel, self._deadline = cancel, time.monotonic() + self.timeout
         try:
-            return self.analyze_once(audio_path, language, cancel, emotion_mode)
+            with helper.from_env(self.heavy_lock) as lease:
+                self._compute_lease = lease
+                self.check_budget()
+                return self.analyze_once(audio_path, language, cancel, emotion_mode)
+        except helper.HeavyJobError as exc:
+            raise Failure(exc.code, str(exc)) from exc
         finally:
             for key, value in previous.items():
                 if value is absent:
-                    delattr(self, key)
+                    if hasattr(self, key):
+                        delattr(self, key)
                 else:
                     setattr(self, key, value)
 
@@ -724,7 +787,8 @@ def child_infer():
     with wave.open(request["audio"], "rb") as w:
         audio = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2").astype(np.float32) / 32768.0
     settings = json.loads((Path(request["audio"]).parent / "settings.json").read_bytes())
-    kwargs = {"path_or_hf_repo": request["model"], "word_timestamps": True, "temperature": 0.0, "verbose": False}
+    kwargs = {"path_or_hf_repo": request["model"], "word_timestamps": True, "temperature": 0.0, "verbose": False,
+              "condition_on_previous_text": False}  # 0.2.2: stops decoder loops and blank songs (8-song CER check)
     if settings["language"] != "auto":
         kwargs["language"] = settings["language"]
     raw = mlx_whisper.transcribe(audio, **kwargs)

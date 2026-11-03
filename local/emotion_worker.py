@@ -9,6 +9,10 @@ from pathlib import Path
 import sys
 import wave
 
+DEFAULT_BATCH_SIZE = 8
+MAX_BATCH_SIZE = 16
+DEFAULT_DEVICE = "cpu"
+
 SETTINGS = {"voice": (4, 2, 1), "music": (5, 2.5, 3)}
 MOODS = ["passionate, rousing, confident, boisterous, rowdy", "rollicking, cheerful, fun, sweet, amiable/good natured",
          "literate, poignant, wistful, bittersweet, autumnal, brooding", "humorous, silly, campy, quirky, whimsical, witty, wry",
@@ -23,7 +27,7 @@ def versions(mode):
     return {name: importlib.metadata.version(name) for name in packages}
 
 
-def category_predictor(directory):
+def category_predictor(directory, device="cpu"):
     import torch
     torch.set_num_threads(4)
     torch.manual_seed(0)
@@ -52,23 +56,51 @@ def category_predictor(directory):
         self._local_coverage_checked = True
 
     Emotion2vec.on_pretrained_model_loaded = coverage
-    model = AutoModel(model=str(directory), device="cpu", ncpu=4, hub="hf", disable_update=True,
+    check_device(torch, device)
+    model = AutoModel(model=str(directory), device=device, ncpu=4, hub="hf", disable_update=True,
                       disable_log=True, disable_pbar=True, trust_remote_code=False, ignore_init_mismatch=False)
     if not getattr(model.model, "_local_coverage_checked", False):
         raise RuntimeError("Category checkpoint loader did not verify coverage")
     model.model.eval()
+    if next(model.model.parameters()).device.type != device:
+        raise RuntimeError("Category model did not load on the requested device")
+    tokenizer = model.kwargs.get("tokenizer")
+    labels = list(tokenizer.token_list) if tokenizer is not None else []
+    keep = [i for i, label in enumerate(labels) if not label.startswith("unuse")]
+    if model.model.proj is None or not keep:
+        raise RuntimeError("Category classifier or token labels missing")
+    selected_labels = [labels[i] for i in keep]
 
-    def predict(x):
+    def predict(batch):
+        # AutoModel.generate(list, batch_size=N) is serial inside the pinned inference()
+        # implementation. Mirror its audited utterance path using a real equal-length
+        # tensor batch; normalize each utterance independently, never across the batch.
+        import numpy as np
+        import torch.nn.functional as F
+        require_equal_length(batch)
+        source = torch.from_numpy(np.stack(batch)).to(device=device)
+        if model.model.cfg.normalize:
+            source = F.layer_norm(source, source.shape[-1:])
         with torch.inference_mode():
-            result = model.generate(input=x, data_type="sound", fs=16000, granularity="utterance", extract_embedding=False)[0]
-        labels, scores = list(result["labels"]), [float(v) for v in result["scores"]]
-        return {"category_labels": labels, "category_scores": scores,
-                "dominant_emotion": labels[max(range(len(scores)), key=scores.__getitem__)]}
+            features = model.model.extract_features(source, padding_mask=None)["x"]
+            logits = model.model.proj(features.mean(dim=1))
+            if tuple(logits.shape) != (len(batch), len(labels)):
+                raise RuntimeError("Invalid category batch result shape")
+            unused = [i for i in range(len(labels)) if i not in keep]
+            if unused:
+                logits[:, unused] = -float("inf")
+            scores = torch.softmax(logits, dim=-1).cpu().tolist()
+        out = []
+        for values in scores:
+            selected_scores = [float(values[i]) for i in keep]
+            out.append({"category_labels": selected_labels, "category_scores": selected_scores,
+                        "dominant_emotion": selected_labels[max(range(len(keep)), key=selected_scores.__getitem__)]})
+        return out
 
     return predict
 
 
-def dimension_predictor(directory):
+def dimension_predictor(directory, device="cpu"):
     import torch
     import torch.nn as nn
     from transformers import Wav2Vec2FeatureExtractor
@@ -97,19 +129,25 @@ def dimension_predictor(directory):
         def forward(self, values):
             return self.classifier(self.wav2vec2(values)[0].mean(dim=1))
 
+    check_device(torch, device)
     extractor = Wav2Vec2FeatureExtractor.from_pretrained(directory, local_files_only=True)
     model, info = EmotionModel.from_pretrained(directory, local_files_only=True, use_safetensors=True, output_loading_info=True)
     if info["missing_keys"] or info["unexpected_keys"] or info["mismatched_keys"] or info.get("error_msgs"):
         raise RuntimeError("Dimensional checkpoint mismatch")
+    model.to(device)
     model.eval()
+    if next(model.parameters()).device.type != device:
+        raise RuntimeError("Dimensional model did not load on the requested device")
 
-    def predict(x):
-        values = extractor(x, sampling_rate=16000, return_tensors="pt")["input_values"]
+    def predict(batch):
+        require_equal_length(batch)
+        # Equal-length batches require no padding or padding-dependent mean pooling.
+        values = extractor(list(batch), sampling_rate=16000, padding=False, return_tensors="pt")["input_values"].to(device)
         with torch.inference_mode():
-            values = model(values)[0].numpy().tolist()
-        if len(values) != 3:
-            raise RuntimeError("Invalid dimensional result shape")
-        return dict(zip(("arousal", "dominance", "valence"), map(float, values)))
+            values = model(values)
+        if tuple(values.shape) != (len(batch), 3):
+            raise RuntimeError("Invalid dimensional batch result shape")
+        return [dict(zip(("arousal", "dominance", "valence"), map(float, row))) for row in values.cpu().tolist()]
 
     return predict
 
@@ -135,9 +173,59 @@ def music_predictor(directory):
     return predict
 
 
+def execution_settings(request):
+    device = request.get("device", DEFAULT_DEVICE)
+    batch_size = request.get("batch_size", DEFAULT_BATCH_SIZE)
+    if device not in ("cpu", "mps"):
+        raise ValueError("Explicit emotion device must be cpu or mps")
+    if type(batch_size) is not int or not 1 <= batch_size <= MAX_BATCH_SIZE:
+        raise ValueError("Emotion batch_size must be an integer in 1..16")
+    if request["mode"] == "music" and device != "cpu":
+        raise ValueError("Music inference supports cpu only")
+    return device, batch_size
+
+
+def check_device(torch, device):
+    if device == "mps" and (not torch.backends.mps.is_built() or not torch.backends.mps.is_available()):
+        raise RuntimeError("Requested MPS emotion device is unavailable; no CPU fallback")
+    if device == "mps" and os.environ.get("PYTORCH_ENABLE_MPS_FALLBACK") not in (None, "0"):
+        raise RuntimeError("MPS operator fallback must be disabled")
+
+
+def require_equal_length(batch):
+    if not batch or len(batch) > MAX_BATCH_SIZE or len({len(x) for x in batch}) != 1:
+        raise ValueError("Emotion batch must contain 1..16 equal-length windows")
+
+
+def window_batches(x, rows, batch_size):
+    """Stable-order equal-length batches; short tails never pad or mix with full windows."""
+    at = 0
+    while at < len(rows):
+        first = rows[at]
+        length = int(first["end"] * 16000) - int(first["start"] * 16000)
+        end = at + 1
+        while end < min(len(rows), at + batch_size):
+            row = rows[end]
+            if int(row["end"] * 16000) - int(row["start"] * 16000) != length:
+                break
+            end += 1
+        yield rows[at:end], [x[int(r["start"] * 16000):int(r["end"] * 16000)] for r in rows[at:end]]
+        at = end
+
+
+def predict_rows(predict, x, rows, batch_size):
+    for selected, batch in window_batches(x, rows, batch_size):
+        result = predict(batch)
+        if len(result) != len(selected):
+            raise RuntimeError("Emotion batch result count mismatch")
+        for row, values in zip(selected, result):
+            row.update(values)
+
+
 def analyze(request):
     import numpy as np
     mode = request["mode"]
+    device, batch_size = execution_settings(request)
     size, hop, minimum = SETTINGS[mode]
     assets = Path(request["assets"])
     with wave.open(request["audio"], "rb") as w:
@@ -158,16 +246,16 @@ def analyze(request):
                 "score_semantics": "native_uncalibrated", "accuracy": "unvalidated_for_singing" if mode == "voice" else "unmeasured",
                 "dimension_scale": "model native, approximately 0..1" if mode == "voice" else "model native, approximately 1..9"}
     if mode == "voice":
-        predict = category_predictor(assets / "category")
-        for row in rows:
-            row.update(predict(x[int(row["start"] * 16000):int(row["end"] * 16000)]))
+        predict = category_predictor(assets / "category", device)
+        predict_rows(predict, x, rows, batch_size)
         del predict
         gc.collect()
-        predict = dimension_predictor(assets / "intensity")
+        predict = dimension_predictor(assets / "intensity", device)
+        predict_rows(predict, x, rows, batch_size)
     else:
         predict = music_predictor(assets / "music-model")
-    for row in rows:
-        row.update(predict(x[int(row["start"] * 16000):int(row["end"] * 16000)]))
+        for row in rows:
+            row.update(predict(x[int(row["start"] * 16000):int(row["end"] * 16000)]))
     right, covered = 0.0, 0.0
     for row in rows:
         covered += max(0.0, row["end"] - max(right, row["start"]))
@@ -189,11 +277,13 @@ def main():
     request = json.loads(sys.stdin.buffer.read(16384))
     if request.get("mode") not in SETTINGS:
         raise ValueError("Explicit supported emotion mode required")
+    execution_settings(request)
     work = Path(request["audio"]).parent
     os.environ.update(HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", MODELSCOPE_OFFLINE="1",
                       HF_HUB_DISABLE_TELEMETRY="1", DO_NOT_TRACK="1", OMP_NUM_THREADS="4",
                       TF_NUM_INTRAOP_THREADS="4", TF_NUM_INTEROP_THREADS="1",
-                      NUMBA_CACHE_DIR=str(work / "numba-cache"), MPLCONFIGDIR=str(work / "matplotlib-cache"))
+                      NUMBA_CACHE_DIR=str(work / "numba-cache"), MPLCONFIGDIR=str(work / "matplotlib-cache"),
+                      PYTORCH_ENABLE_MPS_FALLBACK="0")
     with contextlib.redirect_stdout(sys.stderr):
         result = analyze(request)
     payload = json.dumps(result, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode()
