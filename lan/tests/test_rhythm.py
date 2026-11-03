@@ -1228,7 +1228,7 @@ class RhythmReadTest(RhythmBase):
     def test_status_reports_availability(self):
         st, b = self.c.json("GET", "/status")
         self.assertEqual(b["rhythm"], {"configured": True, "python_present": True, "worker_present": True,
-                                       "worker_sha256": self.worker_sha()})
+                                       "worker_sha256": self.worker_sha(), "separation_configured": False})
         self.assertEqual(b["tool_version"], "fake")
 
     def test_timeline_beats_paging(self):
@@ -2232,7 +2232,7 @@ class RealWorkerTest(unittest.TestCase):
             self.assertEqual((v["sample_rate"], v["chords_reliability"]), (44100, "low_reference"))
             self.assertIn(v["duration"], (30.0, 60.0))
             self.assertEqual(v["tool"]["essentia_version"], "2.1-beta6-dev")
-            self.assertEqual(v["tool"]["version"], "0.5.0")
+            self.assertEqual(v["tool"]["version"], "0.6.0")
             g = v["genre"]
             self.assertEqual(g["status"], "done" if GENRE_PRESENT else "unavailable", g)
             if GENRE_PRESENT:  # measured: 29 patches for 30 s, 59 for 60 s (hop 0.992 s, first from ~2.04 s)

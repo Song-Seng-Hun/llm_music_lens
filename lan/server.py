@@ -55,6 +55,8 @@ DEFAULT_LIMITS = {
 CONFIG_KEYS = {"bind", "port", "allow", "clients", "cert", "key", "ml", "root", "inbox", "limit_exec",
                "launchd_logs", "test_mode", "limits", "test_ready_file", "rhythm"}
 RHYTHM_KEYS = {"python", "worker"}
+RHYTHM_SEPARATION_KEYS = {"demucs", "rmvpe"}
+SEP_DIR = "sep"  # per-request scratch of the rhythm worker, under the upload directory
 RHYTHM_DIR = "results-rhythm"  # under root: <result_id>.json, 0600, written atomically
 RHYTHM_LAYERS = ("beats", "chords", "energy", "melody", "genre")
 RHYTHM_MAX_BEATS = 5000
@@ -590,11 +592,14 @@ def load_config(path):
     cfg["rhythm"] = None
     if "rhythm" in raw:  # optional layer; absent = unavailable
         rh = raw["rhythm"]
-        if not isinstance(rh, dict) or set(rh) != RHYTHM_KEYS:
-            raise ConfigError("rhythm must be an object with exactly python and worker")
+        if not isinstance(rh, dict) or set(rh) - {"separation"} != RHYTHM_KEYS:
+            raise ConfigError("rhythm must be an object with python, worker and optionally separation")
+        sp = rh.get("separation")
+        if "separation" in rh and (not isinstance(sp, dict) or set(sp) != RHYTHM_SEPARATION_KEYS):
+            raise ConfigError("rhythm separation must be an object with exactly demucs and rmvpe")
         out = {}
-        for k in ("python", "worker"):
-            out[k] = _abs(rh[k], "rhythm " + k)
+        for k, raw_path in [("python", rh["python"]), ("worker", rh["worker"])] + sorted((sp or {}).items()):
+            out[k] = _abs(raw_path, "rhythm " + k)
             try:
                 st = os.stat(out[k])
             except OSError:
@@ -605,6 +610,8 @@ def load_config(path):
                 raise ConfigError("rhythm " + k + " must not be group or world writable")
         if not os.access(out["python"], os.X_OK):
             raise ConfigError("rhythm python not executable")
+        if sp and not os.access(out["demucs"], os.X_OK):
+            raise ConfigError("rhythm demucs not executable")
         cfg["rhythm"] = out
     return cfg
 
@@ -1158,6 +1165,8 @@ MELODY_DIR_NOTES = 4  # the worker's minimum notes for a section direction
 MELODY_MAX_NPS = 1000  # notes per second of note time; stored rows last >= 0.001 s (ms rounding, end > start)
 MELODY_NPS_TOL = 0.002  # recomputed from the stored rows; the worker rounds to 3 decimals
 MELODY_RETRY_CODES = frozenset(("analysis_error", "dependency_missing"))  # environment-dependent, like tempo_cnn
+SEP_RETRY_REASONS = frozenset(("models_invalid", "decode_failed", "separation_failed", "rmvpe_failed"))
+SEP_REASONS = SEP_RETRY_REASONS | {"not_configured", "canonical_16k", "band_limited"}
 
 
 def _notes_per_second(notes):
@@ -1196,6 +1205,12 @@ def _melody_done_ok(m, v, dur, notes):
                 and r >= m["note_count"]):
             return False
         keys.discard("note_count_raw")
+    if "separation" in m:  # worker 0.6.0: whether the notes come from a separated vocal, and why not
+        sp = m["separation"]
+        if sp not in ({"status": "done"},) and not (isinstance(sp, dict) and set(sp) == {"status", "reason"}
+                                                     and sp["status"] == "skipped" and sp["reason"] in SEP_REASONS):
+            return False
+        keys.discard("separation")
     if keys != MELODY_KEYS or m["reliability"] != "low_reference" or not _short_str(m["method"], 200):
         return False
     n = m["note_count"]
@@ -1497,11 +1512,20 @@ def _rhythm_retry(v):
     worker 0.4.0+, melody, or 0.4.3 lyric_repeats, or 0.5.0 genre) ended in an outcome whose cause can change
     without a worker change."""
     m, ly, g = v.get("melody"), v.get("lyric_repeats"), v.get("genre")
+    sp = m.get("separation") if isinstance(m, dict) else None
     return (_tempo_cnn_retry(v) or (isinstance(m, dict) and m.get("status") == "failed"
                                     and m.get("code") in MELODY_RETRY_CODES)
+            or (isinstance(sp, dict) and sp.get("reason") in SEP_RETRY_REASONS)
             or (isinstance(ly, dict) and ly.get("status") == "unavailable" and ly.get("reason") in LYRIC_RETRY_REASONS)
             or (isinstance(g, dict) and ((g.get("status") == "unavailable" and g.get("reason") not in GENRE_FINAL_REASONS)
                                          or (g.get("status") == "failed" and g.get("code") in TEMPO_CNN_RETRY_CODES))))
+
+
+def _melody_can_improve(v):
+    """A stored melody that never had the chance of a separated vocal; this upload has it."""
+    m = v.get("melody")
+    sp = m.get("separation") if isinstance(m, dict) else None
+    return isinstance(sp, dict) and sp.get("reason") in ("not_configured", "canonical_16k")
 
 
 def _tempo_cnn_retry(v):
@@ -2173,7 +2197,8 @@ class App:
         if not rh:
             return None
         return {"configured": True, "python_present": os.path.isfile(rh["python"]),
-                "worker_present": os.path.isfile(rh["worker"]), "worker_sha256": self.rhythm_worker_sha256}
+                "worker_present": os.path.isfile(rh["worker"]), "worker_sha256": self.rhythm_worker_sha256,
+                "separation_configured": "demucs" in rh}
 
     def lyric_words(self, rid):
         """(--words-stdin bytes, their SHA-256) from the ml result file <root>/results/<rid>.json (read-only)."""
@@ -2218,8 +2243,10 @@ class App:
         cur = self.rhythm_worker_sha256
         words, words_sha = self.lyric_words(result_id)
         # reuse needs the same worker file and the same ASR words (a re-run ASR can change them for this result_id)
+        separable = "demucs" in self.cfg["rhythm"] and not (job.kind == "wav" and strict_wav_check(job.src))
         if (state == "ok" and cur is not None and stored.get("worker_sha256") == cur
-                and stored.get("words_sha256") == words_sha and not _rhythm_retry(stored)):
+                and stored.get("words_sha256") == words_sha and not _rhythm_retry(stored)
+                and not (separable and _melody_can_improve(stored))):
             return dict(rhythm_summary(stored, self.rhythm_overview(result_id, stored, words, words_sha)),
                         cache_hit=True, stored=True)
         # absent (worker 0.1.0/0.2.0 files), different or unverifiable worker identity: recompute; the stored file
@@ -2243,7 +2270,7 @@ class App:
                 return {"status": "busy", "code": "busy"}
             except OSError:
                 return {"status": "failed", "code": "lock_unavailable"}
-            res = self._spawn_rhythm(rh, wav, lfd, timeout, words)
+            res = self._spawn_rhythm(rh, wav, lfd, timeout, words, job, separable)
         finally:
             os.close(lfd)  # the worker shares this lock while it lives; released when both have closed it
         self.log.event("rhythm_exit", id=job.rid, status=res.get("status"), code=res.get("code"))
@@ -2262,14 +2289,20 @@ class App:
         return dict(rhythm_summary(data, self.rhythm_overview(result_id, data, words, words_sha)), cache_hit=False,
                     stored=stored)
 
-    def _spawn_rhythm(self, rh, wav, lock_fd, timeout, words):
+    def _spawn_rhythm(self, rh, wav, lock_fd, timeout, words, job, separable):
         lim = self.limits
         with tempfile.TemporaryFile() as inp, tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
             inp.write(words)  # the ASR words for lyric_repeats, on stdin (no named file)
             inp.flush()
             inp.seek(0)
             try:
-                p = subprocess.Popen([rh["python"], "-I", rh["worker"], "--words-stdin", wav], stdin=inp, stdout=out,
+                sep = []
+                if "demucs" in rh:
+                    sep = ["--demucs", rh["demucs"], "--rmvpe-model", rh["rmvpe"],
+                           "--melody-scratch", self.uploads + "/" + job.op + "/" + SEP_DIR]
+                    if separable:
+                        sep += ["--melody-source", job.src]
+                p = subprocess.Popen([rh["python"], "-I", rh["worker"], "--words-stdin"] + sep + [wav], stdin=inp, stdout=out,
                                      stderr=err, env=self.child_env(), cwd="/", close_fds=True, pass_fds=(lock_fd,),
                                      shell=False, start_new_session=True)
             except OSError:
@@ -2499,6 +2532,7 @@ class App:
     def cleanup(self, op, linked):
         """Request-owned paths only, after owning processes exited. No directory sweeps."""
         d = self.uploads + "/" + op
+        shutil.rmtree(d + "/" + SEP_DIR, ignore_errors=True)  # left behind only when the worker was killed
         for n in UPLOAD_NAMES:
             try:
                 os.unlink(d + "/" + n)
