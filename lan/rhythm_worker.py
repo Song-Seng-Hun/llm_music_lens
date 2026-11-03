@@ -280,8 +280,7 @@ RMVPE_HOP_S = 0.01
 SEP_RETRY_REASONS = ("models_invalid", "decode_failed", "separation_failed", "rmvpe_failed")
 SEP_FLAGS = {"--demucs": "demucs", "--rmvpe-model": "rmvpe", "--melody-scratch": "scratch", "--melody-source": "source"}
 MEL_METHOD_VOCAL = ("Demucs htdemucs_ft vocal at 44.1 kHz, then RMVPE threshold 0.03 on CPU in 30 s pieces; "
-                    "same note segmentation and merge as the mix method. Notes follow the separated vocal stem, "
-                    "which can include backing vocals.")
+                    "same note segmentation and merge as the mix method. The vocal stem can include backing vocals.")
 MEL_METHOD = ("EqualLoudness+PredominantPitchMelodia 16 kHz frame 1024 hop 128 (predominant pitch of the full mix); "
               "0.2 s median f0 (cents); PitchContourSegmentation notes, midi rounded; vibrato/same-pitch merge")
 NOTE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
