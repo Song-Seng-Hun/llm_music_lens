@@ -88,6 +88,12 @@ class SeparationServerTest(RhythmBase):
             self.write_stored(self.with_separation({"status": "skipped", "reason": reason}))
             self.assertFalse(self.post(WAV)["cache_hit"], reason)
 
+    def test_method_texts_pass_the_validator(self):
+        for method, sp in ((rw.MEL_METHOD_VOCAL, {"status": "done"}),
+                           (rw.MEL_METHOD, {"status": "skipped", "reason": "not_configured"})):
+            v = json.loads(json.dumps(dict(RHYTHM_OUT_V40, melody=dict(MELODY, method=method, separation=sp))))
+            self.assertIs(server.check_rhythm(v), v, method)
+
     def test_separation_field_checked(self):
         good = ({"status": "done"}, {"status": "skipped", "reason": "band_limited"})
         for sp in good:
