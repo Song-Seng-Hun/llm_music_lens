@@ -7,6 +7,8 @@ Usage: <essentia python> -I rhythm_worker.py [--words-stdin] WAV
        option can only select a byte-identical copy or make tempo_cnn unavailable.)
        --genre-models /abs/dir (0.5.0; tests and measurement only, same rule: the three pinned Discogs files are
        looked up by name in that directory and their SHA-256 pins are not overridable)
+       --demucs /abs/demucs-mlx --rmvpe-model /abs/rmvpe.pt --melody-scratch /abs/dir [--melody-source /abs/upload]
+       (0.6.0; melody from a separated vocal, see "Vocal melody" below. No --melody-source = canonical 16 kHz upload.)
 WAV is the server's already-validated canonical file (PCM mono 16 kHz s16, 0 < duration <= 600 s).
 --words-stdin (0.4.3; the server always passes it): stdin holds one JSON object {"words": [[text, start, end], ...]}
 (the ASR words of the same result) or {"words": null, "reason": code} (the server could not provide them), at most
@@ -163,14 +165,16 @@ import math
 import os
 import re
 import resource
+import shutil
 import signal
 import stat
 import statistics
+import subprocess
 import sys
 import unicodedata
 import wave
 
-TOOL = {"name": "music-lens-rhythm-worker", "version": "0.5.0"}
+TOOL = {"name": "music-lens-rhythm-worker", "version": "0.6.0"}
 SRC_RATE = 16000
 RATE = 44100
 MAX_SECONDS = 600.0
@@ -256,6 +260,28 @@ MERGE_CENTRE = 0.5  # s; in a 2-semitone oscillation the middle pitch may last t
 MERGE_MAX_RUN = 400  # pieces per oscillation window (bounds the work; ~40 s of 0.1 s pieces)
 MERGE_SPAN = 2  # semitones; widest oscillation joined (+-100 cents vibrato reads as -1..+1)
 MERGE_REVERSALS = 2  # sign changes an oscillation needs: A-B-A-B = 3 alternating moves = 2 sign changes
+# Vocal melody (0.6.0, optional): Demucs on the full-band upload, then RMVPE on the vocal, instead of Melodia on the mix.
+# Mix0 mean against Melodia (RPA / false voicing, 2026-11-03): 4 synthetic songs 84.5/27.9 vs 79.6/47.5, 40 human clips
+# 95.8/37.1 vs 54.2/45.8. With 16 kHz input to Demucs RPA falls to 53.9, so band-limited audio keeps Melodia.
+# 44.1 kHz mono files had -20.4..-27.6 dB above 8.2 kHz; 16 kHz resampled up had -50.6 dB.
+# Batch 1 keeps Demucs at 8.6 GB for 600 s (34.1 GB with the automatic batch); the seed makes it repeatable.
+SEP_RATE = 44100
+SEP_BAND_HZ, SEP_BAND_MIN_DB = 8200.0, -40.0
+DEMUCS_ARGS = ("-n", "htdemucs_ft", "--stem", "vocals", "-b", "1", "--seed", "0")
+DEMUCS_WEIGHTS = "~/.cache/demucs-mlx/htdemucs_ft.safetensors"  # where demucs-mlx looks; it has no path option
+DEMUCS_WEIGHTS_SHA256 = "53f03b1ad4b4d211025a35da65460ba61a17547adf9c0544cad0ebcc8d7bbabb"
+DEMUCS_WEIGHTS_MAX_BYTES = 1024 * 1024 * 1024
+RMVPE_SHA256 = "6d62215f4306e3ca278246188607209f09af3dc77ed4232efdd069798c4ec193"
+RMVPE_MAX_BYTES = 256 * 1024 * 1024
+RMVPE_CODE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rmvpe_model.py")
+RMVPE_CODE_SHA256 = "b948ecc0449018dc0ae6c12d584d5af59acbb5a8b477b95b5898a751c2cce325"
+RMVPE_CODE_MAX_BYTES = 64 * 1024
+RMVPE_HOP_S = 0.01
+SEP_RETRY_REASONS = ("models_invalid", "decode_failed", "separation_failed", "rmvpe_failed")
+SEP_FLAGS = {"--demucs": "demucs", "--rmvpe-model": "rmvpe", "--melody-scratch": "scratch", "--melody-source": "source"}
+MEL_METHOD_VOCAL = ("Demucs htdemucs_ft vocal at 44.1 kHz, then RMVPE threshold 0.03 on CPU in 30 s pieces; "
+                    "same note segmentation and merge as the mix method. Notes follow the separated vocal stem, "
+                    "which can include backing vocals.")
 MEL_METHOD = ("EqualLoudness+PredominantPitchMelodia 16 kHz frame 1024 hop 128 (predominant pitch of the full mix); "
               "0.2 s median f0 (cents); PitchContourSegmentation notes, midi rounded; vibrato/same-pitch merge")
 NOTE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
@@ -1251,14 +1277,119 @@ def smooth_pitch(pitch, w=MEL_SMOOTH):
     return out
 
 
-def melody(x16, duration, tonic, scale, sections):
+def read_riff_pcm16(path):
+    """(rate, channels, samples bytes) of an afconvert WAV, which can use the extensible format header."""
+    with open(path, "rb") as f:
+        b = f.read()
+    i, chunks = 12, {}
+    while i + 8 <= len(b):
+        n = int.from_bytes(b[i + 4:i + 8], "little")
+        chunks[b[i:i + 4]] = b[i + 8:i + 8 + n]
+        i += 8 + n + (n & 1)
+    fmt = chunks[b"fmt "]
+    return int.from_bytes(fmt[4:8], "little"), int.from_bytes(fmt[2:4], "little"), chunks[b"data"]
+
+
+def write_wav(path, rate, x):
+    import numpy as np
+    with wave.open(path, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes((np.clip(x, -1.0, 1.0) * 32767).astype("<i2").tobytes())
+
+
+def band_db(x):
+    """Share of the energy above SEP_BAND_HZ in dB; silence counts as no band."""
+    import numpy as np
+    power = np.abs(np.fft.rfft(x)) ** 2
+    total = float(power.sum())
+    if total <= 0.0:
+        return -math.inf
+    high = float(power[np.fft.rfftfreq(len(x), 1.0 / SEP_RATE) > SEP_BAND_HZ].sum())
+    return 10.0 * math.log10(high / total) if high > 0.0 else -math.inf
+
+
+def run_tool(argv):
+    return subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                          env=dict(os.environ, DEMUCS_MLX_NO_DOWNLOAD="1", HF_HUB_OFFLINE="1"), cwd="/").returncode
+
+
+def vocal_pitch(sep, n16):
+    """(8 ms pitch, 16 kHz vocal, None) or (None, None, reason)."""
+    import numpy as np
+    from scipy.io import wavfile
+    from scipy.signal import resample_poly
+    for path, sha, cap in ((os.path.expanduser(DEMUCS_WEIGHTS), DEMUCS_WEIGHTS_SHA256, DEMUCS_WEIGHTS_MAX_BYTES),
+                           (sep["rmvpe"], RMVPE_SHA256, RMVPE_MAX_BYTES),
+                           (RMVPE_CODE, RMVPE_CODE_SHA256, RMVPE_CODE_MAX_BYTES)):
+        if read_pinned(path, sha, cap, keep=False)[0]:
+            return None, None, "models_invalid"
+    d = sep["scratch"]
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    decoded, full = os.path.join(d, "decoded.wav"), os.path.join(d, "full.wav")
+    if run_tool(["/usr/bin/afconvert", "-f", "WAVE", "-d", "LEI16@%d" % SEP_RATE, "-c", "1", sep["source"], decoded]):
+        return None, None, "decode_failed"
+    rate, channels, raw = read_riff_pcm16(decoded)
+    if (rate, channels) != (SEP_RATE, 1):
+        return None, None, "decode_failed"
+    x = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+    if band_db(x) < SEP_BAND_MIN_DB:
+        return None, None, "band_limited"
+    write_wav(full, SEP_RATE, x)
+    os.unlink(decoded)
+    if run_tool([sep["demucs"]] + list(DEMUCS_ARGS) + ["-o", d, full]):
+        return None, None, "separation_failed"
+    rate, y = wavfile.read(os.path.join(d, "full", "vocals.wav"))
+    y = y.astype(np.float32)
+    if y.ndim > 1:
+        y = y.mean(axis=1)
+    if float(np.abs(y).max(initial=0.0)) > 2.0:
+        y /= 32768.0
+    g = math.gcd(rate, SRC_RATE)
+    y = resample_poly(y, SRC_RATE // g, rate // g).astype(np.float32)
+    stem = np.zeros(n16, dtype=np.float32)
+    stem[:min(n16, len(y))] = y[:n16]
+    stem_wav, f0_npy = os.path.join(d, "stem16.wav"), os.path.join(d, "f0.npy")
+    write_wav(stem_wav, SRC_RATE, stem)
+    if run_tool([sys.executable, "-I", RMVPE_CODE, sep["rmvpe"], stem_wav, f0_npy]):
+        return None, None, "rmvpe_failed"
+    f0 = np.load(f0_npy, allow_pickle=False)
+    if f0.ndim != 1 or not len(f0) or not np.all(np.isfinite(f0)):
+        return None, None, "rmvpe_failed"
+    hop_s = MEL_HOP / float(SRC_RATE)
+    i = np.minimum(np.round(np.arange(n16 // MEL_HOP + 1) * hop_s / RMVPE_HOP_S).astype(int), len(f0) - 1)
+    return f0[i].astype(np.float64), stem, None
+
+
+def melody_input(sep, n16):
+    """(8 ms pitch or None, vocal or None, separation field). None pitch = use Melodia on the mix. Never raises."""
+    if sep is None:
+        return None, None, {"status": "skipped", "reason": "not_configured"}
+    if sep.get("source") is None:
+        return None, None, {"status": "skipped", "reason": "canonical_16k"}
+    try:
+        pitch, stem, reason = vocal_pitch(sep, n16)
+    except Exception:
+        pitch, stem, reason = None, None, "separation_failed"
+    finally:
+        shutil.rmtree(sep["scratch"], ignore_errors=True)
+    return pitch, stem, {"status": "done"} if reason is None else {"status": "skipped", "reason": reason}
+
+
+def melody(x16, duration, tonic, scale, sections, sep=None):
     """(melody dict, notes, warnings) for the 16 kHz source; never raises (failure -> status failed, no notes)."""
     try:
         import essentia.standard as es
         import numpy as np
-        a = es.EqualLoudness(sampleRate=SRC_RATE)(x16)
-        pitch, _ = es.PredominantPitchMelodia(sampleRate=SRC_RATE, frameSize=MEL_FRAME, hopSize=MEL_HOP,
-                                              maxFrequency=MEL_MAX_FREQ)(a)
+        vocal_pitch_8ms, stem, separation = melody_input(sep, len(x16))
+        vocal = stem is not None
+        a = es.EqualLoudness(sampleRate=SRC_RATE)(stem if vocal else x16)
+        if vocal:
+            pitch = vocal_pitch_8ms
+        else:
+            pitch, _ = es.PredominantPitchMelodia(sampleRate=SRC_RATE, frameSize=MEL_FRAME, hopSize=MEL_HOP,
+                                                  maxFrequency=MEL_MAX_FREQ)(a)
         pitch = np.asarray(pitch, dtype=np.float64)
         if not np.all(np.isfinite(pitch)):
             return {"status": "failed", "code": "non_finite"}, [], ["melody_failed: non_finite"]
@@ -1271,6 +1402,8 @@ def melody(x16, duration, tonic, scale, sections):
             for o, d, m in zip(on, du, mi):
                 o, d, m = float(o), float(d), float(m)
                 if not (math.isfinite(o) and math.isfinite(d) and math.isfinite(m)):
+                    if vocal:  # segmentation gives NaN pitch for a note with no voiced RMVPE frame
+                        continue
                     return {"status": "failed", "code": "non_finite"}, [], ["melody_failed: non_finite"]
                 s, e, mm = r3(min(max(o, 0.0), duration)), r3(min(max(o + d, 0.0), duration)), int(round(m))
                 if e > s and 0 <= mm <= 127:
@@ -1279,10 +1412,15 @@ def melody(x16, duration, tonic, scale, sections):
         raw = len(notes)
         notes = merge_notes(notes)
         warns = []
+        if separation.get("reason") in SEP_RETRY_REASONS:
+            warns.append("melody_separation_failed: %s, used the mix method" % separation["reason"])
         if not notes:
             warns.append("no_melody: no pitched note was found")
         summary = melody_summary(notes, voiced, hop_s, len(pitch), tonic, scale, sections)
         summary["note_count_raw"] = raw
+        summary["separation"] = separation
+        if vocal:
+            summary["method"] = MEL_METHOD_VOCAL
         if summary["scale_degrees"] is None and notes:
             warns.append("melody_scale_degrees_unavailable: key tonic not recognized")
         if len(notes) > MELODY_MAX_NOTES:
@@ -1324,7 +1462,7 @@ def read_wav(path):
     return x, len(x) / float(SRC_RATE)
 
 
-def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None, genre_dir=GENRE_DIR):
+def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None, genre_dir=GENRE_DIR, sep=None):
     import essentia
     import essentia.standard as es
     import numpy as np
@@ -1421,7 +1559,7 @@ def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None, genre_di
                                    [min(i * step, duration) for i in range(len(pcps))], beats, duration, energy, chords)
     if sec_warn:
         warnings.append(sec_warn)
-    mel, mel_notes, mel_warn = melody(x16, r3(duration), str(tonic), str(scale), sections)
+    mel, mel_notes, mel_warn = melody(x16, r3(duration), str(tonic), str(scale), sections, sep)
     warnings.extend(mel_warn)
     try:  # pure Python on the server's words; never fails the worker
         lyr, lyr_warn = lyric_repeats(words, r3(duration), words_reason)
@@ -1472,8 +1610,9 @@ def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None, genre_di
 def main(argv):
     model, use_model, use_words, rest = TEMPO_CNN_MODEL, False, False, list(argv[1:])
     genre_dir, use_genre = GENRE_DIR, False
+    sep = {}
     usage = ("usage: rhythm_worker.py [--tempo-cnn-model /abs/model.pb] [--genre-models /abs/dir] [--words-stdin] "
-             "/absolute/path.wav")
+             "[--demucs /abs --rmvpe-model /abs --melody-scratch /abs [--melody-source /abs]] /absolute/path.wav")
     while len(rest) > 1:
         if rest[0] == "--tempo-cnn-model" and not use_model and len(rest) > 2 and os.path.isabs(rest[1]):
             model, use_model, rest = rest[1], True, rest[2:]
@@ -1481,8 +1620,12 @@ def main(argv):
             genre_dir, use_genre, rest = rest[1], True, rest[2:]
         elif rest[0] == "--words-stdin" and not use_words:
             use_words, rest = True, rest[1:]
+        elif SEP_FLAGS.get(rest[0]) and SEP_FLAGS[rest[0]] not in sep and len(rest) > 2 and os.path.isabs(rest[1]):
+            sep[SEP_FLAGS[rest[0]]], rest = rest[1], rest[2:]
         else:
             fail_out("invalid_argument", usage)
+    if sep and not {"demucs", "rmvpe", "scratch"} <= set(sep):
+        fail_out("invalid_argument", usage)
     if len(rest) != 1 or not os.path.isabs(rest[0]):
         fail_out("invalid_argument", usage)
     words, words_reason = None, None
@@ -1498,7 +1641,7 @@ def main(argv):
     except (ValueError, OSError):
         pass
     try:
-        out = analyze(rest[0], model, words, words_reason, genre_dir)
+        out = analyze(rest[0], model, words, words_reason, genre_dir, sep or None)
     except Fail as e:
         fail_out(e.code, e.message)
     except ImportError as e:

@@ -14,6 +14,7 @@ Nothing here is installed. No LaunchAgent, firewall rule, certificate or key is 
 | --- | --- |
 | `server.py` | The server: config, en0/en1 address discovery, TLS 1.2+, strict framing, HMAC auth, durable nonce and receipt logs, pipeline gate, staging, afconvert, strict WAV check, hard-link promotion, `ml` calls by argv, error mapping, cleanup, logs |
 | `rhythm_worker.py` | Optional rhythm layer worker (Essentia DSP plus pinned local models: TempoCNN, Discogs-EffNet + genre head): BPM (+ half/double, + learned TempoCNN estimate), beats, key (+ 20 s sections), beat-grid chords, 1 s energy curve, repeated-section structure (A/B/...), melody feature summary (predominant pitch notes), genre/style estimate (song + 30 s windows). Runs under the Essentia python, never in the listener |
+| `rmvpe_model.py` | Optional vocal melody: RMVPE inference on CPU, run by `rhythm_worker.py` as its own process (reduced from RVC-Project, MIT) |
 | `limit_exec.py` | Sets RLIMIT_CPU 60 s / FSIZE 24 MiB / NOFILE 32, then `execv /usr/bin/afconvert -f WAVE -d LEI16@16000 -c 1 src dst` |
 | `sign.py` | Shared canonical-string and HMAC helper (server, tests, Python clients) |
 | `sign_vector.mjs` | Reference Node signer; prints or checks the fixed vector (`tests/vectors.json`) |
@@ -539,6 +540,55 @@ balance, which scale degrees it sits on, where it climbs). Not a transcription a
 Worker 0.4.1 runtime (600 s, 2 runs each, same session): melody track 9.24 s and 1.13-1.14 GB peak RSS vs 0.4.0
 9.33-9.35 s and 1.14 GB; C-Am-F-G loop 8.98-9.02 s vs 9.11-9.13 s (the second TempoCNN call is gone). Stored file
 +54 B (`silence_db`, `silence_s`, `silent_patches`).
+
+### Vocal melody (worker 0.6.0, optional)
+
+Melody notes can come from a separated vocal instead of the mix. Off unless the `rhythm` config has `separation`:
+
+```json
+"rhythm": {"python": "...", "worker": "...",
+           "separation": {"demucs": "/Users/YOU/path/to/venv/bin/demucs-mlx", "rmvpe": "/Users/YOU/path/to/rmvpe.pt"}}
+```
+
+Copy `rmvpe_model.py` next to `rhythm_worker.py`. Nothing is downloaded: install demucs-mlx in its own environment and
+place `htdemucs_ft.safetensors` under `~/.cache/demucs-mlx/` yourself. Both weight files are pinned by SHA-256 in the
+worker. The rhythm python needs torch, scipy and librosa.
+
+What happens on a rhythm request: the upload is decoded to 44.1 kHz mono; audio with under -40 dB of its energy above
+8.2 kHz keeps the mix method, because Demucs needs the full band. Otherwise Demucs (`htdemucs_ft`, batch 1, seed 0)
+gives a vocal, RMVPE reads it on CPU, and the notes go through the same segmentation and merge as before. Only melody
+changes; every other layer still reads the 16 kHz mix.
+
+`melody.separation` says what was used: `{"status": "done"}`, or `{"status": "skipped", "reason": ...}` with the mix
+method. `melody.method` names the method. Reasons: `not_configured`, `canonical_16k` (a 16 kHz WAV upload has no band
+above 8 kHz), `band_limited`, and the failures `models_invalid`, `decode_failed`, `separation_failed`, `rmvpe_failed`,
+which also add the warning `melody_separation_failed` and are retried on the next request. A stored melody from the mix
+is recomputed when a later upload of the same audio can be separated; a stored vocal melody stays for a later 16 kHz
+upload. Send M4A, MP3 or a full-band WAV to get the vocal method.
+
+Results, all on mixes built for the test (voice and accompaniment at equal level), since real songs have no pitch truth:
+
+| Set | Method | Pitch accuracy (within 50 cents) | False voicing in rests |
+|---|---|---|---|
+| 4 synthetic-voice songs | mix | 79.6 | 47.5 |
+| 4 synthetic-voice songs | vocal | 84.5 | 27.9 |
+| 40 human-voice clips (vocadito) | mix | 54.2 | 45.8 |
+| 40 human-voice clips (vocadito) | vocal | 95.8 | 37.1 |
+
+Limits: one of the four songs got worse (77.5 to 73.5), the one where separation was poorest. Backing vocals pass
+through Demucs as vocals, and that case is not in these mixes.
+
+Cost for a 600 s file on an M4 Max: Demucs 6.8 s and 8.6 GB, RMVPE 7.6 s and 2.6 GB, run one after the other. The
+default Demucs batch would take 34.1 GB.
+
+Licenses:
+
+| Part | Terms | Notes |
+|---|---|---|
+| demucs-mlx, Demucs code | MIT | Installed separately |
+| `htdemucs_ft` weights | Not MIT. The Demucs maintainer states they are provided for research purposes (facebookresearch/demucs issues #267, #327, #508) | Not in this repository. Whoever installs them accepts those terms |
+| `rmvpe_model.py` | MIT (RVC-Project). RMVPE's original code is Apache-2.0 | Notice kept in the file |
+| `rmvpe.pt` | The hosting repository (lj1995/VoiceConversionWebUI) is tagged MIT, with nothing about this file or its training data | Not in this repository. Terms are unconfirmed |
 
 ### Lyric repeats (worker 0.4.3, approximate matching 0.4.4)
 
