@@ -33,7 +33,7 @@ class LocalTests(unittest.TestCase):
             w.writeframes(b"\0\0" * 16000)
         self.wav = self.audio / "fixture.wav"
         self.wav.write_bytes(buffer.getvalue())
-        self.lens = m.LocalLens(self.audio, self.results, self.model)
+        self.lens = m.LocalLens(self.audio, self.results, self.model, heavy_lock=self.root / "compute.lock")
         self.lens.engine_version = lambda: "fake-0"
         self.calls = 0
 
