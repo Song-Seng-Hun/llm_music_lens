@@ -1,6 +1,6 @@
 # Local Music Lens (macOS)
 
-Version 0.2.4 combines native Whisper word times and optional voice emotion or
+Version 0.2.5 combines native Whisper word times and optional voice emotion or
 music-mood windows in one analysis. It runs per job; no daemon, automatic download,
 upload, installation or global client configuration is added. Voice models are
 unvalidated for singing; music-mood accuracy is unmeasured. Scores are model
@@ -126,10 +126,20 @@ hashes give 0.2.3 its own cache identity.
 Window re-read (0.2.4): after one Whisper pass, a 30 s decoder window is decoded again
 when its text has a known end-of-video phrase (ja/en/ko), a word longer than 40
 characters (a decoder loop). The retry starts 2, 4, 6, 8 or 10 s later in the window;
-the first clean retry replaces it. If none is clean, only the loop words and the words
-that spell the phrase are dropped. Windows without words are not retried. `window_rereads` in the report lists each window, the reason
+the first clean retry replaces it. If none is clean, the loop words go, and so does
+every word from the phrase to the window end (what followed one was invented too). Windows without words are not retried. `window_rereads` in the report lists each window, the reason
 and the shift used. Cost: a few seconds per bad window. The phrase list comes from
 observed failures, so a phrase not on it stays in the output.
+
+0.2.5 adds two reasons. `credit`: the window's text has song-credit words (作詞, 作曲,
+編曲) that Whisper writes over an intro. `sparse`: a loud window (other than the first)
+with under half the song's median words per second, which is where Whisper skipped
+sung lines, often repeated hooks. For both, every shift is tried and the retry with the
+most words is used only if it has 1.5x and 10 more words than the window. No retry of any
+reason is used if it has an end-of-video phrase, a credit word or a phrase repeated many
+times in a row. If no retry helps, credit words are
+dropped and a sparse window stays as it was. A loud instrumental break also counts as
+sparse when it has a few words, so it costs five extra decodes but keeps its words.
 
 ## MCP and verification
 

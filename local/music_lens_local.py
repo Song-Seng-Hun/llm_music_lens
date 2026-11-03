@@ -22,7 +22,7 @@ import time
 import wave
 import uuid
 
-VERSION = "0.2.4"
+VERSION = "0.2.5"
 SCHEMA_VERSION = "music-lens-local/2"
 END_TOLERANCE = 0.05
 MAX_AUDIO = 64 * 1024 * 1024
@@ -39,6 +39,9 @@ REREAD_MARKERS = ("ご視聴", "次回予告", "第1話", "お疲れ様", "チ�
                   "Thank you for watching", "Thanks for watching", "시청해 주셔서", "구독과 좋아요")
 REREAD_LOOP_CHARS = 40  # one word this long is a decoder loop; longest real word over 20 test songs: 14
 REREAD_SHIFTS = (2, 4, 6, 8, 10)
+# 0.2.5: song-credit text Whisper writes over an intro instead of lyrics (Vocaloid songs)
+REREAD_CREDITS = ("作詞", "作曲", "編曲")
+REREAD_REPEAT = re.compile(r"(.{2,24}?)\1{5,}|(.{25,80}?)\2{3,}")  # in a retry, a phrase 6+ (25+ chars: 4+) times in a row is invented
 
 
 def emotion_shell(mode, duration, status="not_requested", warnings=None):
@@ -216,7 +219,7 @@ def checked_rereads(rows, duration):
         raise Failure("invalid_output", "Invalid window re-read list")
     out = []
     for r in rows:
-        if not isinstance(r, dict) or r.get("reason") not in ("marker", "loop") or not (r.get("shift_seconds") is None or r.get("shift_seconds") in REREAD_SHIFTS):
+        if not isinstance(r, dict) or r.get("reason") not in ("marker", "loop", "credit", "sparse") or not (r.get("shift_seconds") is None or r.get("shift_seconds") in REREAD_SHIFTS):
             raise Failure("invalid_output", "Invalid window re-read entry")
         out.append({"start": number(r.get("start"), "reread.start", 0, duration), "end": number(r.get("end"), "reread.end", 0, duration + END_TOLERANCE),
                     "reason": r["reason"], "shift_seconds": r["shift_seconds"]})
@@ -798,52 +801,75 @@ class LocalLens:
             raise Failure("invalid_output", "Engine returned invalid JSON") from e
 
 
-def reread_windows(segments, duration, transcribe):
-    """Re-decode 30 s windows that hallucinated, looped or kept no words, starting later inside the window.
+def reread_windows(segments, duration, transcribe, level):
+    """Re-decode 30 s decoder windows that hallucinated, looped or skipped sung lines, starting later inside the window.
 
-    A window is one decoder seek. It is bad when its text has a REREAD_MARKERS phrase or a word longer than
-    REREAD_LOOP_CHARS. transcribe(clip) is retried with clip "start+k,end"; the first retry with words and
-    no marker or loop replaces the window. If none works, only the loop words and the runs of words that
-    spell a marker go. Wordless windows are left alone: a retry there tends to invent text.
+    A window is one decoder seek. Reasons, first match wins:
+    marker: its text has a REREAD_MARKERS phrase; loop: a word longer than REREAD_LOOP_CHARS;
+    credit: its text has a REREAD_CREDITS word; sparse: not the first window (intros are often instrumental),
+    level(start, end) > -30 dBFS, at least 5 s long and under half the song's median words per second.
+    transcribe(clip) is retried with clip "start+k,end". A retry with a marker, credit, loop word or
+    REREAD_REPEAT run is never used. marker/loop take the first usable retry with words; credit/sparse take
+    the usable retry with the most words, only if it has 1.5x and 10 more words than the window.
+    If nothing is used, the loop words go, every word from a marker to the window end goes (what followed
+    one was invented too in the test songs), and only the runs of words that spell a credit go.
+    Windows without words are left alone: a retry there tends to invent text.
     Returns (segments, rereads); rereads lists each bad window and the shift used (null: words dropped).
     """
     looped = lambda w: len(w["word"].strip()) > REREAD_LOOP_CHARS
     marked = lambda text: any(m in text for m in REREAD_MARKERS)
+    credited = lambda text: any(c in text for c in REREAD_CREDITS)
+
+    def usable(words):
+        text = "".join(w["word"] for w in words)
+        return (words and not marked(text) and not credited(text) and not any(looped(w) for w in words)
+                and not REREAD_REPEAT.search(re.sub(r"\s", "", text)))
 
     def clean(words):
         drop = {i for i, w in enumerate(words) if looped(w)}
-        for j in range(len(words)):  # shortest run ending at j whose text holds a marker
+        for j in range(len(words)):  # runs ending at j: any that holds a marker; for a credit, only one that word j completes
             text = ""
             for i in range(j, -1, -1):
                 text = words[i]["word"] + text
                 if marked(text):
                     drop.update(range(i, j + 1))
                     break
+                if credited(text):
+                    if not credited(text[:len(text) - len(words[j]["word"])]):
+                        drop.update(range(i, j + 1))
+                    break
         return [w for i, w in enumerate(words) if i not in drop]
 
     seeks = sorted({s["seek"] for s in segments})
-    out, rereads = [], []
+    windows = []
     for seek, nxt in zip(seeks, seeks[1:] + [None]):
         start, end = seek / 100, (nxt / 100 if nxt is not None else duration)
         window = [s for s in segments if s["seek"] == seek]
-        words = [w for s in window for w in s.get("words") or []]
-        reason = ("marker" if marked("".join(s.get("text", "") for s in window)) else
-                  "loop" if any(looped(w) for w in words) else None)
+        windows.append((seek, start, end, window, [w for s in window for w in s.get("words") or []], level(start, end)))
+    rates = sorted(len(words) / (end - start) for _, start, end, _, words, db in windows if db > -35 and end > start)
+    median = rates[len(rates) // 2] if rates else 0
+    out, rereads = [], []
+    for n, (seek, start, end, window, words, db) in enumerate(windows):
+        text = "".join(s.get("text", "") for s in window)
+        reason = ("marker" if marked(text) else "loop" if any(looped(w) for w in words) else
+                  "credit" if credited(text) else
+                  "sparse" if n and words and db > -30 and end - start >= 5 and len(words) / (end - start) < 0.5 * median else None)
         if reason is None:
             out += window
             continue
-        fixed = None
+        fixed, best = None, None
         for k in REREAD_SHIFTS:
             if start + k >= end - 1:
                 break
-            retry = transcribe(f"{start + k},{end}")
-            new = [w for s in retry for w in s.get("words") or [] if start <= w["start"] < end]
-            if new and not marked("".join(s.get("text", "") for s in retry)) and not any(looped(w) for w in new):
-                fixed = k
-                out.append({"seek": seek, "words": new})
+            new = [w for s in transcribe(f"{start + k},{end}") for w in s.get("words") or [] if start <= w["start"] < end]
+            if not usable(new):
+                continue
+            if reason in ("marker", "loop"):
+                fixed, best = k, new
                 break
-        if fixed is None:
-            out += [{"seek": seek, "words": clean(words)}]
+            if len(new) >= 1.5 * len(words) and len(new) - len(words) >= 10 and (best is None or len(new) > len(best)):
+                fixed, best = k, new
+        out.append({"seek": seek, "words": best if best is not None else clean(words)})
         rereads.append({"start": start, "end": end, "reason": reason, "shift_seconds": fixed})
     return out, rereads
 
@@ -861,8 +887,11 @@ def child_infer():
     if settings["language"] != "auto":
         kwargs["language"] = settings["language"]
     raw = mlx_whisper.transcribe(audio, **kwargs)
+    def level(start, end):  # mean power in dBFS
+        part = audio[int(start * 16000):int(end * 16000)]
+        return float(10 * np.log10(np.mean(np.square(part)) + 1e-18)) if len(part) else -180.0
     segments, rereads = reread_windows(raw.get("segments", []), len(audio) / 16000,
-                                       lambda clip: mlx_whisper.transcribe(audio, clip_timestamps=clip, **kwargs).get("segments", []))
+                                       lambda clip: mlx_whisper.transcribe(audio, clip_timestamps=clip, **kwargs).get("segments", []), level)
     # Keep only fields consumed by the parent; no unrestricted transcript dump.
     output = {"language": raw.get("language"), "segments": [{"words": s.get("words")} for s in segments], "rereads": rereads}
     payload = encoded(output)
