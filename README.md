@@ -99,9 +99,11 @@ Mac 분석 서버에 리듬 분석을 함께 요청하면(`rhythm=1`) 결과에 
 | Essentia Discogs-EffNet·genre_discogs400 모델 (Mac 서버에 따로 설치) | 선택 리듬 층의 장르 추정 | CC BY-NC-ND 4.0 |
 | [BTC](https://github.com/jayg996/BTC-ISMIR19) (Mac 서버에 따로 설치) | 선택 리듬 층의 코드 인식 | MIT |
 | [Spotify Basic Pitch](https://github.com/spotify/basic-pitch) (Mac 서버에 따로 설치) | 선택 리듬 층의 베이스 음 시작 | Apache-2.0 |
+| [ADTOF](https://github.com/MZehren/ADTOF) 가중치 (Mac 서버에 따로 설치) | 선택 리듬 층의 드럼 타격 | CC BY-NC-SA 4.0 |
 | Transformers.js · ONNX Runtime Web · TensorFlow.js | 브라우저에서 모델 실행 | Apache-2.0 · MIT · Apache-2.0 |
 
-- SOME 모델(CC BY-NC-SA 4.0)과 Discogs 장르 모델(CC BY-NC-ND 4.0)에는 비상업적 이용 조건이 있습니다.
+- SOME 모델(CC BY-NC-SA 4.0), Discogs 장르 모델(CC BY-NC-ND 4.0), ADTOF 가중치(CC BY-NC-SA 4.0)에는 비상업적 이용 조건이 있습니다.
+- ADTOF 가중치는 상용 음악에 맞춘 리듬 게임 채보로 학습됐고, 이 저장소에는 포함되지 않습니다.
 - 포함된 구성의 라이선스 원문은 [web/public/licenses/](web/public/licenses/README.md)와 [web/models/beat-this/](web/models/beat-this/README.md)에 있습니다.
 
 ## 더 보기
