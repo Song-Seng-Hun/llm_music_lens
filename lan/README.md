@@ -175,7 +175,8 @@ API:
 - `GET /timeline/<id>?layer=beats|chords|energy|melody|genre` is served by the server from the stored file with the native rules:
   `start`/`end` 0..600 (default 0 and 600, `end >= start`), rows overlapping the range, `limit` 1..200 (default 100),
   `cursor` <= total, a ~43 KB page byte cap, `truncated` and `continuation`. Beats rows are `{"time"}`, chords rows
-  `{start, end, label, strength}` (with `reliability: "low_reference"`), energy rows `{time, value}` (with `unit`
+  `{start, end, label, strength}`, with `one_beat: true` on some BTC rows (with `reliability`: `low_reference`, or
+  `reference_candidate` for BTC chords), energy rows `{time, value}` (with `unit`
   and `step_s`; a row covers `[time, time + step_s)` and is selected when its `time` lies in `[start, end]`), melody
   rows `{start, end, midi, note}` (selected like chords: overlapping the range; with `reliability: "low_reference"`
   and `layer_status` = the stored melody `status`, so a `failed` melody gives `done`-shaped paging with no rows and
@@ -200,7 +201,8 @@ uncalibrated), `bpm_estimates` (top 5 shares), `bpm_alternatives` (`[bpm/2, bpm*
 `downbeats: {"status":"not_provided"}`, `key` (`tonic`, `scale`, `strength`, `profile: "bgate"`), `key_sections`
 (rows `{start, end, tonic, scale, strength}`, see below), `key_change_count` (sections - 1), `key_section_window`
 (20), `chords` (see below), `chords_grid` (`beat` or `frame`), `chord_frame_segment_count` (frame-level segment
-count before the beat vote, stored file only), `chords_reliability: "low_reference"`, `sample_rate` 44100 (input
+count before the beat vote, stored file only), `chords_reliability` (`low_reference`, or `reference_candidate` for BTC
+chords), `chord_vocabulary`, `sample_rate` 44100 (input
 resampled from 16 kHz because RhythmExtractor2013 assumes 44.1 kHz), `duration`, `tool` (name, version,
 `essentia_version`), `warnings` (`short_audio` < 10 s, `near_silent`, `no_beats`, `low_bpm_confidence` < 1.5,
 `low_key_strength` < 0.5, `key_changes` when there is more than one key section, `no_chords`,
@@ -605,11 +607,12 @@ Copy `btc_model.py` next to `rhythm_worker.py`. Nothing is downloaded: take `tes
 
 What changes: `chords` rows use names like `Am7`, `C#maj7`, `Gsus4`, `Bm7b5`, plus `N` (no chord) and `X` (unknown).
 Sharps only; BTC has no flats, so `A#` may mean `Bb`. `strength` is null. Rows keep following the beat vote, and a row with
-no beat inside it has `one_beat: true`: treat these as less certain. `chords_reliability` is `reference_candidate` and
+no beat inside it has `one_beat: true`: treat these as less certain. Without beats the rows are frame-level and unmarked. `chords_reliability` is `reference_candidate` and
 `chord_vocabulary` names the vocabulary. BTC does not report bass notes, so slash chords do not appear.
 
 If BTC cannot run, chords stay major/minor triads with the warning `chord_model_unavailable: models_invalid|btc_failed`.
-Stored results keep the chords they were made with; analyze again to get the new ones.
+With `chord_model` set, a stored result without BTC chords is recomputed on the next analyze, so a failed run is retried.
+`/report` and `/timeline` keep the stored chords until then.
 
 | Part | Terms | Notes |
 |---|---|---|

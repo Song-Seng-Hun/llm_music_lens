@@ -2254,7 +2254,8 @@ class App:
         separable = "demucs" in self.cfg["rhythm"] and not (job.kind == "wav" and strict_wav_check(job.src))
         if (state == "ok" and cur is not None and stored.get("worker_sha256") == cur
                 and stored.get("words_sha256") == words_sha and not _rhythm_retry(stored)
-                and not (separable and _melody_can_improve(stored))):
+                and not (separable and _melody_can_improve(stored))
+                and not ("chord_model" in self.cfg["rhythm"] and stored.get("chords_reliability") != "reference_candidate")):
             return dict(rhythm_summary(stored, self.rhythm_overview(result_id, stored, words, words_sha)),
                         cache_hit=True, stored=True)
         # absent (worker 0.1.0/0.2.0 files), different or unverifiable worker identity: recompute; the stored file

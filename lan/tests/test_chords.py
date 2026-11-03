@@ -38,6 +38,13 @@ class ChordServerTest(RhythmBase):
     def test_status(self):
         self.assertTrue(self.c.json("GET", "/status")[1]["rhythm"]["chord_model_configured"])
 
+    def test_stored_triads_recomputed_and_btc_chords_kept(self):
+        self.assertFalse(self.c.json("POST", AR, WAV)[1]["rhythm"]["cache_hit"])
+        for reliability, hit in (("low_reference", False), ("reference_candidate", True)):
+            with open(self.rhythm_file(), "w") as f:
+                f.write(json.dumps(dict(RHYTHM_OUT_V40, chords_reliability=reliability, **self.ids())))
+            self.assertEqual(self.c.json("POST", AR, WAV)[1]["rhythm"]["cache_hit"], hit, reliability)
+
 
 class ChordValidatorTest(unittest.TestCase):
     ROW = {"start": 0.0, "end": 0.5, "label": "A#mMaj7", "strength": None}
