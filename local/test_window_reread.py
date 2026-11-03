@@ -98,6 +98,26 @@ class RereadTests(unittest.TestCase):
         segs = [seg(0, *many(0.0, 4)), seg(3000, *many(30.0, 60)), seg(6000, *many(60.0, 60))]
         self.assertEqual(m.reread_windows(segs, 90.0, FakeTranscribe({}), LOUD)[1], [])
 
+    def test_short_word_repeat_takes_first_clean_retry(self):
+        segs = [seg(0, *[(" oh,", 1.0 + i * 0.2) for i in range(40)])]
+        fake = FakeTranscribe({"2.0,30.0": [seg(200, (" a", 3.0), (" b", 4.0))]})
+        out, rereads = m.reread_windows(segs, 30.0, fake, QUIET)
+        self.assertEqual([w["word"] for s in out for w in s["words"]], [" a", " b"])
+        self.assertEqual(rereads, [{"start": 0.0, "end": 30.0, "reason": "loop", "shift_seconds": 2}])
+
+    def test_repeat_stays_when_every_retry_repeats(self):
+        words = [(" hello,", 1.0 + i * 0.2) for i in range(10)]
+        loop = [seg(200, *words)]
+        out, rereads = m.reread_windows([seg(0, *words)], 30.0, FakeTranscribe({f"{k}.0,30.0": loop for k in (2, 4, 6, 8, 10)}), QUIET)
+        self.assertEqual(len([w for s in out for w in s["words"]]), 10)  # it may be sung, so nothing is dropped
+        self.assertEqual(rereads[0]["shift_seconds"], None)
+
+    def test_korean_subtitle_credit_is_a_marker(self):
+        segs = [seg(0, (" a", 1.0), (" 한국어", 9.0), (" 자막을", 9.5), (" 사용하였습니다.", 10.0), (" b", 12.0))]
+        out, rereads = m.reread_windows(segs, 30.0, FakeTranscribe({}), QUIET)
+        self.assertEqual([w["word"] for s in out for w in s["words"]], [" a", " 한국어"])
+        self.assertEqual(rereads[0]["reason"], "marker")
+
     def test_checked_rereads_rejects_bad_entries(self):
         ok = [{"start": 30.0, "end": 60.0, "reason": "loop", "shift_seconds": 2}, {"start": 60.0, "end": 90.0, "reason": "sparse", "shift_seconds": None}]
         self.assertEqual(m.checked_rereads(ok, 90.0), ok)

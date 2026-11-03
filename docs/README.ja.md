@@ -94,6 +94,7 @@ Mac 分析サーバーにリズム分析も頼むと（`rhythm=1`）、結果に
 | [Spotify Basic Pitch](https://github.com/spotify/basic-pitch-ts)（モデル同梱） | ブラウザーの音符 | Apache-2.0 |
 | [Whisper](https://huggingface.co/Xenova/whisper-base)（`Xenova/whisper-base`・`whisper-small`、必要なときにブラウザーがダウンロード） | 歌詞の単語の書き起こし（任意） | Apache-2.0（モデルカードによる） |
 | [SOME](https://github.com/openvpi/SOME)（モデルは別途用意） | ソロボーカルの音符（任意） | コード MIT、モデル CC BY-NC-SA 4.0 |
+| [Whisper large-v3](https://huggingface.co/mlx-community/whisper-large-v3-mlx) MLX 変換版（Mac サーバーに別途インストール） | Mac サーバーの歌詞単語書き起こし | MIT |
 | [Essentia](https://essentia.upf.edu/) と TempoCNN モデル（Mac サーバーに別途インストール） | 任意のリズム層 | Essentia AGPL-3.0、モデルの条件は未確認 |
 | Essentia Discogs-EffNet・genre_discogs400 モデル（Mac サーバーに別途インストール） | 任意のリズム層のジャンル推定 | CC BY-NC-ND 4.0 |
 | Transformers.js・ONNX Runtime Web・TensorFlow.js | ブラウザーでのモデル実行 | Apache-2.0・MIT・Apache-2.0 |

@@ -1,6 +1,6 @@
 # Local Music Lens (macOS)
 
-Version 0.2.5 combines native Whisper word times and optional voice emotion or
+Version 0.2.6 combines native Whisper word times and optional voice emotion or
 music-mood windows in one analysis. It runs per job; no daemon, automatic download,
 upload, installation or global client configuration is added. Voice models are
 unvalidated for singing; music-mood accuracy is unmeasured. Scores are model
@@ -140,6 +140,17 @@ reason is used if it has an end-of-video phrase, a credit word or a phrase repea
 times in a row. If no retry helps, credit words are
 dropped and a sparse window stays as it was. A loud instrumental break also counts as
 sparse when it has a few words, so it costs five extra decodes but keeps its words.
+
+0.2.6 widens `loop` to a short phrase repeated many times in a row, which Whisper writes
+for dozens of words at a time (2-24 characters 6+ times, 25-80 characters 4+ times). The
+first clean retry replaces the window; if every retry repeats too, the window stays, since
+the repeat may be sung. A real repeated hook can still lose the seconds the retry skips.
+`자막` joins the end-of-video phrases.
+
+Whisper model: pass it with `--model-dir`. We use large-v3 (mlx-community/whisper-large-v3-mlx,
+revision 49e6aa286ad60c14352c404340ded53710378a11, MIT): more accurate on songs than
+large-v3-turbo in our local listening tests, at about twice the time and 3.9 GB of memory
+against 2 GB. Turbo still works with the same flags.
 
 ## MCP and verification
 
