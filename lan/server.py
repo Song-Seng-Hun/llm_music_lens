@@ -56,9 +56,10 @@ CONFIG_KEYS = {"bind", "port", "allow", "clients", "cert", "key", "ml", "root", 
                "launchd_logs", "test_mode", "limits", "test_ready_file", "rhythm"}
 RHYTHM_KEYS = {"python", "worker"}
 RHYTHM_SEPARATION_KEYS = {"demucs", "rmvpe"}
+RHYTHM_BASS_KEYS = {"basic_pitch_python"}
 SEP_DIR = "sep"  # per-request scratch of the rhythm worker, under the upload directory
 RHYTHM_DIR = "results-rhythm"  # under root: <result_id>.json, 0600, written atomically
-RHYTHM_LAYERS = ("beats", "chords", "energy", "melody", "genre")
+RHYTHM_LAYERS = ("beats", "chords", "energy", "melody", "genre", "bass")
 RHYTHM_MAX_BEATS = 5000
 RHYTHM_MAX_CHORDS = 20000
 RHYTHM_MAX_KEY_SECTIONS = 64  # worker 0.2.0 emits <= 30 (20 s windows over 600 s)
@@ -593,14 +594,17 @@ def load_config(path):
     cfg["rhythm"] = None
     if "rhythm" in raw:  # optional layer; absent = unavailable
         rh = raw["rhythm"]
-        if not isinstance(rh, dict) or set(rh) - {"separation", "chord_model"} != RHYTHM_KEYS:
-            raise ConfigError("rhythm must be an object with python, worker and optionally separation and chord_model")
+        if not isinstance(rh, dict) or set(rh) - {"separation", "chord_model", "bass"} != RHYTHM_KEYS:
+            raise ConfigError("rhythm must be an object with python, worker and optionally separation, chord_model and bass")
         sp = rh.get("separation")
         if "separation" in rh and (not isinstance(sp, dict) or set(sp) != RHYTHM_SEPARATION_KEYS):
             raise ConfigError("rhythm separation must be an object with exactly demucs and rmvpe")
+        ba = rh.get("bass")
+        if "bass" in rh and (not sp or not isinstance(ba, dict) or set(ba) != RHYTHM_BASS_KEYS):
+            raise ConfigError("rhythm bass needs separation and exactly basic_pitch_python")
         out = {}
         for k, raw_path in [("python", rh["python"]), ("worker", rh["worker"])] + sorted((sp or {}).items()) + (
-                [("chord_model", rh["chord_model"])] if "chord_model" in rh else []):
+                [("chord_model", rh["chord_model"])] if "chord_model" in rh else []) + sorted((ba or {}).items()):
             out[k] = _abs(raw_path, "rhythm " + k)
             try:
                 st = os.stat(out[k])
@@ -614,6 +618,8 @@ def load_config(path):
             raise ConfigError("rhythm python not executable")
         if sp and not os.access(out["demucs"], os.X_OK):
             raise ConfigError("rhythm demucs not executable")
+        if ba and not os.access(out["basic_pitch_python"], os.X_OK):
+            raise ConfigError("rhythm basic_pitch_python not executable")
         cfg["rhythm"] = out
     return cfg
 
@@ -921,7 +927,7 @@ def check_rhythm(v):
                 return None
         if (not _rhythm_v2_ok(v, dur) or not _rhythm_v21_ok(v) or not _rhythm_v22_ok(v)
                 or not _rhythm_v30_ok(v, dur) or not _rhythm_v40_ok(v, dur) or not _rhythm_v43_ok(v, dur)
-                or not _rhythm_v50_ok(v, dur)):
+                or not _rhythm_v50_ok(v, dur) or not _rhythm_v80_ok(v, dur)):
             return None
         for k in ("worker_sha256", "words_sha256"):  # server-added identities
             if k in v and not (isinstance(v[k], str) and RE_HEX64.match(v[k])):
@@ -1172,6 +1178,9 @@ MELODY_DIR_NOTES = 4  # the worker's minimum notes for a section direction
 MELODY_MAX_NPS = 1000  # notes per second of note time; stored rows last >= 0.001 s (ms rounding, end > start)
 MELODY_NPS_TOL = 0.002  # recomputed from the stored rows; the worker rounds to 3 decimals
 MELODY_RETRY_CODES = frozenset(("analysis_error", "dependency_missing"))  # environment-dependent, like tempo_cnn
+BASS_MAX_NOTES = 7500  # worker cap: 600 s / the 80 ms shortest note
+BASS_FAIL_REASONS = frozenset(("models_invalid", "decode_failed", "separation_failed", "rmvpe_failed", "onsets_failed"))
+BASS_FINAL_REASONS = frozenset(("canonical_16k", "band_limited"))
 SEP_RETRY_REASONS = frozenset(("models_invalid", "decode_failed", "separation_failed", "rmvpe_failed"))
 SEP_REASONS = SEP_RETRY_REASONS | {"not_configured", "canonical_16k", "band_limited"}
 
@@ -1514,6 +1523,37 @@ def confidence_band(c):
 TEMPO_CNN_RETRY_CODES = frozenset(("inference_error", "dependency_missing"))
 
 
+def _rhythm_v80_ok(v, dur):
+    """Worker 0.8.0: the optional bass layer, summary and rows together."""
+    if ("bass" in v) != ("bass_notes" in v):
+        return False
+    if "bass" not in v:
+        return True
+    b, notes = v["bass"], v["bass_notes"]
+    if not isinstance(notes, list) or len(notes) > BASS_MAX_NOTES or not isinstance(b, dict):
+        return False
+    prev = 0
+    for r in notes:
+        if not (isinstance(r, dict) and set(r) == MELODY_NOTE_KEYS and _num(r["start"], 0, dur)
+                and _num(r["end"], 0, dur) and r["start"] < r["end"] and r["start"] >= prev and _midi(r["midi"])
+                and r["note"] == note_name(r["midi"])):
+            return False
+        prev = r["start"]
+    if b.get("status") == "skipped":
+        return set(b) == {"status", "reason"} and b["reason"] in BASS_FAIL_REASONS | BASS_FINAL_REASONS and notes == []
+    return (set(b) == {"status", "method", "reliability", "note_count"} and b["status"] == "done"
+            and b["reliability"] == "low_reference" and _short_str(b["method"], 200) and b["note_count"] == len(notes))
+
+
+def _bass_can_improve(v, separable):
+    """With the bass layer configured and an upload that can give one: a stored result with no bass, a failed one, or a
+    16 kHz one. A 16 kHz upload never recomputes for this: it cannot give bass and would replace a stored vocal melody."""
+    if not separable:
+        return False
+    b = v.get("bass")
+    return not isinstance(b, dict) or b.get("reason") in BASS_FAIL_REASONS or b.get("reason") == "canonical_16k"
+
+
 def _rhythm_retry(v):
     """True when a stored file with the current worker must still be recomputed: an optional stage (tempo_cnn or,
     worker 0.4.0+, melody, or 0.4.3 lyric_repeats, or 0.5.0 genre) ended in an outcome whose cause can change
@@ -1563,7 +1603,7 @@ def rhythm_summary(v, overview=None):
             "chord_vocabulary": v.get("chord_vocabulary"),
             "energy_summary": v.get("energy_summary"), "sections": v.get("sections"),
             "sections_method": v.get("sections_method"), "sections_reliability": v.get("sections_reliability"),
-            "melody": v.get("melody"), "lyric_repeats": v.get("lyric_repeats"), "overview": overview,
+            "melody": v.get("melody"), "bass": v.get("bass"), "lyric_repeats": v.get("lyric_repeats"), "overview": overview,
             "genre": genre_view(v.get("genre")),
             "downbeats": v["downbeats"],
             "duration": v["duration"], "tool": v["tool"],
@@ -2057,7 +2097,8 @@ def rhythm_page(rid, v, layer, start, end, cursor, limit):
         g = v["genre"]
         rows = [w for w in g.get("windows", []) if w["end"] >= start and w["start"] <= end]
     else:
-        src = v["melody_notes"] if layer == "melody" else v["chords"]
+        src = {"melody": "melody_notes", "bass": "bass_notes"}.get(layer, "chords")
+        src = v[src]
         rows = [c for c in src if c["end"] >= start and c["start"] <= end]
     if cursor > len(rows):
         raise HttpError("invalid_argument")
@@ -2075,6 +2116,9 @@ def rhythm_page(rid, v, layer, start, end, cursor, limit):
         out["reliability"] = v.get("chords_reliability", "low_reference")
     elif layer == "energy":
         out["unit"], out["step_s"] = v["energy"]["unit"], v["energy"]["step_s"]
+    elif layer == "bass":
+        out["layer_status"] = v["bass"]["status"]
+        out["reliability"] = "low_reference"
     elif layer == "melody":
         out["layer_status"] = v["melody"]["status"]
         out["reliability"] = "low_reference"
@@ -2206,7 +2250,8 @@ class App:
             return None
         return {"configured": True, "python_present": os.path.isfile(rh["python"]),
                 "worker_present": os.path.isfile(rh["worker"]), "worker_sha256": self.rhythm_worker_sha256,
-                "separation_configured": "demucs" in rh, "chord_model_configured": "chord_model" in rh}
+                "separation_configured": "demucs" in rh, "chord_model_configured": "chord_model" in rh,
+                "bass_configured": "basic_pitch_python" in rh}
 
     def lyric_words(self, rid):
         """(--words-stdin bytes, their SHA-256) from the ml result file <root>/results/<rid>.json (read-only)."""
@@ -2255,7 +2300,8 @@ class App:
         if (state == "ok" and cur is not None and stored.get("worker_sha256") == cur
                 and stored.get("words_sha256") == words_sha and not _rhythm_retry(stored)
                 and not (separable and _melody_can_improve(stored))
-                and not ("chord_model" in self.cfg["rhythm"] and stored.get("chords_reliability") != "reference_candidate")):
+                and not ("chord_model" in self.cfg["rhythm"] and stored.get("chords_reliability") != "reference_candidate")
+                and not ("basic_pitch_python" in self.cfg["rhythm"] and _bass_can_improve(stored, separable))):
             return dict(rhythm_summary(stored, self.rhythm_overview(result_id, stored, words, words_sha)),
                         cache_hit=True, stored=True)
         # absent (worker 0.1.0/0.2.0 files), different or unverifiable worker identity: recompute; the stored file
@@ -2311,6 +2357,8 @@ class App:
                            "--melody-scratch", self.uploads + "/" + job.op + "/" + SEP_DIR]
                     if separable:
                         sep += ["--melody-source", job.src]
+                    if "basic_pitch_python" in rh:
+                        sep += ["--basic-pitch-python", rh["basic_pitch_python"]]
                 if "chord_model" in rh:
                     sep += ["--chord-model", rh["chord_model"]]
                 p = subprocess.Popen([rh["python"], "-I", rh["worker"], "--words-stdin"] + sep + [wav], stdin=inp, stdout=out,
@@ -2857,7 +2905,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(200, v)
 
     def rhythm_timeline(self, app, rid, q):
-        """layer=beats|chords|energy|melody|genre, served from the stored rhythm file with the native range/limit/cursor rules."""
+        """layer=beats|chords|energy|melody|genre|bass, served from the stored rhythm file with the native range/limit/cursor rules."""
         vals = {}
         for k, default in (("start", 0.0), ("end", 600.0)):
             if k in q:
@@ -2890,6 +2938,8 @@ class Handler(BaseHTTPRequestHandler):
         if q["layer"] == "melody" and "melody_notes" not in v:  # stored before worker 0.4.0
             raise HttpError("rhythm_not_found")
         if q["layer"] == "genre" and "genre" not in v:  # stored before worker 0.5.0
+            raise HttpError("rhythm_not_found")
+        if q["layer"] == "bass" and "bass_notes" not in v:  # not configured, or stored before worker 0.8.0
             raise HttpError("rhythm_not_found")
         self.send_json(200, rhythm_page(rid, v, q["layer"], vals["start"], vals["end"], cursor, limit))
 

@@ -10,6 +10,7 @@ Usage: <essentia python> -I rhythm_worker.py [--words-stdin] WAV
        --demucs /abs/demucs-mlx --rmvpe-model /abs/rmvpe.pt --melody-scratch /abs/dir [--melody-source /abs/upload]
        (0.6.0; melody from a separated vocal, see "Vocal melody" below. No --melody-source = canonical 16 kHz upload.)
        --chord-model /abs/btc_model_large_voca.pt (0.7.0; chords from BTC instead of ChordsDetection)
+       --basic-pitch-python /abs/python (0.8.0; with the Demucs options: a bass layer, see "Bass notes" below)
 WAV is the server's already-validated canonical file (PCM mono 16 kHz s16, 0 < duration <= 600 s).
 --words-stdin (0.4.3; the server always passes it): stdin holds one JSON object {"words": [[text, start, end], ...]}
 (the ASR words of the same result) or {"words": null, "reason": code} (the server could not provide them), at most
@@ -180,7 +181,7 @@ import tempfile
 import unicodedata
 import wave
 
-TOOL = {"name": "music-lens-rhythm-worker", "version": "0.7.0"}
+TOOL = {"name": "music-lens-rhythm-worker", "version": "0.8.0"}
 SRC_RATE = 16000
 RATE = 44100
 MAX_SECONDS = 600.0
@@ -290,8 +291,20 @@ BTC_CODE_SHA256 = "f446ab618b8df691c0ab8566d4060558b401b6e21a99c19943daba51ac2ca
 BTC_CODE_MAX_BYTES = 64 * 1024
 BTC_MAX_FRAMES = 8000  # 600 s at 10.8 frames per second, with room to spare
 CHORD_VOCABULARY = "BTC large vocabulary: 12 roots with m, maj, dim, aug, 6, m6, 7, maj7, m7, mMaj7, dim7, m7b5, sus2, sus4; N none, X unknown"
+# Bass notes (0.8.0, optional): Demucs bass stem, RMVPE for the pitch, Basic Pitch note starts to split repeated notes.
+# Settings and the checks behind them come from listening tests; note ends are weak, so reliability stays low_reference.
+BASS_DEMUCS_ARGS = ("-n", "htdemucs_ft", "--stem", "bass", "-b", "1", "--seed", "0")
+BASS_ONSETS_CODE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bass_onsets.py")
+BASS_ONSETS_SHA256 = "3c0f91abb732b432463aea9fca4c7372fc164eba16179118da996be54994fd30"
+BASS_ONSETS_MAX_BYTES = 16 * 1024
+BASS_MIN_FRAMES, BASS_JOIN_FRAMES = 8, 20  # at RMVPE's 10 ms: shortest note 80 ms, same pitch joins across 200 ms
+BASS_MAX_NOTES = 7500  # 600 s / the 80 ms shortest note
+BASS_METHOD = ("Demucs htdemucs_ft bass at 44.1 kHz, RMVPE pitch on CPU, same-pitch notes split at Basic Pitch note "
+               "starts. Pitch is the sounding pitch; note ends are weak.")
+BASS_FAIL_REASONS = ("models_invalid", "decode_failed", "separation_failed", "rmvpe_failed", "onsets_failed")
 SEP_RETRY_REASONS = ("models_invalid", "decode_failed", "separation_failed", "rmvpe_failed")
-SEP_FLAGS = {"--demucs": "demucs", "--rmvpe-model": "rmvpe", "--melody-scratch": "scratch", "--melody-source": "source"}
+SEP_FLAGS = {"--demucs": "demucs", "--rmvpe-model": "rmvpe", "--melody-scratch": "scratch", "--melody-source": "source",
+             "--basic-pitch-python": "basic_pitch"}
 MEL_METHOD_VOCAL = ("Demucs htdemucs_ft vocal at 44.1 kHz, then RMVPE threshold 0.03 on CPU in 30 s pieces; "
                     "same note segmentation and merge as the mix method. The vocal stem can include backing vocals.")
 MEL_METHOD = ("EqualLoudness+PredominantPitchMelodia 16 kHz frame 1024 hop 128 (predominant pitch of the full mix); "
@@ -1374,6 +1387,83 @@ def vocal_pitch(sep, n16):
     return f0[i].astype(np.float64), stem, None
 
 
+def bass_rows(f0, starts):
+    """10 ms pitch and note starts -> rows. A same-pitch run splits only at a start; a same-pitch gap joins unless a
+    start falls on the frame that ends it. Notes under 80 ms are dropped."""
+    import numpy as np
+    import scipy.signal
+    m = np.where(f0 > 0, np.round(69 + 12 * np.log2(np.maximum(f0, 1e-6) / 440.0)), 0).astype(int)
+    m = scipy.signal.medfilt(m, 5).astype(int)
+    n, cuts = len(m), np.zeros(len(m) + 1, bool)
+    for t in starts:
+        i = int(round(t / RMVPE_HOP_S))
+        if 0 <= i < n:
+            cuts[i] = True
+    runs, a = [], 0
+    for i in range(1, n + 1):
+        if i == n or m[i] != m[a] or cuts[i]:
+            if m[a] > 0 and i - a >= BASS_MIN_FRAMES:
+                runs.append([a, i, int(m[a])])
+            a = i
+    out = []
+    for r in runs:
+        if out and r[2] == out[-1][2] and r[0] - out[-1][1] <= BASS_JOIN_FRAMES and not cuts[r[0]]:
+            out[-1][1] = r[1]
+        else:
+            out.append(r)
+    return [{"start": r3(a * RMVPE_HOP_S), "end": r3(b * RMVPE_HOP_S), "midi": x, "note": note_name(x)}
+            for a, b, x in out[:BASS_MAX_NOTES]]
+
+
+def bass_stem_notes(sep, n16):
+    """(rows, None) or (None, reason). The scratch already holds full.wav."""
+    import numpy as np
+    from scipy.io import wavfile
+    from scipy.signal import resample_poly
+    if read_pinned(BASS_ONSETS_CODE, BASS_ONSETS_SHA256, BASS_ONSETS_MAX_BYTES, keep=False)[0]:
+        return None, "models_invalid"
+    d = sep["scratch"]
+    if run_tool([sep["demucs"]] + list(BASS_DEMUCS_ARGS) + ["-o", d, os.path.join(d, "full.wav")]):
+        return None, "separation_failed"
+    rate, y = wavfile.read(os.path.join(d, "full", "bass.wav"))
+    y = y.astype(np.float32)
+    if y.ndim > 1:
+        y = y.mean(axis=1)
+    if float(np.abs(y).max(initial=0.0)) > 2.0:
+        y /= 32768.0
+    g = math.gcd(rate, SRC_RATE)
+    y = resample_poly(y, SRC_RATE // g, rate // g).astype(np.float32)
+    stem_wav, f0_npy, onsets = (os.path.join(d, x) for x in ("bass16.wav", "bass.npy", "bass-onsets.json"))
+    write_wav(stem_wav, SRC_RATE, y[:n16])
+    if run_tool([sys.executable, "-I", RMVPE_CODE, sep["rmvpe"], stem_wav, f0_npy]):
+        return None, "rmvpe_failed"
+    f0 = np.load(f0_npy, allow_pickle=False)
+    if f0.ndim != 1 or not len(f0) or not np.all(np.isfinite(f0)):
+        return None, "rmvpe_failed"
+    if run_tool([sep["basic_pitch"], "-I", BASS_ONSETS_CODE, stem_wav, onsets]):
+        return None, "onsets_failed"
+    with open(onsets) as f:
+        starts = json.load(f)
+    if not (isinstance(starts, list) and all(isinstance(t, (int, float)) and math.isfinite(t) for t in starts)):
+        return None, "onsets_failed"
+    return bass_rows(f0, starts), None
+
+
+def bass_input(sep, n16, vocal_reason):
+    """Sets sep["bass"] to (field, rows). Runs before the scratch goes. Never raises."""
+    if not os.path.isfile(os.path.join(sep["scratch"], "full.wav")):
+        sep["bass"] = ({"status": "skipped", "reason": vocal_reason or "separation_failed"}, [])
+        return
+    try:
+        rows, reason = bass_stem_notes(sep, n16)
+    except Exception:
+        rows, reason = None, "separation_failed"
+    if reason:
+        sep["bass"] = ({"status": "skipped", "reason": reason}, [])
+    else:
+        sep["bass"] = ({"status": "done", "method": BASS_METHOD, "reliability": "low_reference", "note_count": len(rows)}, rows)
+
+
 def btc_frames(model, wav, duration):
     """([(time, label, None)], None) or (None, reason). Never raises."""
     try:
@@ -1406,11 +1496,15 @@ def melody_input(sep, n16):
     if sep is None:
         return None, None, {"status": "skipped", "reason": "not_configured"}
     if sep.get("source") is None:
+        sep["bass"] = ({"status": "skipped", "reason": "canonical_16k"}, [])
         return None, None, {"status": "skipped", "reason": "canonical_16k"}
     try:
         pitch, stem, reason = vocal_pitch(sep, n16)
     except Exception:
         pitch, stem, reason = None, None, "separation_failed"
+    try:
+        if sep.get("basic_pitch"):
+            bass_input(sep, n16, reason)
     finally:
         shutil.rmtree(sep["scratch"], ignore_errors=True)
     return pitch, stem, {"status": "done"} if reason is None else {"status": "skipped", "reason": reason}
@@ -1610,6 +1704,9 @@ def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None, genre_di
         warnings.append(sec_warn)
     mel, mel_notes, mel_warn = melody(x16, r3(duration), str(tonic), str(scale), sections, sep)
     warnings.extend(mel_warn)
+    bass, bass_notes = sep.get("bass", (None, [])) if sep and sep.get("basic_pitch") else (None, [])
+    if bass and bass.get("reason") in BASS_FAIL_REASONS:
+        warnings.append("bass_failed: " + bass["reason"])
     try:  # pure Python on the server's words; never fails the worker
         lyr, lyr_warn = lyric_repeats(words, r3(duration), words_reason)
     except Exception:
@@ -1644,6 +1741,7 @@ def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None, genre_di
         "sections_reliability": "low_reference",
         "melody": mel,
         "melody_notes": mel_notes,
+        **({"bass": bass, "bass_notes": bass_notes} if bass else {}),
         "structure_debug": sec_debug,
         "lyric_repeats": lyr,
         "genre": gn,
