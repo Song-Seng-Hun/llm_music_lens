@@ -1546,11 +1546,12 @@ def _rhythm_v80_ok(v, dur):
 
 
 def _bass_can_improve(v, separable):
-    """With the bass layer configured: a stored result that has no bass, or one that a retry or this upload can improve."""
+    """With the bass layer configured and an upload that can give one: a stored result with no bass, a failed one, or a
+    16 kHz one. A 16 kHz upload never recomputes for this: it cannot give bass and would replace a stored vocal melody."""
+    if not separable:
+        return False
     b = v.get("bass")
-    if not isinstance(b, dict):
-        return True
-    return b.get("reason") in BASS_FAIL_REASONS or (separable and b.get("reason") == "canonical_16k")
+    return not isinstance(b, dict) or b.get("reason") in BASS_FAIL_REASONS or b.get("reason") == "canonical_16k"
 
 
 def _rhythm_retry(v):

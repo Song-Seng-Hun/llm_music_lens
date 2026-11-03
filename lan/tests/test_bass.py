@@ -61,8 +61,9 @@ class BassServerTest(RhythmBase):
         self.assertTrue(self.post(WAV)["cache_hit"])
         self.store({"status": "skipped", "reason": "band_limited"})
         self.assertTrue(self.post(FULL)["cache_hit"])
-        for bass, body, hit in ((None, WAV, False), ({"status": "skipped", "reason": "onsets_failed"}, WAV, False),
+        for bass, body, hit in ((None, WAV, True), ({"status": "skipped", "reason": "onsets_failed"}, WAV, True),
                                 ({"status": "skipped", "reason": "canonical_16k"}, WAV, True),
+                                (None, FULL, False), ({"status": "skipped", "reason": "onsets_failed"}, FULL, False),
                                 ({"status": "skipped", "reason": "canonical_16k"}, FULL, False)):
             self.store(bass)
             self.assertEqual(self.post(body)["cache_hit"], hit, (bass, hit))

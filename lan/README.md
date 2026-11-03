@@ -634,13 +634,14 @@ Copy `bass_onsets.py` next to `rhythm_worker.py`. Install `basic-pitch` with the
 
 What happens on a rhythm request: Demucs gives the bass stem from the same 44.1 kHz mono audio as the vocal, RMVPE reads the
 pitch, and same-pitch notes split at Basic Pitch note starts. Notes under 80 ms are dropped and a same-pitch gap up to 200 ms
-joins unless a start falls on it. A 16 kHz WAV upload or band-limited audio has no bass layer.
+joins unless a start falls on the first frame after it. A 16 kHz WAV upload or band-limited audio has no bass layer.
 
 `rhythm.bass` is `{status: "done", method, reliability: "low_reference", note_count}` or `{status: "skipped", reason}`. Read
 the rows with `/timeline` `layer=bass`: `{start, end, midi, note}`, where `midi` is the sounding pitch. Reasons:
 `canonical_16k`, `band_limited`, and the failures `models_invalid`, `decode_failed`, `separation_failed`, `rmvpe_failed`,
-`onsets_failed`, which also add the warning `bass_failed` and are retried on the next request. Without `bass` in the config
-there is no `rhythm.bass`, and the layer answers `rhythm_not_found`.
+`onsets_failed`, which also add the warning `bass_failed` and are retried on the next request that can give bass. A stored
+result without bass is recomputed the same way; a 16 kHz upload keeps what is stored. Without bass stored, `rhythm.bass` is
+`null` and the layer answers `rhythm_not_found`.
 
 Limits: treat the pitches as candidates. Note ends are weak, so do not read note length from this layer, and occasional wrong
 notes remain.
@@ -937,7 +938,7 @@ cleanup, so it alone does not prove the pipeline is idle).
    check (including 0 < duration <= 600 s) and no-overwrite hard link. A canonical WAV (PCM mono 16 kHz s16) skips
    afconvert. A conversion failure gives 400 `invalid_audio`; size limits, magic-byte detection and framing are
    unchanged.
-12. Optional rhythm layer (not in v0.6): `rhythm=1` on `/analyze`, a `rhythm` summary in `/report`, `layer=beats|chords|energy|melody|genre`
+12. Optional rhythm layer (not in v0.6): `rhythm=1` on `/analyze`, a `rhythm` summary in `/report`, `layer=beats|chords|energy|melody|genre|bass`
    on `/timeline`, and a `rhythm` object in `/status` (see "Optional rhythm layer"). New rhythm work and the `/status`
    field need the `rhythm` config key; `/report` and `/timeline` read stored files whenever they exist. The receipt
    records the ASR outcome only; the rhythm result lives in `results-rhythm/`. The worker runs while the API gate is

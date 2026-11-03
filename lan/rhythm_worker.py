@@ -1389,7 +1389,7 @@ def vocal_pitch(sep, n16):
 
 def bass_rows(f0, starts):
     """10 ms pitch and note starts -> rows. A same-pitch run splits only at a start; a same-pitch gap joins unless a
-    start falls on it. Notes under 80 ms are dropped."""
+    start falls on the frame that ends it. Notes under 80 ms are dropped."""
     import numpy as np
     import scipy.signal
     m = np.where(f0 > 0, np.round(69 + 12 * np.log2(np.maximum(f0, 1e-6) / 440.0)), 0).astype(int)
