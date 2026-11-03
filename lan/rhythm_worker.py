@@ -40,6 +40,9 @@ Choices:
   because BTC gives no strength (null). A segment with no beat inside it gets "one_beat": true: these agree with hand
   annotations much less often, yet folding them into a neighbour lost more than it fixed, so they stay and are marked.
   Any BTC failure falls back to ChordsDetection with the warning chord_model_unavailable.
+- chord display (0.10.0): every chord row gets "display", the label with its root spelled for the key section at the
+  segment's middle, plus "/bass" when one bass pitch class sounds for at least half of the segment and is a chord tone other
+  than the root. "label" stays as it was, because sections and the overview compare labels.
 - downbeats: Essentia has no native downbeat tracker; reported as {"status":"not_provided"}.
 - double_tempo_evidence (diagnostic, uncalibrated; no decision, bpm untouched): onset-strength envelope = L1
   half-rectified spectral flux (Essentia Flux) of Hann-windowed 1024-sample frames, hop 512 (11.6 ms), frames centred
@@ -182,7 +185,7 @@ import tempfile
 import unicodedata
 import wave
 
-TOOL = {"name": "music-lens-rhythm-worker", "version": "0.9.0"}
+TOOL = {"name": "music-lens-rhythm-worker", "version": "0.10.0"}
 SRC_RATE = 16000
 RATE = 44100
 MAX_SECONDS = 600.0
@@ -316,6 +319,15 @@ DRUM_MAX_HITS = 100000  # 5 classes, one hit per 30 ms over 600 s
 DRUM_METHOD = ("Demucs htdemucs_ft drums at 44.1 kHz, then ADTOF Frame_RNN on CPU: kick, snare, tom, hihat, cymbal hit "
                "times. Tom is weak and quiet snare hits are often missed.")
 DRUM_FAIL_REASONS = ("models_invalid", "decode_failed", "separation_failed", "adtof_failed")
+# Chord display (0.10.0): measured on RWC-P with BTC chords and the bass layer; see "Chord display" in README.md.
+SLASH_MIN_SHARE = 0.5
+SHARP_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+FLAT_NAMES = ("C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B")
+NATURAL_NAMES = ("C", "Db", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B")  # C major, A minor: the usual borrowed chords
+FLAT_KEY_MAJORS = frozenset((1, 3, 5, 8, 10))  # relative major pitch classes written with flats
+CHORD_TONES = {"": (4, 7), "m": (3, 7), "dim": (3, 6), "aug": (4, 8), "m6": (3, 7, 9), "6": (4, 7, 9), "m7": (3, 7, 10),
+               "mMaj7": (3, 7, 11), "maj7": (4, 7, 11), "7": (4, 7, 10), "dim7": (3, 6, 9), "m7b5": (3, 6, 10),
+               "sus2": (2, 7), "sus4": (5, 7)}
 SEP_RETRY_REASONS = ("models_invalid", "decode_failed", "separation_failed", "rmvpe_failed")
 SEP_FLAGS = {"--demucs": "demucs", "--rmvpe-model": "rmvpe", "--melody-scratch": "scratch", "--melody-source": "source",
              "--basic-pitch-python": "basic_pitch", "--drum-model": "drum_model"}
@@ -1540,6 +1552,50 @@ def btc_frames(model, wav, duration):
         return None, "btc_failed"
 
 
+def key_names(tonic, scale):
+    """Note names for a key, or None for an unknown tonic. Its relative major decides the side."""
+    pc = PITCH_CLASS.get(tonic)
+    if pc is None:
+        return None
+    major = (pc + (3 if scale == "minor" else 0)) % 12
+    return NATURAL_NAMES if major == 0 else FLAT_NAMES if major in FLAT_KEY_MAJORS else SHARP_NAMES
+
+
+def slash_pc(start, end, root_pc, quality, bass_notes):
+    """The pitch class to write after the slash, or None. bass_notes are sorted by start."""
+    tones = CHORD_TONES.get(quality)
+    if tones is None or end <= start:
+        return None
+    by = {}
+    for n in bass_notes:
+        if n["start"] >= end:
+            break
+        overlap = min(end, n["end"]) - max(start, n["start"])
+        if overlap > 0:
+            by[n["midi"] % 12] = by.get(n["midi"] % 12, 0.0) + overlap
+    if not by:
+        return None
+    pc = max(sorted(by), key=by.get)
+    return pc if by[pc] / (end - start) >= SLASH_MIN_SHARE and (pc - root_pc) % 12 in tones else None
+
+
+def add_chord_display(chords, key_sections, tonic, scale, bass_notes):
+    """Sets "display" on every chord row; "label" stays. N, X and labels with an unknown root are copied as they are."""
+    for c in chords:
+        label = c["label"]
+        root = label[:2] if label[1:2] in ("#", "b") else label[:1]
+        root_pc = PITCH_CLASS.get(root)
+        c["display"] = label
+        if root_pc is None:
+            continue
+        mid = (c["start"] + c["end"]) / 2
+        sec = next((s for s in key_sections if s["start"] <= mid < s["end"]), None)
+        names = key_names(sec["tonic"], sec["scale"]) if sec else None
+        names = names or key_names(tonic, scale) or SHARP_NAMES
+        pc = slash_pc(c["start"], c["end"], root_pc, label[len(root):], bass_notes)
+        c["display"] = names[root_pc] + label[len(root):] + ("" if pc is None else "/" + names[pc])
+
+
 def mark_one_beat(chords, beats):
     """Marks the segments with no beat strictly inside them (ends are beats, compared with a 1 ms margin)."""
     for c in chords:
@@ -1768,6 +1824,7 @@ def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None, genre_di
     drums, drum_hits = sep.get("drums", (None, [])) if sep and sep.get("drum_model") else (None, [])
     if drums and drums.get("reason") in DRUM_FAIL_REASONS:
         warnings.append("drums_failed: " + drums["reason"])
+    add_chord_display(chords, key_sections, str(tonic), str(scale), bass_notes)
     try:  # pure Python on the server's words; never fails the worker
         lyr, lyr_warn = lyric_repeats(words, r3(duration), words_reason)
     except Exception:

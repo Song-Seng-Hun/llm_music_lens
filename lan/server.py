@@ -909,7 +909,7 @@ def check_rhythm(v):
             if (not isinstance(c, dict) or not _num(c.get("start"), 0, dur) or not _num(c.get("end"), 0, dur)
                     or c["end"] < c["start"] or not _short_str(c.get("label"), 16)
                     or not (c.get("strength") is None or _num(c.get("strength"), -1e6, 1e6))
-                    or c.get("one_beat", True) is not True):
+                    or c.get("one_beat", True) is not True or not _short_str(c.get("display", "-"), 24)):
                 return None
         key = v.get("key")
         if not (isinstance(key, dict) and _short_str(key.get("tonic"), 8) and _short_str(key.get("scale"), 16)
