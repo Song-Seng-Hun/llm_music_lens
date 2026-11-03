@@ -22,7 +22,7 @@ import time
 import wave
 import uuid
 
-VERSION = "0.2.5"
+VERSION = "0.2.6"
 SCHEMA_VERSION = "music-lens-local/2"
 END_TOLERANCE = 0.05
 MAX_AUDIO = 64 * 1024 * 1024
@@ -36,7 +36,7 @@ EMOTION_LIMIT = 600
 EMOTION_SETTINGS = {"none": (0, 0, 0), "voice": (4, 2, 1), "music": (5, 2.5, 3)}
 # 0.2.4 window re-read: end-of-video phrases Whisper invents after silence or non-lyric audio
 REREAD_MARKERS = ("ご視聴", "次回予告", "第1話", "お疲れ様", "チャンネル登録", "字幕",
-                  "Thank you for watching", "Thanks for watching", "시청해 주셔서", "구독과 좋아요")
+                  "Thank you for watching", "Thanks for watching", "시청해 주셔서", "구독과 좋아요", "자막")
 REREAD_LOOP_CHARS = 40  # one word this long is a decoder loop; longest real word over 20 test songs: 14
 REREAD_SHIFTS = (2, 4, 6, 8, 10)
 # 0.2.5: song-credit text Whisper writes over an intro instead of lyrics (Vocaloid songs)
@@ -805,13 +805,13 @@ def reread_windows(segments, duration, transcribe, level):
     """Re-decode 30 s decoder windows that hallucinated, looped or skipped sung lines, starting later inside the window.
 
     A window is one decoder seek. Reasons, first match wins:
-    marker: its text has a REREAD_MARKERS phrase; loop: a word longer than REREAD_LOOP_CHARS;
+    marker: its text has a REREAD_MARKERS phrase; loop: a word longer than REREAD_LOOP_CHARS or a REREAD_REPEAT run;
     credit: its text has a REREAD_CREDITS word; sparse: not the first window (intros are often instrumental),
     level(start, end) > -30 dBFS, at least 5 s long and under half the song's median words per second.
     transcribe(clip) is retried with clip "start+k,end". A retry with a marker, credit, loop word or
     REREAD_REPEAT run is never used. marker/loop take the first usable retry with words; credit/sparse take
     the usable retry with the most words, only if it has 1.5x and 10 more words than the window.
-    If nothing is used, the loop words go, every word from a marker to the window end goes (what followed
+    If nothing is used, the long loop words go (a repeat run stays: it may be sung), every word from a marker to the window end goes (what followed
     one was invented too in the test songs), and only the runs of words that spell a credit go.
     Windows without words are left alone: a retry there tends to invent text.
     Returns (segments, rereads); rereads lists each bad window and the shift used (null: words dropped).
@@ -819,11 +819,12 @@ def reread_windows(segments, duration, transcribe, level):
     looped = lambda w: len(w["word"].strip()) > REREAD_LOOP_CHARS
     marked = lambda text: any(m in text for m in REREAD_MARKERS)
     credited = lambda text: any(c in text for c in REREAD_CREDITS)
+    repeated = lambda text: REREAD_REPEAT.search(re.sub(r"\s", "", text))
 
     def usable(words):
         text = "".join(w["word"] for w in words)
         return (words and not marked(text) and not credited(text) and not any(looped(w) for w in words)
-                and not REREAD_REPEAT.search(re.sub(r"\s", "", text)))
+                and not repeated(text))
 
     def clean(words):
         drop = {i for i, w in enumerate(words) if looped(w)}
@@ -851,7 +852,7 @@ def reread_windows(segments, duration, transcribe, level):
     out, rereads = [], []
     for n, (seek, start, end, window, words, db) in enumerate(windows):
         text = "".join(s.get("text", "") for s in window)
-        reason = ("marker" if marked(text) else "loop" if any(looped(w) for w in words) else
+        reason = ("marker" if marked(text) else "loop" if any(looped(w) for w in words) or repeated(text) else
                   "credit" if credited(text) else
                   "sparse" if n and words and db > -30 and end - start >= 5 and len(words) / (end - start) < 0.5 * median else None)
         if reason is None:
