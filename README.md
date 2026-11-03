@@ -88,6 +88,8 @@ Mac 분석 서버에 리듬 분석을 함께 요청하면(`rhythm=1`) 결과에 
 
 ## 사용 모델과 라이선스
 
+이 저장소의 자체 코드는 [MIT](LICENSE)입니다. 아래 구성은 각자의 조건을 따릅니다.
+
 | 구성 | 쓰는 곳 | 라이선스 |
 |---|---|---|
 | [Beat This!](https://github.com/CPJKU/beat_this) small0 (ONNX로 변환해 `web/models/beat-this/`에 포함) | 서버 박·BPM | MIT |
