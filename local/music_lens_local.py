@@ -22,7 +22,7 @@ import time
 import wave
 import uuid
 
-VERSION = "0.2.3"
+VERSION = "0.2.4"
 SCHEMA_VERSION = "music-lens-local/2"
 END_TOLERANCE = 0.05
 MAX_AUDIO = 64 * 1024 * 1024
@@ -34,6 +34,11 @@ EMOTION_MODES = ("none", "voice", "music")
 PORTABLE_CAP = 1900000
 EMOTION_LIMIT = 600
 EMOTION_SETTINGS = {"none": (0, 0, 0), "voice": (4, 2, 1), "music": (5, 2.5, 3)}
+# 0.2.4 window re-read: end-of-video phrases Whisper invents after silence or non-lyric audio
+REREAD_MARKERS = ("ご視聴", "次回予告", "第1話", "お疲れ様", "チャンネル登録", "字幕",
+                  "Thank you for watching", "Thanks for watching", "시청해 주셔서", "구독과 좋아요")
+REREAD_LOOP_CHARS = 40  # one word this long is a decoder loop; longest real word over 20 test songs: 14
+REREAD_SHIFTS = (2, 4, 6, 8, 10)
 
 
 def emotion_shell(mode, duration, status="not_requested", warnings=None):
@@ -203,6 +208,19 @@ def wav_info(data):
         raise Failure("invalid_audio", "Malformed PCM WAV") from e
     return {"duration_seconds": duration, "sample_rate_hz": 16000, "channels": 1,
             "sample_format": "signed16_pcm", "frames": frames, "sha256": digest(data)}
+
+
+def checked_rereads(rows, duration):
+    """Child-reported re-read windows (see reread_windows); report metadata only, never words."""
+    if not isinstance(rows, list) or len(rows) > 64:
+        raise Failure("invalid_output", "Invalid window re-read list")
+    out = []
+    for r in rows:
+        if not isinstance(r, dict) or r.get("reason") not in ("marker", "loop") or not (r.get("shift_seconds") is None or r.get("shift_seconds") in REREAD_SHIFTS):
+            raise Failure("invalid_output", "Invalid window re-read entry")
+        out.append({"start": number(r.get("start"), "reread.start", 0, duration), "end": number(r.get("end"), "reread.end", 0, duration + END_TOLERANCE),
+                    "reason": r["reason"], "shift_seconds": r["shift_seconds"]})
+    return out
 
 
 def normalize(raw, duration):
@@ -694,7 +712,7 @@ class LocalLens:
                 (work / "settings.json").write_bytes(encoded(provenance["settings"]))
                 if cancel.is_set():
                     raise Failure("cancelled", "Analysis cancelled before inference")
-                words, warnings, detected, timing_notes = [], [], None, []
+                words, warnings, detected, timing_notes, rereads = [], [], None, [], []
                 transient_failure = False
                 asr_status = "failed"
                 try:
@@ -702,6 +720,7 @@ class LocalLens:
                         raise Failure("dependency_missing", "ASR dependency unavailable")
                     self.infer(audio_file, output_file, cancel)
                     raw = self.read_child_output(output_file)
+                    rereads = checked_rereads(raw.get("rereads", []), audio["duration_seconds"])  # before words: a failure must leave none
                     words, warnings, detected, timing_notes = normalize(raw, audio["duration_seconds"])
                     asr_status = "partial" if warnings else "complete"
                 except (Failure, OSError, ValueError, TypeError) as e:
@@ -751,7 +770,7 @@ class LocalLens:
                 complete = asr_status == "complete" and emotion["status"] in ("complete", "not_requested")
                 report = {"schema_version": SCHEMA_VERSION, "result_id": result_id, "state": "complete" if complete else "partial", "audio": audio,
                           "clock": "seconds_from_audio_start", "provenance": provenance, "detected_language": detected,
-                          "word_count": len(words), "warnings": warnings, "timing_notes": timing_notes, "probability_semantics": "native_uncalibrated",
+                          "word_count": len(words), "warnings": warnings, "timing_notes": timing_notes, "window_rereads": rereads, "probability_semantics": "native_uncalibrated",
                           "created_unix": time.time(), "words": words, "asr_status": asr_status, "emotion": emotion}
                 payload = encoded(report)
                 if len(payload) > MAX_REPORT:
@@ -779,6 +798,56 @@ class LocalLens:
             raise Failure("invalid_output", "Engine returned invalid JSON") from e
 
 
+def reread_windows(segments, duration, transcribe):
+    """Re-decode 30 s windows that hallucinated, looped or kept no words, starting later inside the window.
+
+    A window is one decoder seek. It is bad when its text has a REREAD_MARKERS phrase or a word longer than
+    REREAD_LOOP_CHARS. transcribe(clip) is retried with clip "start+k,end"; the first retry with words and
+    no marker or loop replaces the window. If none works, only the loop words and the runs of words that
+    spell a marker go. Wordless windows are left alone: a retry there tends to invent text.
+    Returns (segments, rereads); rereads lists each bad window and the shift used (null: words dropped).
+    """
+    looped = lambda w: len(w["word"].strip()) > REREAD_LOOP_CHARS
+    marked = lambda text: any(m in text for m in REREAD_MARKERS)
+
+    def clean(words):
+        drop = {i for i, w in enumerate(words) if looped(w)}
+        for j in range(len(words)):  # shortest run ending at j whose text holds a marker
+            text = ""
+            for i in range(j, -1, -1):
+                text = words[i]["word"] + text
+                if marked(text):
+                    drop.update(range(i, j + 1))
+                    break
+        return [w for i, w in enumerate(words) if i not in drop]
+
+    seeks = sorted({s["seek"] for s in segments})
+    out, rereads = [], []
+    for seek, nxt in zip(seeks, seeks[1:] + [None]):
+        start, end = seek / 100, (nxt / 100 if nxt is not None else duration)
+        window = [s for s in segments if s["seek"] == seek]
+        words = [w for s in window for w in s.get("words") or []]
+        reason = ("marker" if marked("".join(s.get("text", "") for s in window)) else
+                  "loop" if any(looped(w) for w in words) else None)
+        if reason is None:
+            out += window
+            continue
+        fixed = None
+        for k in REREAD_SHIFTS:
+            if start + k >= end - 1:
+                break
+            retry = transcribe(f"{start + k},{end}")
+            new = [w for s in retry for w in s.get("words") or [] if start <= w["start"] < end]
+            if new and not marked("".join(s.get("text", "") for s in retry)) and not any(looped(w) for w in new):
+                fixed = k
+                out.append({"seek": seek, "words": new})
+                break
+        if fixed is None:
+            out += [{"seek": seek, "words": clean(words)}]
+        rereads.append({"start": start, "end": end, "reason": reason, "shift_seconds": fixed})
+    return out, rereads
+
+
 def child_infer():
     """Private fixed process entrypoint; parent supplies only validated snapshots."""
     request = json.loads(sys.stdin.buffer.read(16384))
@@ -792,8 +861,10 @@ def child_infer():
     if settings["language"] != "auto":
         kwargs["language"] = settings["language"]
     raw = mlx_whisper.transcribe(audio, **kwargs)
+    segments, rereads = reread_windows(raw.get("segments", []), len(audio) / 16000,
+                                       lambda clip: mlx_whisper.transcribe(audio, clip_timestamps=clip, **kwargs).get("segments", []))
     # Keep only fields consumed by the parent; no unrestricted transcript dump.
-    output = {"language": raw.get("language"), "segments": [{"words": s.get("words")} for s in raw.get("segments", [])]}
+    output = {"language": raw.get("language"), "segments": [{"words": s.get("words")} for s in segments], "rereads": rereads}
     payload = encoded(output)
     if len(payload) > MAX_REPORT:
         raise Failure("invalid_output", "Engine result exceeds output cap")
