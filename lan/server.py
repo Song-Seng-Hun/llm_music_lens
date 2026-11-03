@@ -63,6 +63,7 @@ RHYTHM_MAX_BEATS = 5000
 RHYTHM_MAX_CHORDS = 20000
 RHYTHM_MAX_KEY_SECTIONS = 64  # worker 0.2.0 emits <= 30 (20 s windows over 600 s)
 RHYTHM_CHORD_GRIDS = ("beat", "frame")
+RHYTHM_CHORD_RELIABILITY = ("low_reference", "reference_candidate")
 MAX_WIRE_PAGE = 128 * 1024 // 3  # same page byte cap as the native timeline (MAX_WIRE // 3)
 PYTHON = "/usr/bin/python3"
 IPCONFIG = "/usr/sbin/ipconfig"
@@ -592,13 +593,14 @@ def load_config(path):
     cfg["rhythm"] = None
     if "rhythm" in raw:  # optional layer; absent = unavailable
         rh = raw["rhythm"]
-        if not isinstance(rh, dict) or set(rh) - {"separation"} != RHYTHM_KEYS:
-            raise ConfigError("rhythm must be an object with python, worker and optionally separation")
+        if not isinstance(rh, dict) or set(rh) - {"separation", "chord_model"} != RHYTHM_KEYS:
+            raise ConfigError("rhythm must be an object with python, worker and optionally separation and chord_model")
         sp = rh.get("separation")
         if "separation" in rh and (not isinstance(sp, dict) or set(sp) != RHYTHM_SEPARATION_KEYS):
             raise ConfigError("rhythm separation must be an object with exactly demucs and rmvpe")
         out = {}
-        for k, raw_path in [("python", rh["python"]), ("worker", rh["worker"])] + sorted((sp or {}).items()):
+        for k, raw_path in [("python", rh["python"]), ("worker", rh["worker"])] + sorted((sp or {}).items()) + (
+                [("chord_model", rh["chord_model"])] if "chord_model" in rh else []):
             out[k] = _abs(raw_path, "rhythm " + k)
             try:
                 st = os.stat(out[k])
@@ -897,7 +899,8 @@ def check_rhythm(v):
         for c in chords:
             if (not isinstance(c, dict) or not _num(c.get("start"), 0, dur) or not _num(c.get("end"), 0, dur)
                     or c["end"] < c["start"] or not _short_str(c.get("label"), 16)
-                    or not (c.get("strength") is None or _num(c.get("strength"), -1e6, 1e6))):
+                    or not (c.get("strength") is None or _num(c.get("strength"), -1e6, 1e6))
+                    or c.get("one_beat", True) is not True):
                 return None
         key = v.get("key")
         if not (isinstance(key, dict) and _short_str(key.get("tonic"), 8) and _short_str(key.get("scale"), 16)
@@ -957,6 +960,10 @@ def _rhythm_v2_ok(v, dur):
     if "key_section_window" in v and not _num(v["key_section_window"], 0.1, 600):
         return False
     if "chords_grid" in v and v["chords_grid"] not in RHYTHM_CHORD_GRIDS:
+        return False
+    if "chords_reliability" in v and v["chords_reliability"] not in RHYTHM_CHORD_RELIABILITY:
+        return False
+    if "chord_vocabulary" in v and not _short_str(v["chord_vocabulary"], 200):
         return False
     if "chord_frame_segment_count" in v:
         n = v["chord_frame_segment_count"]
@@ -1553,6 +1560,7 @@ def rhythm_summary(v, overview=None):
             "key": v["key"], "key_sections": v.get("key_sections"), "key_change_count": v.get("key_change_count"),
             "beat_count": len(v["beats"]), "chord_segment_count": len(v["chords"]),
             "chords_grid": v.get("chords_grid"), "chords_reliability": v.get("chords_reliability"),
+            "chord_vocabulary": v.get("chord_vocabulary"),
             "energy_summary": v.get("energy_summary"), "sections": v.get("sections"),
             "sections_method": v.get("sections_method"), "sections_reliability": v.get("sections_reliability"),
             "melody": v.get("melody"), "lyric_repeats": v.get("lyric_repeats"), "overview": overview,
@@ -2198,7 +2206,7 @@ class App:
             return None
         return {"configured": True, "python_present": os.path.isfile(rh["python"]),
                 "worker_present": os.path.isfile(rh["worker"]), "worker_sha256": self.rhythm_worker_sha256,
-                "separation_configured": "demucs" in rh}
+                "separation_configured": "demucs" in rh, "chord_model_configured": "chord_model" in rh}
 
     def lyric_words(self, rid):
         """(--words-stdin bytes, their SHA-256) from the ml result file <root>/results/<rid>.json (read-only)."""
@@ -2302,6 +2310,8 @@ class App:
                            "--melody-scratch", self.uploads + "/" + job.op + "/" + SEP_DIR]
                     if separable:
                         sep += ["--melody-source", job.src]
+                if "chord_model" in rh:
+                    sep += ["--chord-model", rh["chord_model"]]
                 p = subprocess.Popen([rh["python"], "-I", rh["worker"], "--words-stdin"] + sep + [wav], stdin=inp, stdout=out,
                                      stderr=err, env=self.child_env(), cwd="/", close_fds=True, pass_fds=(lock_fd,),
                                      shell=False, start_new_session=True)
