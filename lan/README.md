@@ -15,6 +15,7 @@ Nothing here is installed. No LaunchAgent, firewall rule, certificate or key is 
 | `server.py` | The server: config, en0/en1 address discovery, TLS 1.2+, strict framing, HMAC auth, durable nonce and receipt logs, pipeline gate, staging, afconvert, strict WAV check, hard-link promotion, `ml` calls by argv, error mapping, cleanup, logs |
 | `rhythm_worker.py` | Optional rhythm layer worker (Essentia DSP plus pinned local models: TempoCNN, Discogs-EffNet + genre head): BPM (+ half/double, + learned TempoCNN estimate), beats, key (+ 20 s sections), beat-grid chords, 1 s energy curve, repeated-section structure (A/B/...), melody feature summary (predominant pitch notes), genre/style estimate (song + 30 s windows). Runs under the Essentia python, never in the listener |
 | `rmvpe_model.py` | Optional vocal melody: RMVPE inference on CPU, run by `rhythm_worker.py` as its own process (reduced from RVC-Project, MIT) |
+| `btc_model.py` | Optional chords: BTC inference on CPU, run by `rhythm_worker.py` as its own process (reduced from BTC-ISMIR19, MIT) |
 | `limit_exec.py` | Sets RLIMIT_CPU 60 s / FSIZE 24 MiB / NOFILE 32, then `execv /usr/bin/afconvert -f WAVE -d LEI16@16000 -c 1 src dst` |
 | `sign.py` | Shared canonical-string and HMAC helper (server, tests, Python clients) |
 | `sign_vector.mjs` | Reference Node signer; prints or checks the fixed vector (`tests/vectors.json`) |
@@ -174,7 +175,8 @@ API:
 - `GET /timeline/<id>?layer=beats|chords|energy|melody|genre` is served by the server from the stored file with the native rules:
   `start`/`end` 0..600 (default 0 and 600, `end >= start`), rows overlapping the range, `limit` 1..200 (default 100),
   `cursor` <= total, a ~43 KB page byte cap, `truncated` and `continuation`. Beats rows are `{"time"}`, chords rows
-  `{start, end, label, strength}` (with `reliability: "low_reference"`), energy rows `{time, value}` (with `unit`
+  `{start, end, label, strength}`, with `one_beat: true` on some BTC rows (with `reliability`: `low_reference`, or
+  `reference_candidate` for BTC chords), energy rows `{time, value}` (with `unit`
   and `step_s`; a row covers `[time, time + step_s)` and is selected when its `time` lies in `[start, end]`), melody
   rows `{start, end, midi, note}` (selected like chords: overlapping the range; with `reliability: "low_reference"`
   and `layer_status` = the stored melody `status`, so a `failed` melody gives `done`-shaped paging with no rows and
@@ -199,7 +201,8 @@ uncalibrated), `bpm_estimates` (top 5 shares), `bpm_alternatives` (`[bpm/2, bpm*
 `downbeats: {"status":"not_provided"}`, `key` (`tonic`, `scale`, `strength`, `profile: "bgate"`), `key_sections`
 (rows `{start, end, tonic, scale, strength}`, see below), `key_change_count` (sections - 1), `key_section_window`
 (20), `chords` (see below), `chords_grid` (`beat` or `frame`), `chord_frame_segment_count` (frame-level segment
-count before the beat vote, stored file only), `chords_reliability: "low_reference"`, `sample_rate` 44100 (input
+count before the beat vote, stored file only), `chords_reliability` (`low_reference`, or `reference_candidate` for BTC
+chords), `chord_vocabulary`, `sample_rate` 44100 (input
 resampled from 16 kHz because RhythmExtractor2013 assumes 44.1 kHz), `duration`, `tool` (name, version,
 `essentia_version`), `warnings` (`short_audio` < 10 s, `near_silent`, `no_beats`, `low_bpm_confidence` < 1.5,
 `low_key_strength` < 0.5, `key_changes` when there is more than one key section, `no_chords`,
@@ -589,6 +592,32 @@ Licenses:
 | `htdemucs_ft` weights | Not MIT. The Demucs maintainer states they are provided for research purposes (facebookresearch/demucs issues #267, #327, #508) | Not in this repository. Whoever installs them accepts those terms |
 | `rmvpe_model.py` | MIT (RVC-Project). RMVPE's original code is Apache-2.0 | Notice kept in the file |
 | `rmvpe.pt` | The hosting repository (lj1995/VoiceConversionWebUI) is tagged MIT, with nothing about this file or its training data | Not in this repository. Terms are unconfirmed |
+
+### Chords from BTC (worker 0.7.0)
+
+Chords can come from BTC instead of major/minor triads. Off unless the `rhythm` config has `chord_model`:
+
+```json
+"rhythm": {"python": "...", "worker": "...", "chord_model": "/Users/YOU/path/to/btc_model_large_voca.pt"}
+```
+
+Copy `btc_model.py` next to `rhythm_worker.py`. Nothing is downloaded: take `test/btc_model_large_voca.pt` from
+[jayg996/BTC-ISMIR19](https://github.com/jayg996/BTC-ISMIR19). The file is pinned by SHA-256 in the worker and loads with
+`weights_only`. The rhythm python needs torch and librosa.
+
+What changes: `chords` rows use names like `Am7`, `C#maj7`, `Gsus4`, `Bm7b5`, plus `N` (no chord) and `X` (unknown).
+Sharps only; BTC has no flats, so `A#` may mean `Bb`. `strength` is null. Rows keep following the beat vote, and a row with
+no beat inside it has `one_beat: true`: treat these as less certain. Without beats the rows are frame-level and unmarked. `chords_reliability` is `reference_candidate` and
+`chord_vocabulary` names the vocabulary. BTC does not report bass notes, so slash chords do not appear.
+
+If BTC cannot run, chords stay major/minor triads with the warning `chord_model_unavailable: models_invalid|btc_failed`.
+With `chord_model` set, a stored result without BTC chords is recomputed on the next analyze, so a failed run is retried.
+`/report` and `/timeline` keep the stored chords until then.
+
+| Part | Terms | Notes |
+|---|---|---|
+| `btc_model.py` | MIT (jayg996/BTC-ISMIR19) | Notice kept in the file |
+| `btc_model_large_voca.pt` | Same repository, MIT, with nothing separate about the weights. Trained on chord annotations with commercial recordings | Not in this repository |
 
 ### Lyric repeats (worker 0.4.3, approximate matching 0.4.4)
 

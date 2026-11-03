@@ -97,6 +97,7 @@ Mac 분석 서버에 리듬 분석을 함께 요청하면(`rhythm=1`) 결과에 
 | [Whisper large-v3](https://huggingface.co/mlx-community/whisper-large-v3-mlx) MLX 변환 (Mac 서버에 따로 설치) | Mac 서버 가사 단어 전사 | MIT |
 | [Essentia](https://essentia.upf.edu/)와 TempoCNN 모델 (Mac 서버에 따로 설치) | 선택 리듬 층 | Essentia AGPL-3.0, 모델 조건은 확인 안 됨 |
 | Essentia Discogs-EffNet·genre_discogs400 모델 (Mac 서버에 따로 설치) | 선택 리듬 층의 장르 추정 | CC BY-NC-ND 4.0 |
+| [BTC](https://github.com/jayg996/BTC-ISMIR19) (Mac 서버에 따로 설치) | 선택 리듬 층의 코드 인식 | MIT |
 | Transformers.js · ONNX Runtime Web · TensorFlow.js | 브라우저에서 모델 실행 | Apache-2.0 · MIT · Apache-2.0 |
 
 - SOME 모델(CC BY-NC-SA 4.0)과 Discogs 장르 모델(CC BY-NC-ND 4.0)에는 비상업적 이용 조건이 있습니다.

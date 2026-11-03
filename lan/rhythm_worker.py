@@ -9,6 +9,7 @@ Usage: <essentia python> -I rhythm_worker.py [--words-stdin] WAV
        looked up by name in that directory and their SHA-256 pins are not overridable)
        --demucs /abs/demucs-mlx --rmvpe-model /abs/rmvpe.pt --melody-scratch /abs/dir [--melody-source /abs/upload]
        (0.6.0; melody from a separated vocal, see "Vocal melody" below. No --melody-source = canonical 16 kHz upload.)
+       --chord-model /abs/btc_model_large_voca.pt (0.7.0; chords from BTC instead of ChordsDetection)
 WAV is the server's already-validated canonical file (PCM mono 16 kHz s16, 0 < duration <= 600 s).
 --words-stdin (0.4.3; the server always passes it): stdin holds one JSON object {"words": [[text, start, end], ...]}
 (the ASR words of the same result) or {"words": null, "reason": code} (the server could not provide them), at most
@@ -33,6 +34,10 @@ Choices:
   summed strength wins (null strength counts 0; ties: more frames, then earliest frame), then identical neighbours
   merge, so every segment spans >= one beat except head/tail ("chords_grid": "beat"). Without beats, consecutive
   identical frame labels merge ("frame"). Major/minor triads only; reliability "low_reference".
+- chords with --chord-model (0.7.0): BTC frame labels (CHORD_VOCABULARY) go through the same beat vote, by frame count
+  because BTC gives no strength (null). A segment with no beat inside it gets "one_beat": true: these agree with hand
+  annotations much less often, yet folding them into a neighbour lost more than it fixed, so they stay and are marked.
+  Any BTC failure falls back to ChordsDetection with the warning chord_model_unavailable.
 - downbeats: Essentia has no native downbeat tracker; reported as {"status":"not_provided"}.
 - double_tempo_evidence (diagnostic, uncalibrated; no decision, bpm untouched): onset-strength envelope = L1
   half-rectified spectral flux (Essentia Flux) of Hann-windowed 1024-sample frames, hop 512 (11.6 ms), frames centred
@@ -171,10 +176,11 @@ import stat
 import statistics
 import subprocess
 import sys
+import tempfile
 import unicodedata
 import wave
 
-TOOL = {"name": "music-lens-rhythm-worker", "version": "0.6.0"}
+TOOL = {"name": "music-lens-rhythm-worker", "version": "0.7.0"}
 SRC_RATE = 16000
 RATE = 44100
 MAX_SECONDS = 600.0
@@ -277,6 +283,13 @@ RMVPE_CODE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rmvpe_mod
 RMVPE_CODE_SHA256 = "b948ecc0449018dc0ae6c12d584d5af59acbb5a8b477b95b5898a751c2cce325"
 RMVPE_CODE_MAX_BYTES = 64 * 1024
 RMVPE_HOP_S = 0.01
+BTC_SHA256 = "1673d23f8f9a55ae7f9e8b80a51da616debb22675b8d8b67ea6ce0ef37b0ab51"
+BTC_MAX_BYTES = 64 * 1024 * 1024
+BTC_CODE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "btc_model.py")
+BTC_CODE_SHA256 = "f446ab618b8df691c0ab8566d4060558b401b6e21a99c19943daba51ac2ca16a"
+BTC_CODE_MAX_BYTES = 64 * 1024
+BTC_MAX_FRAMES = 8000  # 600 s at 10.8 frames per second, with room to spare
+CHORD_VOCABULARY = "BTC large vocabulary: 12 roots with m, maj, dim, aug, 6, m6, 7, maj7, m7, mMaj7, dim7, m7b5, sus2, sus4; N none, X unknown"
 SEP_RETRY_REASONS = ("models_invalid", "decode_failed", "separation_failed", "rmvpe_failed")
 SEP_FLAGS = {"--demucs": "demucs", "--rmvpe-model": "rmvpe", "--melody-scratch": "scratch", "--melody-source": "source"}
 MEL_METHOD_VOCAL = ("Demucs htdemucs_ft vocal at 44.1 kHz, then RMVPE threshold 0.03 on CPU in 30 s pieces; "
@@ -1361,6 +1374,33 @@ def vocal_pitch(sep, n16):
     return f0[i].astype(np.float64), stem, None
 
 
+def btc_frames(model, wav, duration):
+    """([(time, label, None)], None) or (None, reason). Never raises."""
+    try:
+        for path, sha, cap in ((model, BTC_SHA256, BTC_MAX_BYTES), (BTC_CODE, BTC_CODE_SHA256, BTC_CODE_MAX_BYTES)):
+            if read_pinned(path, sha, cap, keep=False)[0]:
+                return None, "models_invalid"
+        with tempfile.TemporaryDirectory(prefix="mlchords-") as d:
+            out = os.path.join(d, "chords.json")
+            if run_tool([sys.executable, "-I", BTC_CODE, model, wav, out]):
+                return None, "btc_failed"
+            with open(out) as f:
+                v = json.load(f)
+        hop, labels = v["hop_s"], v["labels"]
+        if not (0 < hop < 1 and 0 < len(labels) <= BTC_MAX_FRAMES and all(isinstance(x, str) and 0 < len(x) <= 16 for x in labels)):
+            return None, "btc_failed"
+        return [(min(i * hop, duration), x, None) for i, x in enumerate(labels)], None
+    except Exception:
+        return None, "btc_failed"
+
+
+def mark_one_beat(chords, beats):
+    """Marks the segments with no beat strictly inside them (ends are beats, compared with a 1 ms margin)."""
+    for c in chords:
+        if not any(c["start"] + 0.001 < b < c["end"] - 0.001 for b in beats):
+            c["one_beat"] = True
+
+
 def melody_input(sep, n16):
     """(8 ms pitch or None, vocal or None, separation field). None pitch = use Melodia on the mix. Never raises."""
     if sep is None:
@@ -1461,7 +1501,7 @@ def read_wav(path):
     return x, len(x) / float(SRC_RATE)
 
 
-def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None, genre_dir=GENRE_DIR, sep=None):
+def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None, genre_dir=GENRE_DIR, sep=None, chord_model=None):
     import essentia
     import essentia.standard as es
     import numpy as np
@@ -1534,8 +1574,18 @@ def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None, genre_di
         f, m = peaks(sp)
         pcps.append(hpcp(f, m))
         mfccs.append(mfcc(sp)[1][1:])  # coefficient 0 (overall level) left out: energy is reported on its own
-    chords, frame_count = [], 0
-    if pcps:
+    chords, frame_count, btc_used = [], 0, False
+    if chord_model:
+        frames, reason = btc_frames(chord_model, path, duration)
+        if frames:
+            frame_count = len(merge_frames(frames, duration))
+            chords = beat_chords(frames, beats, duration) if beats else merge_frames(frames, duration)
+            if beats:
+                mark_one_beat(chords, beats)
+            btc_used = True
+        else:
+            warnings.append("chord_model_unavailable: " + reason)
+    if pcps and not btc_used:
         labels, strengths = es.ChordsDetection(hopSize=HOP, sampleRate=RATE, windowSize=2.0)(
             essentia.array(np.array(pcps, dtype=np.float32)))
         step = HOP / float(RATE)
@@ -1585,8 +1635,8 @@ def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None, genre_di
         "chords": chords,
         "chords_grid": "beat" if beats else "frame",
         "chord_frame_segment_count": frame_count,
-        "chords_reliability": "low_reference",
-        "chord_vocabulary": "major/minor triads (ChordsDetection)",
+        "chords_reliability": "reference_candidate" if btc_used else "low_reference",
+        "chord_vocabulary": CHORD_VOCABULARY if btc_used else "major/minor triads (ChordsDetection)",
         "energy": {"unit": ENERGY_UNIT, "step_s": ENERGY_STEP, "values": energy},
         "energy_summary": energy_summary(energy, r3(duration)),
         "sections": sections,
@@ -1609,9 +1659,10 @@ def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None, genre_di
 def main(argv):
     model, use_model, use_words, rest = TEMPO_CNN_MODEL, False, False, list(argv[1:])
     genre_dir, use_genre = GENRE_DIR, False
-    sep = {}
+    sep, chord_model = {}, None
     usage = ("usage: rhythm_worker.py [--tempo-cnn-model /abs/model.pb] [--genre-models /abs/dir] [--words-stdin] "
-             "[--demucs /abs --rmvpe-model /abs --melody-scratch /abs [--melody-source /abs]] /absolute/path.wav")
+             "[--demucs /abs --rmvpe-model /abs --melody-scratch /abs [--melody-source /abs]] "
+             "[--chord-model /abs] /absolute/path.wav")
     while len(rest) > 1:
         if rest[0] == "--tempo-cnn-model" and not use_model and len(rest) > 2 and os.path.isabs(rest[1]):
             model, use_model, rest = rest[1], True, rest[2:]
@@ -1619,6 +1670,8 @@ def main(argv):
             genre_dir, use_genre, rest = rest[1], True, rest[2:]
         elif rest[0] == "--words-stdin" and not use_words:
             use_words, rest = True, rest[1:]
+        elif rest[0] == "--chord-model" and not chord_model and len(rest) > 2 and os.path.isabs(rest[1]):
+            chord_model, rest = rest[1], rest[2:]
         elif SEP_FLAGS.get(rest[0]) and SEP_FLAGS[rest[0]] not in sep and len(rest) > 2 and os.path.isabs(rest[1]):
             sep[SEP_FLAGS[rest[0]]], rest = rest[1], rest[2:]
         else:
@@ -1640,7 +1693,7 @@ def main(argv):
     except (ValueError, OSError):
         pass
     try:
-        out = analyze(rest[0], model, words, words_reason, genre_dir, sep or None)
+        out = analyze(rest[0], model, words, words_reason, genre_dir, sep or None, chord_model)
     except Fail as e:
         fail_out(e.code, e.message)
     except ImportError as e:
