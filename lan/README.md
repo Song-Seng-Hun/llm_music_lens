@@ -210,8 +210,8 @@ resampled from 16 kHz because RhythmExtractor2013 assumes 44.1 kHz), `duration`,
 `low_key_strength` < 0.5, `key_changes` when there is more than one key section, `no_chords`,
 `double_tempo_evidence_unavailable`, `no_sections`, `sections_single`, `tempo_cnn_patch_count_mismatch` (0.3.1-0.4.0
 only), `no_melody`, `melody_failed`, `melody_scale_degrees_unavailable`,
-`melody_notes_capped`, `lyric_repeats_capped` (0.4.3), `lyric_repeats_approx_capped` (0.4.4)), `energy`, `energy_summary`, `sections`, `sections_method`, `sections_reliability:
-"low_reference"` (see "Energy and sections" below), `melody` and `melody_notes` (see "Melody features" below), and (worker 0.4.3) `structure_debug` (stored file only, see
+`melody_notes_capped`, `lyric_repeats_capped` (0.4.3), `lyric_repeats_approx_capped` (0.4.4)), `energy`, `energy_summary`, `sections`, `sections_method`, `sections_reliability`
+(`low_reference`; `reference_candidate` with the section model, see "Energy and sections" and "Sections from All-In-One" below), `melody` and `melody_notes` (see "Melody features" below), and (worker 0.4.3) `structure_debug` (stored file only, see
 "Energy and sections") and `lyric_repeats` (see "Lyric repeats"), and (worker 0.5.0) `genre` (see "Genre"). Audio under 1 s is refused (`too_short`).
 
 - Key sections: the same KeyExtractor (`bgate`, frame 4096, hop 2048) on fixed, non-overlapping 20 s windows (a last
@@ -343,7 +343,7 @@ the same file: 6.3 s, 0.99 GB).
 ### Energy and sections (worker 0.3.0)
 
 Purpose: song-level form for "compose using this song as a reference" (where material repeats, where it gets loud),
-not a transcription. There are no downbeats and no named parts.
+not a transcription. There are no downbeats, and named parts only with the section model ("Sections from All-In-One").
 
 - `energy` `{unit: "dBFS", step_s: 1, values}`: RMS level of the 16 kHz source per non-overlapping 1 s window
   `[i, i+1)` (a last partial window of at least 0.5 s is kept, a shorter one dropped; at most 600 values), in dB
@@ -361,7 +361,8 @@ not a transcription. There are no downbeats and no named parts.
   257-265 at -120 with 0.3.1); `silence_s` = seconds of 1 s values below it, and `min` still shows the floor. No
   window without silence (all silent, or audio under 8 s holding a silent second): `peaks: []`, `quietest: null`.
 - `sections` `[{start, end, label, energy_mean, top_chord, similarity_to_first}]`, contiguous from 0 to
-  `duration`, at most 40. Method (`sections_method` states it in short form):
+  `duration`, at most 40. With the section model configured see "Sections from All-In-One"; otherwise the beat method
+  (`sections_method` states it in short form):
   1. Beat-synchronous features: per beat interval the mean 12-bin HPCP chroma (the chord path's frames, frame
      4096, hop 2048 at 44.1 kHz) and the mean MFCC 2-13 (coefficient 1 = overall level left out, since energy is
      reported on its own). MFCCs are z-scored per coefficient over the song; chroma and timbre are each
@@ -696,6 +697,54 @@ score differently.
 |---|---|---|
 | `adtof_model.py` | This repository; the filterbank and peak picking follow madmom (BSD 2-Clause, CPJKU) | Notice kept in the file |
 | `Frame_RNN_adtofAll_0` checkpoint | CC BY-NC-SA 4.0 (MZehren/ADTOF): non-commercial use, attribution, share-alike | Not in this repository. Trained on crowdsourced rhythm game charts for commercial music |
+
+### Sections from All-In-One (worker 0.11.0)
+
+Sections can come from [All-In-One](https://github.com/mir-aidj/all-in-one) instead of the beat method in "Energy and sections". Off unless the
+`rhythm` config has `sections`, which needs `separation`:
+
+```json
+"rhythm": {"python": "...", "worker": "...", "separation": {"demucs": "...", "rmvpe": "..."},
+           "sections": {"allin1_python": "/Users/YOU/tools/music-lens/runtime/allin1/bin/python",
+                        "allin1_model": "/Users/YOU/path/to/allin1/harmonix-fold0-0vra4ys2.pth"}}
+```
+
+It needs its own environment, because its library versions differ from the rhythm python's: Python 3.11, torch 2.5.1,
+torchaudio 2.5.1, numpy 2.0.2, madmom at commit `27f032e8947204902c675e5e341a3faf5dc86dae` and All-In-One from
+`jdf/all-in-one` at `3646cafab37c8a3002463a015fb7b231d30944dd`. That fork is an unmerged pull request (mir-aidj/all-in-one#39)
+that lets the model run on a Mac without the NATTEN package. Get the eight `harmonix-fold*.pth` files from
+[taejunkim/allinone](https://huggingface.co/taejunkim/allinone) and keep them side by side; `allin1_model` names the fold 0 file.
+Copy `allin1_sections.py` next to `rhythm_worker.py`. The eight files and `allin1_sections.py` are pinned by SHA-256, and the
+checkpoints load with torch's restricted unpickler. Nothing is downloaded at run time.
+
+What happens on a rhythm request: Demucs gives all four stems from the 44.1 kHz mono audio, reusing those the vocal, bass and
+drum layers made, and the model gives the sections from them.
+
+Cost of the model step for a 600 s file on an M4 Max: 20 s, 150 CPU seconds and 14.5 GB, after the Demucs step, not alongside it.
+
+Each row of `sections` gains `function`: `start`, `end`, `intro`, `outro`, `break`, `bridge`, `inst`, `solo`, `verse` or
+`chorus`. `label` is still a letter, and equal functions share one, so every verse is the same letter. Mostly silent rows
+stay `silence`. `similarity_to_first` compares a row with the first row of its letter. `sections_method` says which method
+ran, `sections_reliability` is `reference_candidate`, and `structure_debug` is `null`.
+
+`rhythm.sections_model` is `{status: "done"}` or `{status: "skipped", reason}`, and `null` when the section model did not run
+or the stored file predates it. Reasons: `canonical_16k`, `band_limited`, and the failures `models_invalid`, `decode_failed`,
+`separation_failed`, `sections_failed`, `too_many_sections` (over 40 rows, possible on long songs). In all of these the
+beat method fills `sections`. The failures also add the warning `sections_model_failed` and, except `too_many_sections`, are
+retried on the next request that can give stems. A stored result without `sections_model` is recomputed the same way; a 16 kHz upload does not recompute
+for this.
+
+Limits: use it as a reference. The model tells verse from chorus but not verse A from verse B, so it merges parts a person
+would keep apart, and it tends to give fewer sections than a person marks. It was trained on Western pop (Harmonix Set).
+Function names were not scored; only boundaries and grouping were. The song overview still builds on lyric repeats first
+and does not show `function`.
+
+| Part | Terms | Notes |
+|---|---|---|
+| `allin1_sections.py` | This repository | Calls All-In-One |
+| All-In-One code | MIT (mir-aidj/all-in-one, jdf/all-in-one) | Installed separately |
+| `harmonix-fold*.pth` checkpoints | Sources disagree: the Hugging Face repository is tagged MIT with an empty model card; the `all-in-one-infer` package lists the same checkpoints as CC BY-NC-SA 4.0 (mir-aidj/all-in-one#41, unanswered when checked). Treat them as non-commercial | Not in this repository. Whoever installs them accepts those terms |
+| madmom | Code BSD; its data and model files are CC BY-NC-SA, non-commercial | Installed separately. Used here for audio reading, spectrograms and beat post-processing |
 
 ### Lyric repeats (worker 0.4.3, approximate matching 0.4.4)
 

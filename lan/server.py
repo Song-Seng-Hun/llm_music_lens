@@ -57,6 +57,7 @@ CONFIG_KEYS = {"bind", "port", "allow", "clients", "cert", "key", "ml", "root", 
 RHYTHM_KEYS = {"python", "worker"}
 RHYTHM_SEPARATION_KEYS = {"demucs", "rmvpe"}
 RHYTHM_BASS_KEYS = {"basic_pitch_python"}
+RHYTHM_SECTIONS_KEYS = {"allin1_python", "allin1_model"}
 SEP_DIR = "sep"  # per-request scratch of the rhythm worker, under the upload directory
 RHYTHM_DIR = "results-rhythm"  # under root: <result_id>.json, 0600, written atomically
 RHYTHM_LAYERS = ("beats", "chords", "energy", "melody", "genre", "bass", "drums")
@@ -594,8 +595,8 @@ def load_config(path):
     cfg["rhythm"] = None
     if "rhythm" in raw:  # optional layer; absent = unavailable
         rh = raw["rhythm"]
-        if not isinstance(rh, dict) or set(rh) - {"separation", "chord_model", "bass", "drum_model"} != RHYTHM_KEYS:
-            raise ConfigError("rhythm must be an object with python, worker and optionally separation, chord_model, bass and drum_model")
+        if not isinstance(rh, dict) or set(rh) - {"separation", "chord_model", "bass", "drum_model", "sections"} != RHYTHM_KEYS:
+            raise ConfigError("rhythm must be an object with python, worker and optionally separation, chord_model, bass, drum_model and sections")
         sp = rh.get("separation")
         if "separation" in rh and (not isinstance(sp, dict) or set(sp) != RHYTHM_SEPARATION_KEYS):
             raise ConfigError("rhythm separation must be an object with exactly demucs and rmvpe")
@@ -604,10 +605,13 @@ def load_config(path):
             raise ConfigError("rhythm bass needs separation and exactly basic_pitch_python")
         if "drum_model" in rh and not sp:
             raise ConfigError("rhythm drum_model needs separation")
+        sc = rh.get("sections")
+        if "sections" in rh and (not sp or not isinstance(sc, dict) or set(sc) != RHYTHM_SECTIONS_KEYS):
+            raise ConfigError("rhythm sections needs separation and exactly allin1_python and allin1_model")
         out = {}
         for k, raw_path in [("python", rh["python"]), ("worker", rh["worker"])] + sorted((sp or {}).items()) + (
                 [("chord_model", rh["chord_model"])] if "chord_model" in rh else []) + sorted((ba or {}).items()) + (
-                [("drum_model", rh["drum_model"])] if "drum_model" in rh else []):
+                [("drum_model", rh["drum_model"])] if "drum_model" in rh else []) + sorted((sc or {}).items()):
             out[k] = _abs(raw_path, "rhythm " + k)
             try:
                 st = os.stat(out[k])
@@ -623,6 +627,8 @@ def load_config(path):
             raise ConfigError("rhythm demucs not executable")
         if ba and not os.access(out["basic_pitch_python"], os.X_OK):
             raise ConfigError("rhythm basic_pitch_python not executable")
+        if sc and not os.access(out["allin1_python"], os.X_OK):
+            raise ConfigError("rhythm allin1_python not executable")
         cfg["rhythm"] = out
     return cfg
 
@@ -930,7 +936,8 @@ def check_rhythm(v):
                 return None
         if (not _rhythm_v2_ok(v, dur) or not _rhythm_v21_ok(v) or not _rhythm_v22_ok(v)
                 or not _rhythm_v30_ok(v, dur) or not _rhythm_v40_ok(v, dur) or not _rhythm_v43_ok(v, dur)
-                or not _rhythm_v50_ok(v, dur) or not _rhythm_v80_ok(v, dur) or not _rhythm_v90_ok(v, dur)):
+                or not _rhythm_v50_ok(v, dur) or not _rhythm_v80_ok(v, dur) or not _rhythm_v90_ok(v, dur)
+                or not _rhythm_v110_ok(v)):
             return None
         for k in ("worker_sha256", "words_sha256"):  # server-added identities
             if k in v and not (isinstance(v[k], str) and RE_HEX64.match(v[k])):
@@ -1088,6 +1095,8 @@ SILENCE_LABEL = "silence"  # worker 0.4.1: a mostly silent section; takes no let
 ENERGY_SUMMARY_SILENCE_KEYS = {"silence_db", "silence_s"}  # worker 0.4.1
 SPAN_KEYS = {"start", "end", "mean"}
 SECTION_KEYS = {"start", "end", "label", "energy_mean", "top_chord", "similarity_to_first"}
+SECTION_FUNCTIONS = frozenset(("start", "end", "intro", "outro", "break", "bridge", "inst", "solo", "verse", "chorus"))  # worker 0.11.0
+SECTIONS_RELIABILITY = frozenset(("low_reference", "reference_candidate"))
 ENERGY_SUMMARY_KEYS = {"unit", "window_s", "min", "max", "median", "peaks", "quietest"}
 
 
@@ -1142,7 +1151,9 @@ def _rhythm_v30_ok(v, dur):
             return False
         prev_end, seen = 0, 0
         for r in ss:
-            if not (isinstance(r, dict) and set(r) == SECTION_KEYS and _num(r["start"], 0, dur)
+            if not (isinstance(r, dict) and (set(r) == SECTION_KEYS or (set(r) == SECTION_KEYS | {"function"}
+                                                                        and r["function"] in SECTION_FUNCTIONS))
+                    and _num(r["start"], 0, dur)
                     and _num(r["end"], 0, dur) and r["start"] < r["end"] and r["start"] >= prev_end
                     and _num(r["energy_mean"], *ENERGY_DB)
                     and (r["top_chord"] is None or _short_str(r["top_chord"], 16))):
@@ -1162,7 +1173,7 @@ def _rhythm_v30_ok(v, dur):
             prev_end = r["end"]
     if "sections_method" in v and not _short_str(v["sections_method"], 200):
         return False
-    if "sections_reliability" in v and v["sections_reliability"] != "low_reference":
+    if "sections_reliability" in v and v["sections_reliability"] not in SECTIONS_RELIABILITY:
         return False
     return True
 
@@ -1187,6 +1198,7 @@ BASS_FINAL_REASONS = frozenset(("canonical_16k", "band_limited"))
 DRUM_MAX_HITS = 100000  # worker cap: 5 classes, one hit per 30 ms over 600 s
 DRUM_CLASSES = ("kick", "snare", "tom", "hihat", "cymbal")
 DRUM_FAIL_REASONS = frozenset(("models_invalid", "decode_failed", "separation_failed", "adtof_failed"))
+SECTIONS_MODEL_FAIL_REASONS = frozenset(("models_invalid", "decode_failed", "separation_failed", "sections_failed", "too_many_sections"))
 SEP_RETRY_REASONS = frozenset(("models_invalid", "decode_failed", "separation_failed", "rmvpe_failed"))
 SEP_REASONS = SEP_RETRY_REASONS | {"not_configured", "canonical_16k", "band_limited"}
 
@@ -1573,6 +1585,21 @@ def _rhythm_v90_ok(v, dur):
             and d["reliability"] == "reference_candidate" and _short_str(d["method"], 200) and d["hit_counts"] == counts)
 
 
+def _rhythm_v110_ok(v):
+    """Worker 0.11.0: the optional record of the section model, and rows that carry a function only when it gave them."""
+    m = v.get("sections_model")
+    rows = v.get("sections") or []
+    has_fn = any("function" in r for r in rows)
+    if "sections_model" not in v:
+        return not has_fn
+    if not isinstance(m, dict):
+        return False
+    if m.get("status") == "done":
+        return set(m) == {"status"} and bool(rows) and all("function" in r for r in rows)
+    return (m.get("status") == "skipped" and set(m) == {"status", "reason"} and not has_fn
+            and m["reason"] in SECTIONS_MODEL_FAIL_REASONS | BASS_FINAL_REASONS)
+
+
 def _stem_can_improve(v, key, failures, separable):
     """With a stem layer configured and an upload that can give one: a stored result with no such layer, a failed one, or a
     16 kHz one. A 16 kHz upload never recomputes for this: it cannot give the layer and would replace a stored vocal melody."""
@@ -1588,6 +1615,10 @@ def _bass_can_improve(v, separable):
 
 def _drums_can_improve(v, separable):
     return _stem_can_improve(v, "drums", DRUM_FAIL_REASONS, separable)
+
+
+def _sections_can_improve(v, separable):
+    return _stem_can_improve(v, "sections_model", SECTIONS_MODEL_FAIL_REASONS - {"too_many_sections"}, separable)  # same audio, same count
 
 
 def _rhythm_retry(v):
@@ -1639,6 +1670,7 @@ def rhythm_summary(v, overview=None):
             "chord_vocabulary": v.get("chord_vocabulary"),
             "energy_summary": v.get("energy_summary"), "sections": v.get("sections"),
             "sections_method": v.get("sections_method"), "sections_reliability": v.get("sections_reliability"),
+            "sections_model": v.get("sections_model"),
             "melody": v.get("melody"), "bass": v.get("bass"), "drums": v.get("drums"), "lyric_repeats": v.get("lyric_repeats"), "overview": overview,
             "genre": genre_view(v.get("genre")),
             "downbeats": v["downbeats"],
@@ -1671,9 +1703,12 @@ OV_METHOD_LYRIC = ("lyric_repeats blocks; gaps: silence if >half 1 s windows < s
                    "windows touched by %s; cuts: silence >=4 s, wordless >=8 s, sections if >40 s; <4 s merged")
 OV_METHOD = {"lyric": {b: OV_METHOD_LYRIC % {"words": "ASR words", "melody": "melody notes",
                                              "none": "none (gap)"}[b] for b in OV_VOCAL_BY},
-             "audio": "audio sections (Foote novelty, chroma+MFCC); lyric repeats unavailable or empty"}
+             "audio": "audio sections (Foote novelty, chroma+MFCC); lyric repeats unavailable or empty",
+             "audio_model": "audio sections (All-In-One); lyric repeats unavailable or empty"}
 OV_NOTES = ("estimate: repeat = repeated ASR text (chorus/hook candidate; quiet = <=-12 dB rel), verse/pre-chorus "
             "not distinguished, depends on ASR; audio sections near chance vs lyric edges on 8 songs")
+OV_NOTES_MODEL = ("estimate: repeat = repeated ASR text (chorus/hook candidate; quiet = <=-12 dB rel), verse/pre-chorus "
+                  "not distinguished, depends on ASR; audio sections from All-In-One, see sections for their functions")
 
 
 def _ov_wquantile(pairs, q=0.5):
@@ -1961,10 +1996,11 @@ class _Ov:
                 s, e = round(min(b["start"], self.dur), 3), round(min(b["end"], self.dur), 3)
                 if e > s and (not blocks or s >= blocks[-1][1]):
                     blocks.append((s, e, b["group"]))
+        model = (self.v.get("sections_model") or {}).get("status") == "done"
         if blocks:
             source, segs, method = "lyric", self.lyric(blocks), OV_METHOD["lyric"][self.vocal_by]
         elif self.v.get("sections"):
-            source, segs, method = "audio", self.audio(), OV_METHOD["audio"]
+            source, segs, method = "audio", self.audio(), OV_METHOD["audio_model" if model else "audio"]
         else:
             return {"status": "failed", "code": "no_structure"}
         blocks_of = {}  # group -> its surviving (not dropped) blocks; one = internal (weaker cross-section evidence)
@@ -1999,7 +2035,7 @@ class _Ov:
                 "reliability": "low_reference", "segment_count": len(out),
                 "repeat_groups": [{"group": g, "count": len(blocks_of[g]), "seconds": secs[g] / 1000.0}
                                   for g in sorted(secs)],
-                "dropped_repeats": self.dropped, "segments": out, "notes": OV_NOTES}
+                "dropped_repeats": self.dropped, "segments": out, "notes": OV_NOTES_MODEL if model else OV_NOTES}
 
 
 def overview_words(payload, sha, v):
@@ -2292,7 +2328,8 @@ class App:
         return {"configured": True, "python_present": os.path.isfile(rh["python"]),
                 "worker_present": os.path.isfile(rh["worker"]), "worker_sha256": self.rhythm_worker_sha256,
                 "separation_configured": "demucs" in rh, "chord_model_configured": "chord_model" in rh,
-                "bass_configured": "basic_pitch_python" in rh, "drums_configured": "drum_model" in rh}
+                "bass_configured": "basic_pitch_python" in rh, "drums_configured": "drum_model" in rh,
+                "sections_configured": "allin1_model" in rh}
 
     def lyric_words(self, rid):
         """(--words-stdin bytes, their SHA-256) from the ml result file <root>/results/<rid>.json (read-only)."""
@@ -2343,7 +2380,8 @@ class App:
                 and not (separable and _melody_can_improve(stored))
                 and not ("chord_model" in self.cfg["rhythm"] and stored.get("chords_reliability") != "reference_candidate")
                 and not ("basic_pitch_python" in self.cfg["rhythm"] and _bass_can_improve(stored, separable))
-                and not ("drum_model" in self.cfg["rhythm"] and _drums_can_improve(stored, separable))):
+                and not ("drum_model" in self.cfg["rhythm"] and _drums_can_improve(stored, separable))
+                and not ("allin1_model" in self.cfg["rhythm"] and _sections_can_improve(stored, separable))):
             return dict(rhythm_summary(stored, self.rhythm_overview(result_id, stored, words, words_sha)),
                         cache_hit=True, stored=True)
         # absent (worker 0.1.0/0.2.0 files), different or unverifiable worker identity: recompute; the stored file
@@ -2403,6 +2441,8 @@ class App:
                         sep += ["--basic-pitch-python", rh["basic_pitch_python"]]
                     if "drum_model" in rh:
                         sep += ["--drum-model", rh["drum_model"]]
+                    if "allin1_model" in rh:
+                        sep += ["--sections-python", rh["allin1_python"], "--sections-model", rh["allin1_model"]]
                 if "chord_model" in rh:
                     sep += ["--chord-model", rh["chord_model"]]
                 p = subprocess.Popen([rh["python"], "-I", rh["worker"], "--words-stdin"] + sep + [wav], stdin=inp, stdout=out,
