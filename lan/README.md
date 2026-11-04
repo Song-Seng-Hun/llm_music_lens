@@ -17,6 +17,7 @@ Nothing here is installed. No LaunchAgent, firewall rule, certificate or key is 
 | `rmvpe_model.py` | Optional vocal melody: RMVPE inference on CPU, run by `rhythm_worker.py` as its own process (reduced from RVC-Project, MIT) |
 | `btc_model.py` | Optional chords: BTC inference on CPU, run by `rhythm_worker.py` as its own process (reduced from BTC-ISMIR19, MIT) |
 | `bass_onsets.py` | Optional bass layer: Basic Pitch note starts, run by `rhythm_worker.py` in its own environment |
+| `other_notes.py` | Optional accompaniment layer: Basic Pitch notes of the other stem, run by `rhythm_worker.py` in its own environment |
 | `adtof_model.py` | Optional drum layer: ADTOF Frame_RNN inference on CPU, run by `rhythm_worker.py` as its own process (separate implementation, reads the official checkpoint) |
 | `limit_exec.py` | Sets RLIMIT_CPU 60 s / FSIZE 24 MiB / NOFILE 32, then `execv /usr/bin/afconvert -f WAVE -d LEI16@16000 -c 1 src dst` |
 | `sign.py` | Shared canonical-string and HMAC helper (server, tests, Python clients) |
@@ -126,7 +127,7 @@ API:
   The worker also bounds itself (SIGALRM 330 s, RLIMIT_CPU 600 s) in case the server dies first.
 - Rhythm never fails the analyze: the reply stays 200 with the ASR fields unchanged plus `rhythm`:
   - success: the same compact summary as `/report` plus `cache_hit` and `stored` (no beat or chord rows; page
-    them with `/timeline` `layer=beats|chords|energy|melody|genre|bass|drums`);
+    them with `/timeline` `layer=beats|chords|energy|melody|genre|bass|other|drums`);
   - `{"status":"busy","code":"busy"}` when the team lock is held (never waits);
   - `{"status":"timeout","code":"timeout"|"no_time_left"}`;
   - `{"status":"failed","code":...}` with the worker's error code (`invalid_audio`, `too_short`, `analysis_failed`,
@@ -174,7 +175,7 @@ API:
   from before 0.4.3 give `lyric_repeats: null` and `overview: null`, and files from before 0.5.0 give `genre: null`
   (summary `genre` = the stored one without `windows`, plus `window_count`). `structure_debug` is never in the summary (stored file only). A damaged file gives `rhythm: {"status":"failed","code":"invalid_result"}`.
   No file: native bytes unchanged.
-- `GET /timeline/<id>?layer=beats|chords|energy|melody|genre|bass|drums` is served by the server from the stored file with the native rules:
+- `GET /timeline/<id>?layer=beats|chords|energy|melody|genre|bass|other|drums` is served by the server from the stored file with the native rules:
   `start`/`end` 0..600 (default 0 and 600, `end >= start`), rows overlapping the range, `limit` 1..200 (default 100),
   `cursor` <= total, a ~43 KB page byte cap, `truncated` and `continuation`. Beats rows are `{"time"}`, chords rows
   `{start, end, label, strength}`, with `display` from worker 0.10.0 and `one_beat: true` on some BTC rows (with `reliability`: `low_reference`, or
@@ -652,6 +653,37 @@ notes remain.
 |---|---|---|
 | Basic Pitch code and `nmp.onnx` | Apache-2.0 (spotify/basic-pitch) | Installed separately |
 
+### Accompaniment notes (worker 0.12.0)
+
+Notes of everything but vocals, bass and drums, as one group. It comes with the bass layer: the same `rhythm.bass` config turns it
+on and there is nothing else to install. Copy `other_notes.py` next to `rhythm_worker.py`. `other_notes.py` and `nmp.onnx` are
+pinned by SHA-256.
+
+What happens on a rhythm request: Demucs gives the other stem from the same 44.1 kHz mono audio as the vocal, and Basic Pitch reads
+its notes at onset threshold 0.7 and frame threshold 0.2. A 16 kHz WAV upload or band-limited audio has no such layer.
+
+`rhythm.other` is `{status: "done", method, reliability: "low_reference", note_count}` or `{status: "skipped", reason}`. Read the
+rows with `/timeline` `layer=other`: `{start, end, midi, note}`, sorted by start. Instruments are not named. Reasons: `canonical_16k`,
+`band_limited`, `too_many_notes` (over 24,000), and the failures `models_invalid`, `decode_failed`, `separation_failed`,
+`notes_failed`, which also add the warning `other_failed` and are retried on the next request that can give the layer. A stored
+result without the layer, or a `canonical_16k` one, is recomputed the same way; a 16 kHz upload does not recompute for this. Without it stored, `rhythm.other`
+is `null` and the layer answers `rhythm_not_found`.
+
+Measured on RWC-P songs 51-100 against the aligned MIDI without drums, vocals and bass; thresholds were chosen on songs 1-50. F1 on
+a 50 ms grid, mean per song, with notes matched within 50 ms at the exact pitch:
+
+| Measure | This layer | True chord tones, for comparison |
+|---|---|---|
+| Exact pitch, frames | 60.9 | - |
+| Pitch class, frames | 80.8 | 80.0 |
+| Note starts | 31.3 | - |
+
+Cost beyond the stem: a 600 s file took 22 s, 35 CPU-s and about 1 GB, and gave 7,257 notes (about 316 KB).
+
+Limits: use it for register and how busy the part is, and treat single notes as candidates. It is not a score. Pitch classes say no
+more than the chord layer does. YourMT3+ (55.4 exact pitch, 35.7 note starts, seven times slower) did not beat it by the 5 points
+fixed beforehand. Read `chords` for harmony.
+
 ### Chord display (worker 0.10.0)
 
 Every `/timeline` `layer=chords` row gets `display`, the name to show a person: `Bb7`, `F#m`, `C/E`, `Bbm7/Db`. No config is needed.
@@ -717,7 +749,7 @@ that lets the model run on a Mac without the NATTEN package. Get the eight `harm
 Copy `allin1_sections.py` next to `rhythm_worker.py`. The eight files and `allin1_sections.py` are pinned by SHA-256, and the
 checkpoints load with torch's restricted unpickler. Nothing is downloaded at run time.
 
-What happens on a rhythm request: Demucs gives all four stems from the 44.1 kHz mono audio, reusing those the vocal, bass and
+What happens on a rhythm request: Demucs gives all four stems from the 44.1 kHz mono audio, reusing those the vocal, bass, accompaniment and
 drum layers made, and the model gives the sections from them.
 
 Cost of the model step for a 600 s file on an M4 Max: 20 s, 150 CPU seconds and 14.5 GB, after the Demucs step, not alongside it.
@@ -1034,7 +1066,7 @@ cleanup, so it alone does not prove the pipeline is idle).
    check (including 0 < duration <= 600 s) and no-overwrite hard link. A canonical WAV (PCM mono 16 kHz s16) skips
    afconvert. A conversion failure gives 400 `invalid_audio`; size limits, magic-byte detection and framing are
    unchanged.
-12. Optional rhythm layer (not in v0.6): `rhythm=1` on `/analyze`, a `rhythm` summary in `/report`, `layer=beats|chords|energy|melody|genre|bass|drums`
+12. Optional rhythm layer (not in v0.6): `rhythm=1` on `/analyze`, a `rhythm` summary in `/report`, `layer=beats|chords|energy|melody|genre|bass|other|drums`
    on `/timeline`, and a `rhythm` object in `/status` (see "Optional rhythm layer"). New rhythm work and the `/status`
    field need the `rhythm` config key; `/report` and `/timeline` read stored files whenever they exist. The receipt
    records the ASR outcome only; the rhythm result lives in `results-rhythm/`. The worker runs while the API gate is

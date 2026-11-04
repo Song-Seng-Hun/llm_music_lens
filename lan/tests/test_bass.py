@@ -41,7 +41,8 @@ class BassServerTest(RhythmBase):
     def store(self, bass):
         with open(self.rhythm_file(), "w") as f:
             notes = [NOTE] if bass and bass.get("status") == "done" else []
-            f.write(json.dumps(dict(RHYTHM_OUT_V40, **(dict(bass=bass, bass_notes=notes) if bass else {}), **self.ids())))
+            other = dict(other={"status": "skipped", "reason": "band_limited"}, other_notes=[])  # only bass decides here
+            f.write(json.dumps(dict(RHYTHM_OUT_V40, **(dict(bass=bass, bass_notes=notes) if bass else {}), **other, **self.ids())))
 
     def test_flag_passed(self):
         self.assertEqual(self.post(WAV)["status"], "done")

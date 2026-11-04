@@ -22,7 +22,7 @@ $c = 'E:\tools\music-lens-client\music-lens-client.mjs'
 & node $c timeline 'RESULT_ID' --layer words --start 0 --end 30 --limit 100 --cursor 0
 & node $c receipt 'REQUEST_ID'
 ```
-- `--language` en, ko, ja or auto (default auto); `--emotion` voice, music or none (default voice); `--layer` words, emotion, beats, chords, energy, melody, genre, bass or drums (energy, melody, genre, bass and drums need the client's layer list to include them; owner Claude-Window). `--rhythm` takes no value: adds beat, BPM, key and chord analysis after ASR (up to +300 s; Mac 2026-10-26). Choose one value; the lists are prose, not literal pipes. Each flag once; unknown flag = usage error.
+- `--language` en, ko, ja or auto (default auto); `--emotion` voice, music or none (default voice); `--layer` words, emotion, beats, chords, energy, melody, genre, bass, other or drums (energy, melody, genre, bass, other and drums need the client's layer list to include them; owner Claude-Window). `--rhythm` takes no value: adds beat, BPM, key and chord analysis after ASR (up to +300 s; Mac 2026-10-26). Choose one value; the lists are prose, not literal pipes. Each flag once; unknown flag = usage error.
 - `--name` <=120 UTF-8 bytes, no control characters. result_id = 64 hex, request_id = 32 hex.
 - timeline: 1-200 rows; keep the same range and layer and pass the returned continuation as `--cursor`.
 - No `export` and no output-file flag over the API.
