@@ -185,7 +185,7 @@ import tempfile
 import unicodedata
 import wave
 
-TOOL = {"name": "music-lens-rhythm-worker", "version": "0.10.0"}
+TOOL = {"name": "music-lens-rhythm-worker", "version": "0.11.0"}
 SRC_RATE = 16000
 RATE = 44100
 MAX_SECONDS = 600.0
@@ -319,6 +319,25 @@ DRUM_MAX_HITS = 100000  # 5 classes, one hit per 30 ms over 600 s
 DRUM_METHOD = ("Demucs htdemucs_ft drums at 44.1 kHz, then ADTOF Frame_RNN on CPU: kick, snare, tom, hihat, cymbal hit "
                "times. Tom is weak and quiet snare hits are often missed.")
 DRUM_FAIL_REASONS = ("models_invalid", "decode_failed", "separation_failed", "adtof_failed")
+# Sections from All-In-One (0.11.0, optional): functional segments on the four Demucs stems, run in their own environment.
+# See "Sections from All-In-One" in README.md. Audio without stems keeps the beat method.
+ALLIN1_CODE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "allin1_sections.py")
+ALLIN1_CODE_SHA256 = "e2055c108779bc5f3d4e36ae943d8dd75ffe076b3eed413307dd23e65d113117"
+ALLIN1_CODE_MAX_BYTES = 16 * 1024
+ALLIN1_WEIGHTS = (("harmonix-fold0-0vra4ys2.pth", "0db596dfb0995f41d62f6267d76a9d54c046f1649bd35e1dbeca0c5f9a7b8acd"),
+                  ("harmonix-fold1-3ozjhtsj.pth", "607b4864eaabccd4f6951410d5ea6676666ad1cfa6ce2e18bc99f3824b77c3b7"),
+                  ("harmonix-fold2-gmgo0nsy.pth", "67c28ec7ca612d365e5fcb152f6530eb53e34c4303940afb30fd17a295c958a4"),
+                  ("harmonix-fold3-i92b7m8p.pth", "446d05672b2669cdb7d9b8bbbc228a4f3592484335a7995cca89a744e3950ddc"),
+                  ("harmonix-fold4-1bql5qo0.pth", "96327222ab9b33c005388b788ba602f529aa03cc4dde1c859c011f1004490493"),
+                  ("harmonix-fold5-x4z5zeef.pth", "c87f162a1090290bcbb863688746784919cf912c56744fb3d81a1a7dba3b114e"),
+                  ("harmonix-fold6-x7t226rq.pth", "13e7e639bf30fcd3fa049ad863088773a4e57b06d7c68581385b3ef625c60688"),
+                  ("harmonix-fold7-qwwskhg6.pth", "b888b7fba95efa3d5a37ca013fe7efe2741621ea9ca335e6b2723e4fd0fade57"))
+ALLIN1_WEIGHT_MAX_BYTES = 8 * 1024 * 1024
+SEC_FUNCTIONS = ("start", "end", "intro", "outro", "break", "bridge", "inst", "solo", "verse", "chorus")
+SEC_MIN_SEGMENT = 0.05  # s; the model can give empty or near-empty segments at the very start and end
+SEC_MODEL_FAIL_REASONS = ("models_invalid", "decode_failed", "separation_failed", "sections_failed", "too_many_sections")
+SEC_METHOD_ALLIN1 = ("All-In-One 8-fold ensemble on Demucs htdemucs_ft stems at 44.1 kHz; letters group equal functions "
+                     "(verse parts are not told apart); similarity as in the beat method")
 # Chord display (0.10.0): measured on RWC-P with BTC chords and the bass layer; see "Chord display" in README.md.
 SLASH_MIN_SHARE = 0.5
 SHARP_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
@@ -330,7 +349,8 @@ CHORD_TONES = {"": (4, 7), "m": (3, 7), "dim": (3, 6), "aug": (4, 8), "m6": (3, 
                "sus2": (2, 7), "sus4": (5, 7)}
 SEP_RETRY_REASONS = ("models_invalid", "decode_failed", "separation_failed", "rmvpe_failed")
 SEP_FLAGS = {"--demucs": "demucs", "--rmvpe-model": "rmvpe", "--melody-scratch": "scratch", "--melody-source": "source",
-             "--basic-pitch-python": "basic_pitch", "--drum-model": "drum_model"}
+             "--basic-pitch-python": "basic_pitch", "--drum-model": "drum_model",
+             "--sections-python": "sections_python", "--sections-model": "sections_model"}
 MEL_METHOD_VOCAL = ("Demucs htdemucs_ft vocal at 44.1 kHz, then RMVPE threshold 0.03 on CPU in 30 s pieces; "
                     "same note segmentation and merge as the mix method. The vocal stem can include backing vocals.")
 MEL_METHOD = ("EqualLoudness+PredominantPitchMelodia 16 kHz frame 1024 hop 128 (predominant pitch of the full mix); "
@@ -953,6 +973,47 @@ def structure(chroma, mfcc, frame_times, beats, duration, energy, chords):
     return out, warn, structure_debug(debug_nov, edges, cut, full)
 
 
+def sections_from_segments(segs, chroma, mfcc, frame_times, duration, energy, chords):
+    """Section rows for model segments [(start, end, function)], contiguous 0..duration. Equal functions share a letter
+    and silent rows take none, as in structure(); similarity_to_first compares with the first section of that letter."""
+    import numpy as np
+    ft = np.asarray(frame_times, dtype=np.float64)
+    sd = mfcc.std(axis=0)
+    z = (mfcc - mfcc.mean(axis=0)) / np.where(sd > 1e-9, sd, 1.0)
+    letters, first, out = {}, {}, []
+    for s, e, fn in segs:
+        a, b = np.searchsorted(ft, s, side="left"), np.searchsorted(ft, e, side="left")
+        if b <= a:
+            a = int(np.argmin(np.abs(ft - (s + e) / 2.0)))
+            b = a + 1
+        mean = (chroma[a:b].mean(axis=0).tolist(), z[a:b].mean(axis=0).tolist())
+        if section_silent(energy, s, e):
+            lab, sf = SILENCE_LABEL, None
+        else:
+            lab = letters.setdefault(fn, label_name(len(letters)))
+            ref = first.setdefault(lab, mean)
+            sim = _segment_similarity(ref[0], mean[0], ref[1], mean[1])
+            sf = 1.0 if ref is mean else round(min(1.0, max(0.0, sim)), 3)
+        out.append({"start": r3(s), "end": r3(e), "label": lab, "function": fn, "energy_mean": section_energy(energy, s, e),
+                    "top_chord": top_chord(chords, s, e), "similarity_to_first": sf})
+    return out
+
+
+def clean_segments(rows, duration):
+    """[(start, end, function)] contiguous 0..duration from the helper's rows, or None when they are not usable."""
+    if not (isinstance(rows, list) and rows and all(
+            isinstance(r, dict) and r.get("label") in SEC_FUNCTIONS and isinstance(r.get("start"), (int, float))
+            and isinstance(r.get("end"), (int, float)) and math.isfinite(r["start"]) and math.isfinite(r["end"]) for r in rows)):
+        return None
+    rows = [r for r in rows if r["start"] < duration - SEC_MIN_SEGMENT and r["end"] - r["start"] > SEC_MIN_SEGMENT]
+    if not rows or any(b["start"] < a["start"] for a, b in zip(rows, rows[1:])):
+        return None
+    cuts = [0.0] + [r["start"] for r in rows[1:]] + [duration]
+    if any(b <= a for a, b in zip(cuts, cuts[1:])):
+        return None
+    return [(a, b, r["label"]) for a, b, r in zip(cuts, cuts[1:], rows)]
+
+
 def lyric_norm(text):
     """NFKC, lowercase, keep only letters, digits and marks (Unicode categories L*, N*, M*)."""
     return "".join(c for c in unicodedata.normalize("NFKC", text).lower() if unicodedata.category(c)[0] in "LNM")
@@ -1532,6 +1593,44 @@ def drum_input(sep, n16, vocal_reason):
         sep["drums"] = ({"status": "done", "method": DRUM_METHOD, "reliability": "reference_candidate", "hit_counts": counts}, rows)
 
 
+def section_segments(sep, duration):
+    """(segments, None) or (None, reason). The scratch already holds full.wav and any stems made so far."""
+    model = sep["sections_model"]
+    root = os.path.dirname(model)
+    if os.path.basename(model) != ALLIN1_WEIGHTS[0][0]:
+        return None, "models_invalid"
+    for path, sha, cap in [(os.path.join(root, n), h, ALLIN1_WEIGHT_MAX_BYTES) for n, h in ALLIN1_WEIGHTS] + [
+            (ALLIN1_CODE, ALLIN1_CODE_SHA256, ALLIN1_CODE_MAX_BYTES)]:
+        if read_pinned(path, sha, cap, keep=False)[0]:
+            return None, "models_invalid"
+    d = sep["scratch"]
+    stems = os.path.join(d, "full")
+    for s in ("vocals", "bass", "drums", "other"):
+        if not os.path.isfile(os.path.join(stems, s + ".wav")) and run_tool(
+                [sep["demucs"], "-n", "htdemucs_ft", "--stem", s, "-b", "1", "--seed", "0", "-o", d, os.path.join(d, "full.wav")]):
+            return None, "separation_failed"
+    out = os.path.join(d, "sections.json")
+    if run_tool([sep["sections_python"], "-I", ALLIN1_CODE, root, stems, out]):
+        return None, "sections_failed"
+    with open(out) as f:
+        segs = clean_segments(json.load(f), duration)
+    if segs is None:
+        return None, "sections_failed"
+    return (None, "too_many_sections") if len(segs) > SEC_MAX else (segs, None)
+
+
+def sections_input(sep, n16, vocal_reason):
+    """Sets sep["sections"] to (field, segments). Runs before the scratch goes. Never raises."""
+    if not os.path.isfile(os.path.join(sep["scratch"], "full.wav")):
+        sep["sections"] = ({"status": "skipped", "reason": vocal_reason or "separation_failed"}, [])
+        return
+    try:
+        segs, reason = section_segments(sep, n16 / SRC_RATE)
+    except Exception:
+        segs, reason = None, "sections_failed"
+    sep["sections"] = ({"status": "skipped", "reason": reason}, []) if reason else ({"status": "done"}, segs)
+
+
 def btc_frames(model, wav, duration):
     """([(time, label, None)], None) or (None, reason). Never raises."""
     try:
@@ -1608,7 +1707,7 @@ def melody_input(sep, n16):
     if sep is None:
         return None, None, {"status": "skipped", "reason": "not_configured"}
     if sep.get("source") is None:
-        sep["bass"] = sep["drums"] = ({"status": "skipped", "reason": "canonical_16k"}, [])
+        sep["bass"] = sep["drums"] = sep["sections"] = ({"status": "skipped", "reason": "canonical_16k"}, [])
         return None, None, {"status": "skipped", "reason": "canonical_16k"}
     try:
         pitch, stem, reason = vocal_pitch(sep, n16)
@@ -1619,17 +1718,20 @@ def melody_input(sep, n16):
             bass_input(sep, n16, reason)
         if sep.get("drum_model"):
             drum_input(sep, n16, reason)
+        if sep.get("sections_python"):
+            sections_input(sep, n16, reason)
     finally:
         shutil.rmtree(sep["scratch"], ignore_errors=True)
     return pitch, stem, {"status": "done"} if reason is None else {"status": "skipped", "reason": reason}
 
 
-def melody(x16, duration, tonic, scale, sections, sep=None):
-    """(melody dict, notes, warnings) for the 16 kHz source; never raises (failure -> status failed, no notes)."""
+def melody(x16, duration, tonic, scale, sections, sep=None, separated=None):
+    """(melody dict, notes, warnings) for the 16 kHz source; never raises (failure -> status failed, no notes).
+    separated: melody_input's result when the caller already ran it."""
     try:
         import essentia.standard as es
         import numpy as np
-        vocal_pitch_8ms, stem, separation = melody_input(sep, len(x16))
+        vocal_pitch_8ms, stem, separation = separated or melody_input(sep, len(x16))
         vocal = stem is not None
         a = es.EqualLoudness(sampleRate=SRC_RATE)(stem if vocal else x16)
         if vocal:
@@ -1811,12 +1913,22 @@ def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None, genre_di
         warnings.append("no_chords: no chord segment was produced")
 
     step = HOP / float(RATE)
-    sections, sec_warn, sec_debug = structure(np.array(pcps, dtype=np.float64).reshape(-1, 12),
-                                   np.array(mfccs, dtype=np.float64).reshape(-1, 12),
-                                   [min(i * step, duration) for i in range(len(pcps))], beats, duration, energy, chords)
+    separated = melody_input(sep, len(x16))  # stems first: sections can come from them, and melody needs sections
+    pcp_rows = np.array(pcps, dtype=np.float64).reshape(-1, 12)
+    mfcc_rows = np.array(mfccs, dtype=np.float64).reshape(-1, 12)
+    frame_times = [min(i * step, duration) for i in range(len(pcps))]
+    sec_model, sec_segs = sep.get("sections", (None, [])) if sep and sep.get("sections_python") else (None, [])
+    if sec_model and sec_model.get("reason") in SEC_MODEL_FAIL_REASONS:
+        warnings.append("sections_model_failed: %s, used the beat method" % sec_model["reason"])
+    if sec_segs and pcps:
+        sections, sec_warn, sec_debug = sections_from_segments(sec_segs, pcp_rows, mfcc_rows, frame_times, duration, energy,
+                                                               chords), None, None
+    else:
+        sec_segs = []
+        sections, sec_warn, sec_debug = structure(pcp_rows, mfcc_rows, frame_times, beats, duration, energy, chords)
     if sec_warn:
         warnings.append(sec_warn)
-    mel, mel_notes, mel_warn = melody(x16, r3(duration), str(tonic), str(scale), sections, sep)
+    mel, mel_notes, mel_warn = melody(x16, r3(duration), str(tonic), str(scale), sections, separated=separated)
     warnings.extend(mel_warn)
     bass, bass_notes = sep.get("bass", (None, [])) if sep and sep.get("basic_pitch") else (None, [])
     if bass and bass.get("reason") in BASS_FAIL_REASONS:
@@ -1855,8 +1967,9 @@ def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None, genre_di
         "energy": {"unit": ENERGY_UNIT, "step_s": ENERGY_STEP, "values": energy},
         "energy_summary": energy_summary(energy, r3(duration)),
         "sections": sections,
-        "sections_method": SEC_METHOD,
-        "sections_reliability": "low_reference",
+        "sections_method": SEC_METHOD_ALLIN1 if sec_segs else SEC_METHOD,
+        "sections_reliability": "reference_candidate" if sec_segs else "low_reference",
+        **({"sections_model": sec_model} if sec_model else {}),
         "melody": mel,
         "melody_notes": mel_notes,
         **({"bass": bass, "bass_notes": bass_notes} if bass else {}),
@@ -1879,7 +1992,7 @@ def main(argv):
     sep, chord_model = {}, None
     usage = ("usage: rhythm_worker.py [--tempo-cnn-model /abs/model.pb] [--genre-models /abs/dir] [--words-stdin] "
              "[--demucs /abs --rmvpe-model /abs --melody-scratch /abs [--melody-source /abs]] "
-             "[--chord-model /abs] /absolute/path.wav")
+             "[--sections-python /abs --sections-model /abs] [--chord-model /abs] /absolute/path.wav")
     while len(rest) > 1:
         if rest[0] == "--tempo-cnn-model" and not use_model and len(rest) > 2 and os.path.isabs(rest[1]):
             model, use_model, rest = rest[1], True, rest[2:]
@@ -1893,7 +2006,7 @@ def main(argv):
             sep[SEP_FLAGS[rest[0]]], rest = rest[1], rest[2:]
         else:
             fail_out("invalid_argument", usage)
-    if sep and not {"demucs", "rmvpe", "scratch"} <= set(sep):
+    if sep and not {"demucs", "rmvpe", "scratch"} <= set(sep) or ("sections_python" in sep) != ("sections_model" in sep):
         fail_out("invalid_argument", usage)
     if len(rest) != 1 or not os.path.isabs(rest[0]):
         fail_out("invalid_argument", usage)
