@@ -60,7 +60,7 @@ RHYTHM_BASS_KEYS = {"basic_pitch_python"}
 RHYTHM_SECTIONS_KEYS = {"allin1_python", "allin1_model"}
 SEP_DIR = "sep"  # per-request scratch of the rhythm worker, under the upload directory
 RHYTHM_DIR = "results-rhythm"  # under root: <result_id>.json, 0600, written atomically
-RHYTHM_LAYERS = ("beats", "chords", "energy", "melody", "genre", "bass", "drums")
+RHYTHM_LAYERS = ("beats", "chords", "energy", "melody", "genre", "bass", "other", "drums")
 RHYTHM_MAX_BEATS = 5000
 RHYTHM_MAX_CHORDS = 20000
 RHYTHM_MAX_KEY_SECTIONS = 64  # worker 0.2.0 emits <= 30 (20 s windows over 600 s)
@@ -937,7 +937,7 @@ def check_rhythm(v):
         if (not _rhythm_v2_ok(v, dur) or not _rhythm_v21_ok(v) or not _rhythm_v22_ok(v)
                 or not _rhythm_v30_ok(v, dur) or not _rhythm_v40_ok(v, dur) or not _rhythm_v43_ok(v, dur)
                 or not _rhythm_v50_ok(v, dur) or not _rhythm_v80_ok(v, dur) or not _rhythm_v90_ok(v, dur)
-                or not _rhythm_v110_ok(v)):
+                or not _rhythm_v110_ok(v) or not _rhythm_v120_ok(v, dur)):
             return None
         for k in ("worker_sha256", "words_sha256"):  # server-added identities
             if k in v and not (isinstance(v[k], str) and RE_HEX64.match(v[k])):
@@ -1195,6 +1195,8 @@ MELODY_RETRY_CODES = frozenset(("analysis_error", "dependency_missing"))  # envi
 BASS_MAX_NOTES = 7500  # worker cap: 600 s / the 80 ms shortest note
 BASS_FAIL_REASONS = frozenset(("models_invalid", "decode_failed", "separation_failed", "rmvpe_failed", "onsets_failed"))
 BASS_FINAL_REASONS = frozenset(("canonical_16k", "band_limited"))
+OTHER_MAX_NOTES = 24000  # worker cap: 40 notes per second over 600 s
+OTHER_FAIL_REASONS = frozenset(("models_invalid", "decode_failed", "separation_failed", "notes_failed"))
 DRUM_MAX_HITS = 100000  # worker cap: 5 classes, one hit per 30 ms over 600 s
 DRUM_CLASSES = ("kick", "snare", "tom", "hihat", "cymbal")
 DRUM_FAIL_REASONS = frozenset(("models_invalid", "decode_failed", "separation_failed", "adtof_failed"))
@@ -1541,14 +1543,15 @@ def confidence_band(c):
 TEMPO_CNN_RETRY_CODES = frozenset(("inference_error", "dependency_missing"))
 
 
-def _rhythm_v80_ok(v, dur):
-    """Worker 0.8.0: the optional bass layer, summary and rows together."""
-    if ("bass" in v) != ("bass_notes" in v):
+def _note_layer_ok(v, dur, key, cap, reasons):
+    """An optional layer of note rows, summary and rows together."""
+    rows_key = key + "_notes"
+    if (key in v) != (rows_key in v):
         return False
-    if "bass" not in v:
+    if key not in v:
         return True
-    b, notes = v["bass"], v["bass_notes"]
-    if not isinstance(notes, list) or len(notes) > BASS_MAX_NOTES or not isinstance(b, dict):
+    b, notes = v[key], v[rows_key]
+    if not isinstance(notes, list) or len(notes) > cap or not isinstance(b, dict):
         return False
     prev = 0
     for r in notes:
@@ -1558,9 +1561,19 @@ def _rhythm_v80_ok(v, dur):
             return False
         prev = r["start"]
     if b.get("status") == "skipped":
-        return set(b) == {"status", "reason"} and b["reason"] in BASS_FAIL_REASONS | BASS_FINAL_REASONS and notes == []
+        return set(b) == {"status", "reason"} and b["reason"] in reasons and notes == []
     return (set(b) == {"status", "method", "reliability", "note_count"} and b["status"] == "done"
             and b["reliability"] == "low_reference" and _short_str(b["method"], 200) and b["note_count"] == len(notes))
+
+
+def _rhythm_v80_ok(v, dur):
+    """Worker 0.8.0: the bass layer."""
+    return _note_layer_ok(v, dur, "bass", BASS_MAX_NOTES, BASS_FAIL_REASONS | BASS_FINAL_REASONS)
+
+
+def _rhythm_v120_ok(v, dur):
+    """Worker 0.12.0: the accompaniment layer."""
+    return _note_layer_ok(v, dur, "other", OTHER_MAX_NOTES, OTHER_FAIL_REASONS | BASS_FINAL_REASONS | {"too_many_notes"})
 
 
 def _rhythm_v90_ok(v, dur):
@@ -1611,6 +1624,10 @@ def _stem_can_improve(v, key, failures, separable):
 
 def _bass_can_improve(v, separable):
     return _stem_can_improve(v, "bass", BASS_FAIL_REASONS, separable)
+
+
+def _other_can_improve(v, separable):
+    return _stem_can_improve(v, "other", OTHER_FAIL_REASONS, separable)
 
 
 def _drums_can_improve(v, separable):
@@ -1671,7 +1688,7 @@ def rhythm_summary(v, overview=None):
             "energy_summary": v.get("energy_summary"), "sections": v.get("sections"),
             "sections_method": v.get("sections_method"), "sections_reliability": v.get("sections_reliability"),
             "sections_model": v.get("sections_model"),
-            "melody": v.get("melody"), "bass": v.get("bass"), "drums": v.get("drums"), "lyric_repeats": v.get("lyric_repeats"), "overview": overview,
+            "melody": v.get("melody"), "bass": v.get("bass"), "other": v.get("other"), "drums": v.get("drums"), "lyric_repeats": v.get("lyric_repeats"), "overview": overview,
             "genre": genre_view(v.get("genre")),
             "downbeats": v["downbeats"],
             "duration": v["duration"], "tool": v["tool"],
@@ -2171,7 +2188,7 @@ def rhythm_page(rid, v, layer, start, end, cursor, limit):
         g = v["genre"]
         rows = [w for w in g.get("windows", []) if w["end"] >= start and w["start"] <= end]
     else:
-        src = {"melody": "melody_notes", "bass": "bass_notes"}.get(layer, "chords")
+        src = {"melody": "melody_notes", "bass": "bass_notes", "other": "other_notes"}.get(layer, "chords")
         src = v[src]
         rows = [c for c in src if c["end"] >= start and c["start"] <= end]
     if cursor > len(rows):
@@ -2192,6 +2209,9 @@ def rhythm_page(rid, v, layer, start, end, cursor, limit):
         out["unit"], out["step_s"] = v["energy"]["unit"], v["energy"]["step_s"]
     elif layer == "bass":
         out["layer_status"] = v["bass"]["status"]
+        out["reliability"] = "low_reference"
+    elif layer == "other":
+        out["layer_status"] = v["other"]["status"]
         out["reliability"] = "low_reference"
     elif layer == "drums":
         out["layer_status"] = v["drums"]["status"]
@@ -2379,7 +2399,8 @@ class App:
                 and stored.get("words_sha256") == words_sha and not _rhythm_retry(stored)
                 and not (separable and _melody_can_improve(stored))
                 and not ("chord_model" in self.cfg["rhythm"] and stored.get("chords_reliability") != "reference_candidate")
-                and not ("basic_pitch_python" in self.cfg["rhythm"] and _bass_can_improve(stored, separable))
+                and not ("basic_pitch_python" in self.cfg["rhythm"] and (_bass_can_improve(stored, separable)
+                                                                         or _other_can_improve(stored, separable)))
                 and not ("drum_model" in self.cfg["rhythm"] and _drums_can_improve(stored, separable))
                 and not ("allin1_model" in self.cfg["rhythm"] and _sections_can_improve(stored, separable))):
             return dict(rhythm_summary(stored, self.rhythm_overview(result_id, stored, words, words_sha)),
@@ -2989,7 +3010,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(200, v)
 
     def rhythm_timeline(self, app, rid, q):
-        """layer=beats|chords|energy|melody|genre|bass|drums, served from the stored rhythm file with the native range/limit/cursor rules."""
+        """layer=beats|chords|energy|melody|genre|bass|other|drums, served from the stored rhythm file with the native range/limit/cursor rules."""
         vals = {}
         for k, default in (("start", 0.0), ("end", 600.0)):
             if k in q:
@@ -3024,6 +3045,8 @@ class Handler(BaseHTTPRequestHandler):
         if q["layer"] == "genre" and "genre" not in v:  # stored before worker 0.5.0
             raise HttpError("rhythm_not_found")
         if q["layer"] == "bass" and "bass_notes" not in v:  # not configured, or stored before worker 0.8.0
+            raise HttpError("rhythm_not_found")
+        if q["layer"] == "other" and "other_notes" not in v:  # not configured, or stored before worker 0.12.0
             raise HttpError("rhythm_not_found")
         if q["layer"] == "drums" and "drum_hits" not in v:  # not configured, or stored before worker 0.9.0
             raise HttpError("rhythm_not_found")

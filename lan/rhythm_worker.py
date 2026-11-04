@@ -10,7 +10,8 @@ Usage: <essentia python> -I rhythm_worker.py [--words-stdin] WAV
        --demucs /abs/demucs-mlx --rmvpe-model /abs/rmvpe.pt --melody-scratch /abs/dir [--melody-source /abs/upload]
        (0.6.0; melody from a separated vocal, see "Vocal melody" below. No --melody-source = canonical 16 kHz upload.)
        --chord-model /abs/btc_model_large_voca.pt (0.7.0; chords from BTC instead of ChordsDetection)
-       --basic-pitch-python /abs/python (0.8.0; with the Demucs options: a bass layer, see "Bass notes" below)
+       --basic-pitch-python /abs/python (0.8.0; with the Demucs options: a bass layer, see "Bass notes" below, and from
+       0.12.0 an accompaniment layer, see "Accompaniment notes" in README.md)
        --drum-model /abs/checkpoint.index (0.9.0; with the Demucs options: a drum layer, see "Drum hits" in README.md)
 WAV is the server's already-validated canonical file (PCM mono 16 kHz s16, 0 < duration <= 600 s).
 --words-stdin (0.4.3; the server always passes it): stdin holds one JSON object {"words": [[text, start, end], ...]}
@@ -185,7 +186,7 @@ import tempfile
 import unicodedata
 import wave
 
-TOOL = {"name": "music-lens-rhythm-worker", "version": "0.11.0"}
+TOOL = {"name": "music-lens-rhythm-worker", "version": "0.12.0"}
 SRC_RATE = 16000
 RATE = 44100
 MAX_SECONDS = 600.0
@@ -338,6 +339,15 @@ SEC_MIN_SEGMENT = 0.05  # s; the model can give empty or near-empty segments at 
 SEC_MODEL_FAIL_REASONS = ("models_invalid", "decode_failed", "separation_failed", "sections_failed", "too_many_sections")
 SEC_METHOD_ALLIN1 = ("All-In-One 8-fold ensemble on Demucs htdemucs_ft stems at 44.1 kHz; letters group equal functions "
                      "(verse parts are not told apart); similarity as in the beat method")
+# Accompaniment notes (0.12.0, with the bass layer's Basic Pitch): the Demucs other stem as one group of notes.
+OTHER_DEMUCS_ARGS = ("-n", "htdemucs_ft", "--stem", "other", "-b", "1", "--seed", "0")
+OTHER_NOTES_CODE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "other_notes.py")
+OTHER_NOTES_SHA256 = "53de95ae2b1abd6c793a91241a81cfd9836d021ff4f2847feb4edf821494e37c"
+OTHER_NOTES_MAX_BYTES = 16 * 1024
+OTHER_MAX_NOTES = 24000  # 40 notes per second over 600 s; the densest of 100 pop songs had 14.7
+OTHER_METHOD = ("Demucs htdemucs_ft other stem at 44.1 kHz, Basic Pitch notes at onset 0.7 and frame 0.2: all instruments "
+                "but vocals, bass and drums, unnamed. Rough on exact pitch and note starts.")
+OTHER_FAIL_REASONS = ("models_invalid", "decode_failed", "separation_failed", "notes_failed")
 # Chord display (0.10.0): measured on RWC-P with BTC chords and the bass layer; see "Chord display" in README.md.
 SLASH_MIN_SHARE = 0.5
 SHARP_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
@@ -1593,6 +1603,45 @@ def drum_input(sep, n16, vocal_reason):
         sep["drums"] = ({"status": "done", "method": DRUM_METHOD, "reliability": "reference_candidate", "hit_counts": counts}, rows)
 
 
+def other_stem_notes(sep, duration):
+    """(rows, None) or (None, reason). The scratch already holds full.wav and any stems made so far."""
+    if read_pinned(OTHER_NOTES_CODE, OTHER_NOTES_SHA256, OTHER_NOTES_MAX_BYTES, keep=False)[0]:
+        return None, "models_invalid"
+    d = sep["scratch"]
+    stem = os.path.join(d, "full", "other.wav")
+    if not os.path.isfile(stem) and run_tool([sep["demucs"]] + list(OTHER_DEMUCS_ARGS) + ["-o", d, os.path.join(d, "full.wav")]):
+        return None, "separation_failed"
+    out = os.path.join(d, "other-notes.json")
+    if run_tool([sep["basic_pitch"], "-I", OTHER_NOTES_CODE, stem, out]):
+        return None, "notes_failed"
+    with open(out) as f:
+        v = json.load(f)
+    rows = []
+    for s, e, m in v:
+        if not (math.isfinite(s) and math.isfinite(e) and isinstance(m, int) and 0 <= m <= 127):
+            return None, "notes_failed"
+        start, end = r3(max(s, 0.0)), r3(min(e, duration))
+        if start < end:
+            rows.append({"start": start, "end": end, "midi": m, "note": note_name(m)})
+    rows.sort(key=lambda r: (r["start"], r["midi"]))
+    return (None, "too_many_notes") if len(rows) > OTHER_MAX_NOTES else (rows, None)
+
+
+def other_input(sep, n16, vocal_reason):
+    """Sets sep["other"] to (field, rows). Runs before the scratch goes. Never raises."""
+    if not os.path.isfile(os.path.join(sep["scratch"], "full.wav")):
+        sep["other"] = ({"status": "skipped", "reason": vocal_reason or "separation_failed"}, [])
+        return
+    try:
+        rows, reason = other_stem_notes(sep, n16 / SRC_RATE)
+    except Exception:
+        rows, reason = None, "notes_failed"
+    if reason:
+        sep["other"] = ({"status": "skipped", "reason": reason}, [])
+    else:
+        sep["other"] = ({"status": "done", "method": OTHER_METHOD, "reliability": "low_reference", "note_count": len(rows)}, rows)
+
+
 def section_segments(sep, duration):
     """(segments, None) or (None, reason). The scratch already holds full.wav and any stems made so far."""
     model = sep["sections_model"]
@@ -1707,7 +1756,7 @@ def melody_input(sep, n16):
     if sep is None:
         return None, None, {"status": "skipped", "reason": "not_configured"}
     if sep.get("source") is None:
-        sep["bass"] = sep["drums"] = sep["sections"] = ({"status": "skipped", "reason": "canonical_16k"}, [])
+        sep["bass"] = sep["other"] = sep["drums"] = sep["sections"] = ({"status": "skipped", "reason": "canonical_16k"}, [])
         return None, None, {"status": "skipped", "reason": "canonical_16k"}
     try:
         pitch, stem, reason = vocal_pitch(sep, n16)
@@ -1716,6 +1765,7 @@ def melody_input(sep, n16):
     try:
         if sep.get("basic_pitch"):
             bass_input(sep, n16, reason)
+            other_input(sep, n16, reason)
         if sep.get("drum_model"):
             drum_input(sep, n16, reason)
         if sep.get("sections_python"):
@@ -1933,6 +1983,9 @@ def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None, genre_di
     bass, bass_notes = sep.get("bass", (None, [])) if sep and sep.get("basic_pitch") else (None, [])
     if bass and bass.get("reason") in BASS_FAIL_REASONS:
         warnings.append("bass_failed: " + bass["reason"])
+    other, other_notes = sep.get("other", (None, [])) if sep and sep.get("basic_pitch") else (None, [])
+    if other and other.get("reason") in OTHER_FAIL_REASONS:
+        warnings.append("other_failed: " + other["reason"])
     drums, drum_hits = sep.get("drums", (None, [])) if sep and sep.get("drum_model") else (None, [])
     if drums and drums.get("reason") in DRUM_FAIL_REASONS:
         warnings.append("drums_failed: " + drums["reason"])
@@ -1973,6 +2026,7 @@ def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None, genre_di
         "melody": mel,
         "melody_notes": mel_notes,
         **({"bass": bass, "bass_notes": bass_notes} if bass else {}),
+        **({"other": other, "other_notes": other_notes} if other else {}),
         **({"drums": drums, "drum_hits": drum_hits} if drums else {}),
         "structure_debug": sec_debug,
         "lyric_repeats": lyr,
