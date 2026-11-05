@@ -83,6 +83,32 @@ class SeparationServerTest(RhythmBase):
         self.assertTrue(self.post(WAV)["cache_hit"])  # the better melody stays for a 16 kHz upload of the same audio
         self.assertTrue(self.post(FULL)["cache_hit"])
 
+    def test_16k_upload_keeps_stems_when_the_worker_changed(self):
+        kept = dict(self.with_separation({"status": "done"}), worker_sha256="0" * 64)
+        self.write_stored(kept)
+        calls = len(self.fw.calls())
+        self.assertTrue(self.post(WAV)["cache_hit"])
+        self.assertEqual(len(self.fw.calls()), calls)
+        with open(self.rhythm_file()) as f:
+            self.assertEqual(json.load(f), kept)
+        self.assertFalse(self.post(FULL)["cache_hit"])  # a full-band upload still brings it up to date
+
+    def test_16k_upload_keeps_stems_when_the_words_changed(self):
+        self.write_stored(dict(self.with_separation({"status": "done"}), words_sha256="0" * 64))
+        self.assertTrue(self.post(WAV)["cache_hit"])
+
+    def test_16k_upload_recomputes_a_result_without_stems(self):
+        self.write_stored(dict(self.with_separation({"status": "skipped", "reason": "canonical_16k"}), worker_sha256="0" * 64))
+        self.assertFalse(self.post(WAV)["cache_hit"])
+
+    def test_separated_layers(self):
+        done, skipped = {"status": "done"}, {"status": "skipped", "reason": "canonical_16k"}
+        for k in ("bass", "other", "drums", "sections_model", "parts"):
+            self.assertTrue(server._has_separated_layer({k: done}), k)
+            self.assertFalse(server._has_separated_layer({k: skipped}), k)
+        self.assertFalse(server._has_separated_layer({"melody": dict(MELODY, separation=skipped)}))
+        self.assertFalse(server._has_separated_layer({"melody": {"status": "failed"}}))
+
     def test_failed_separation_retried(self):
         for reason in sorted(server.SEP_RETRY_REASONS):
             self.write_stored(self.with_separation({"status": "skipped", "reason": reason}))
