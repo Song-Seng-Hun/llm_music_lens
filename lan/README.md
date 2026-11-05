@@ -608,6 +608,49 @@ Licenses:
 | `rmvpe_model.py` | MIT (RVC-Project). RMVPE's original code is Apache-2.0 | Notice kept in the file |
 | `rmvpe.pt` | The hosting repository (lj1995/VoiceConversionWebUI) is tagged MIT, with nothing about this file or its training data | Not in this repository. Terms are unconfirmed |
 
+### Sung notes (worker 0.21.0, optional)
+
+Vocal melody notes can come from YourMT3+ singing notes instead of RMVPE pitch plus segmentation. Off unless the `rhythm`
+config has `singing`, which needs `separation`:
+
+```json
+"rhythm": {"python": "...", "worker": "...", "separation": {"demucs": "...", "rmvpe": "..."},
+           "singing": {"yourmt3_python": "/Users/YOU/tools/music-lens/runtime/yourmt3/bin/python"}}
+```
+
+Copy `sing_notes.py` next to `rhythm_worker.py` (pinned by SHA-256). The model lives at `~/tools/music-lens/models/yourmt3`:
+`code/` holds `model_helper.py` and `amt/src` of huggingface.co/spaces/mimbres/YourMT3 at commit
+`5e66c1ea173a8186e0d20432b841d3180cc015b5`, and `amt/logs/2024/mc13_256_g4_all_v7_mt3f_sqr_rms_moe_wf4_n8k2_silu_rope_rp_b36_nops/checkpoints/last.ckpt`
+is the Space's checkpoint saved weights-only (its state_dict), pinned by SHA-256 in the worker. The runtime is its own
+Python 3.11 environment (torch 2.5.1, lightning 2.4.0, transformers 4.45.1). Nothing is downloaded at run time, and
+every checkpoint read is forced to `weights_only`.
+
+What happens on a rhythm request: after every other stem layer, the worker runs YourMT3+ on CPU on the same Demucs vocal
+and keeps the notes on program 100 (singing voice); chorus (101), other programs and drums are dropped. Those notes
+replace the RMVPE notes with no merge, scoop join or other rule. RMVPE still runs: `voiced_fraction` and `voiced_s` come
+from it, and its notes are the fallback. The step gets the time left of the server's 300 s, minus 45 s for what
+follows, and at most 150 s; with under 20 s left it does not start.
+
+`melody.singing` says what was used: `{"status": "done"}`, or `{"status": "skipped", "reason": ...}` with RMVPE notes
+(or the mix method when there was no vocal). `melody.method` names the method. Reasons: `no_vocal` (no separated vocal),
+`canonical_16k`, and `models_invalid`, `notes_failed`, `timeout`, `no_time`, `too_many_notes`, which add the warning
+`melody_singing_failed`. `models_invalid` and `notes_failed` are retried on the next request that can give a vocal; the
+others stay, since the same audio costs the same time. A stored melody without `singing` is recomputed the same way; a
+16 kHz upload does not recompute for this.
+
+Reliability: on test songs the pitch of sung notes matched the written vocal part about twice as often as RMVPE notes
+did, and the note count came close to it; about half of the sung pitches still miss, so notes stay low_reference. Backing
+vocals pass through Demucs as vocals. Measurements: [docs/sung-notes-accuracy.md](../docs/sung-notes-accuracy.md).
+
+Cost for a 600 s vocal: about 80 s and 14.3 GB on CPU, and about 1,000 s of CPU time. The worker keeps its own CPU limit
+at 600 s and sets a hard limit of 1,800 s, which only `sing_notes.py` raises its soft limit to.
+
+| Part | Terms | Notes |
+|---|---|---|
+| `sing_notes.py` | This repository; it follows `model_helper.transcribe` of YourMT3 (Apache-2.0) | |
+| YourMT3+ code (mimbres/YourMT3 Space) | Apache-2.0 per the Space card | Not in this repository |
+| YourMT3+ checkpoint | Apache-2.0 per the Space card; nothing separate is stated for the weights or their training data | Not in this repository |
+
 ### Chords from BTC (worker 0.7.0)
 
 Chords can come from BTC instead of major/minor triads. Off unless the `rhythm` config has `chord_model`:
