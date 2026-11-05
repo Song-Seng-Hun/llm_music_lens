@@ -14,6 +14,8 @@ Usage: <essentia python> -I rhythm_worker.py [--words-stdin] WAV
        (0.20.0: vocal melody notes get a scoop join, see "Vocal melody" in README.md.)
        --singing-python /abs/python (0.21.0; with the Demucs options: vocal melody notes from YourMT3+ singing notes,
        RMVPE notes as the fallback, see "Sung notes" in README.md)
+       --time-budget S (0.21.0; the server always passes it): the seconds the server gives this run; the singing step
+       fits in what is left of it. Without it the server's default 300 s is assumed.
        --chord-model /abs/btc_model_large_voca.pt (0.7.0; chords from BTC instead of ChordsDetection)
        --basic-pitch-python /abs/python (0.8.0; with the Demucs options: a bass layer, see "Bass notes" below, and from
        0.12.0 an accompaniment layer, see "Accompaniment notes" in README.md)
@@ -202,7 +204,8 @@ RATE = 44100
 MAX_SECONDS = 600.0
 MIN_SECONDS = 1.0  # below this the analysis is refused
 SHORT_SECONDS = 10.0  # below this a warning is added
-START = time.monotonic()  # reset in main; sing_input counts the server's 300 s from here
+START = time.monotonic()  # reset in main; sing_input counts the server's time from here
+BUDGET = 300.0  # s; --time-budget, else SING_BUDGET (set in main)
 WALL_SECONDS = 330  # self-bound in case the parent never kills us (server wall timeout is 300 s)
 CPU_SECONDS = 600
 SING_CPU_SECONDS = 1800  # hard CPU limit; only sing_notes.py raises its soft limit to it (600 s vocal: 995 s CPU)
@@ -433,11 +436,11 @@ SING_CKPT_MAX_BYTES = 512 * 1024 * 1024
 SING_CODE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sing_notes.py")
 SING_CODE_SHA256 = "82806f9225a98e3041eb689d6e8a09169ad1414fe2a2eb272fa3030e4f55c505"
 SING_CODE_MAX_BYTES = 16 * 1024
-SING_BUDGET = 300.0  # s; the server's rhythm_timeout
+SING_BUDGET = 300.0  # s; the server's default rhythm_timeout, used when --time-budget is absent
 SING_RESERVE = 45.0  # s kept for the steps after the stems (melody, sections, overview) and the server's own work
 SING_MIN = 20.0  # s; with less left the model is not started
 SING_MAX = 150.0  # s; the most it may take (600 s vocal: about 80 s)
-SING_FAIL_REASONS = ("models_invalid", "notes_failed", "timeout", "no_time", "too_many_notes")
+SING_FAIL_REASONS = ("models_invalid", "notes_failed", "timeout", "no_time", "too_many_notes", "no_notes")
 MEL_METHOD_SING = ("Demucs htdemucs_ft vocal at 44.1 kHz, then YourMT3+ (mc13 MoE, CPU) notes on program 100, singing voice; "
                    "no merge. The vocal stem can include backing vocals.")
 MEL_METHOD = ("EqualLoudness+PredominantPitchMelodia 16 kHz frame 1024 hop 128 (predominant pitch of the full mix); "
@@ -1771,6 +1774,8 @@ def sing_stem_notes(sep, duration, left):
         if start < end:
             rows.append({"start": start, "end": end, "midi": m, "note": note_name(m)})
     rows.sort(key=lambda r: (r["start"], r["end"], r["midi"]))
+    if not rows:
+        return None, "no_notes"  # e.g. every note tagged chorus: keep the RMVPE notes
     return (None, "too_many_notes") if len(rows) > MELODY_MAX_NOTES else (rows, None)
 
 
@@ -1779,7 +1784,7 @@ def sing_input(sep, n16, vocal_reason):
     if vocal_reason or not os.path.isfile(os.path.join(sep["scratch"], "full", "vocals.wav")):
         sep["sing"] = ({"status": "skipped", "reason": "no_vocal"}, [])
         return
-    left = SING_BUDGET - SING_RESERVE - (time.monotonic() - START)
+    left = BUDGET - SING_RESERVE - (time.monotonic() - START)
     try:
         rows, reason = sing_stem_notes(sep, n16 / SRC_RATE, left)
     except Exception:
@@ -2718,7 +2723,7 @@ def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None, genre_di
 def main(argv):
     model, use_model, use_words, rest = TEMPO_CNN_MODEL, False, False, list(argv[1:])
     genre_dir, use_genre = GENRE_DIR, False
-    sep, chord_model = {}, None
+    sep, chord_model, budget = {}, None, None
     usage = ("usage: rhythm_worker.py [--tempo-cnn-model /abs/model.pb] [--genre-models /abs/dir] [--words-stdin] "
              "[--demucs /abs --rmvpe-model /abs --melody-scratch /abs [--melody-source /abs]] "
              "[--sections-python /abs --sections-model /abs] [--chord-model /abs] /absolute/path.wav")
@@ -2729,6 +2734,9 @@ def main(argv):
             genre_dir, use_genre, rest = rest[1], True, rest[2:]
         elif rest[0] == "--words-stdin" and not use_words:
             use_words, rest = True, rest[1:]
+        elif rest[0] == "--time-budget" and not budget and len(rest) > 2 and re.fullmatch(r"[0-9]{1,4}(\.[0-9]{1,3})?", rest[1]) \
+                and float(rest[1]) > 0:
+            budget, rest = float(rest[1]), rest[2:]
         elif rest[0] == "--chord-model" and not chord_model and len(rest) > 2 and os.path.isabs(rest[1]):
             chord_model, rest = rest[1], rest[2:]
         elif SEP_FLAGS.get(rest[0]) and SEP_FLAGS[rest[0]] not in sep and len(rest) > 2 and os.path.isabs(rest[1]):
@@ -2747,8 +2755,8 @@ def main(argv):
             words, words_reason = None, "words_unreadable"
     signal.signal(signal.SIGALRM, on_alarm)
     signal.alarm(WALL_SECONDS)
-    global START
-    START = time.monotonic()
+    global START, BUDGET
+    START, BUDGET = time.monotonic(), budget or SING_BUDGET
     try:
         resource.setrlimit(resource.RLIMIT_CPU, (CPU_SECONDS, SING_CPU_SECONDS if sep.get("singing_python") else CPU_SECONDS))
     except (ValueError, OSError):

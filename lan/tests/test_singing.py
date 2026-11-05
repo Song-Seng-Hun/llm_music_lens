@@ -45,6 +45,7 @@ class SingingServerTest(RhythmBase):
         self.assertEqual(self.post(WAV)["status"], "done")
         argv = self.fw.calls()[-1]["argv"]
         self.assertEqual(argv[argv.index("--singing-python") + 1], self.py)
+        self.assertLessEqual(float(argv[argv.index("--time-budget") + 1]), server.DEFAULT_LIMITS["rhythm_timeout"])
 
     def test_status(self):
         self.assertTrue(self.c.json("GET", "/status")[1]["rhythm"]["singing_configured"])
@@ -160,7 +161,7 @@ if mode == "fail":
     sys.exit(3)
 if mode == "sleep":
     time.sleep(30)
-rows = [[0.5, 1.0, 72], [0.1, 0.4, 60], [3.9, 9.0, 64], [5.0, 6.0, 65]] if mode == "ok" else [[None, 1.0, 60]]
+rows = {"ok": [[0.5, 1.0, 72], [0.1, 0.4, 60], [3.9, 9.0, 64], [5.0, 6.0, 65]], "empty": [[5.0, 6.0, 65]]}.get(mode, [[None, 1.0, 60]])
 json.dump(rows, open(sys.argv[3], "w"))
 '''
 
@@ -235,6 +236,7 @@ class SingingWorkerTest(unittest.TestCase):
     def test_failures_keep_rmvpe_notes(self):
         self.assert_rmvpe(self.run_sing("fail"), "notes_failed")
         self.assert_rmvpe(self.run_sing("bad"), "notes_failed")
+        self.assert_rmvpe(self.run_sing("empty"), "no_notes")  # only a note past the end: nothing left
         self.assert_rmvpe(self.run_sing(ckpt_sha="0" * 64), "models_invalid")
         self.assert_rmvpe(self.run_sing("sleep", sing_max=2), "timeout")
         self.assert_rmvpe(self.run_sing(spent=rw.SING_BUDGET), "no_time")
@@ -248,6 +250,16 @@ class SingingWorkerTest(unittest.TestCase):
     def test_canonical(self):
         out = self.run_sing(source=None)
         self.assertEqual(out["melody"]["singing"], {"status": "skipped", "reason": "canonical_16k"})
+
+
+@unittest.skipUnless(os.path.isfile(ESSENTIA_PY), "Essentia python missing")
+class TimeBudgetArgTest(unittest.TestCase):
+    def test_bad_values_refused(self):
+        for v in ("0", "-5", "abc", "1e3", "99999"):
+            p = subprocess.run([ESSENTIA_PY, "-I", os.path.join(REPO, "rhythm_worker.py"), "--time-budget", v, "/x.wav"],
+                               capture_output=True, timeout=60)
+            self.assertEqual(p.returncode, 1, v)
+            self.assertIn(b"invalid_argument", p.stderr, v)
 
 
 class SingingPinTest(unittest.TestCase):

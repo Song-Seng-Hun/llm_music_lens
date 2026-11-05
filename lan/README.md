@@ -629,11 +629,12 @@ What happens on a rhythm request: after every other stem layer, the worker runs 
 and keeps the notes on program 100 (singing voice); chorus (101), other programs and drums are dropped. Those notes
 replace the RMVPE notes with no merge, scoop join or other rule. RMVPE still runs: `voiced_fraction` and `voiced_s` come
 from it, and its notes are the fallback. The step gets the time left of the server's 300 s, minus 45 s for what
-follows, and at most 150 s; with under 20 s left it does not start.
+follows, and at most 150 s; with under 20 s left it does not start. The server passes its real limit for the run with
+`--time-budget` (`rhythm_timeout`, 300 s by default, less when the request's own deadline is near).
 
 `melody.singing` says what was used: `{"status": "done"}`, or `{"status": "skipped", "reason": ...}` with RMVPE notes
 (or the mix method when there was no vocal). `melody.method` names the method. Reasons: `no_vocal` (no separated vocal),
-`canonical_16k`, and `models_invalid`, `notes_failed`, `timeout`, `no_time`, `too_many_notes`, which add the warning
+`canonical_16k`, and `models_invalid`, `notes_failed`, `timeout`, `no_time`, `too_many_notes`, `no_notes` (no singing note at all), which add the warning
 `melody_singing_failed`. `models_invalid` and `notes_failed` are retried on the next request that can give a vocal; the
 others stay, since the same audio costs the same time. A stored melody without `singing` is recomputed the same way; a
 16 kHz upload does not recompute for this.

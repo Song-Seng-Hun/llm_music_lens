@@ -1209,8 +1209,8 @@ DRUM_FAIL_REASONS = frozenset(("models_invalid", "decode_failed", "separation_fa
 SECTIONS_MODEL_FAIL_REASONS = frozenset(("models_invalid", "decode_failed", "separation_failed", "sections_failed", "too_many_sections"))
 SEP_RETRY_REASONS = frozenset(("models_invalid", "decode_failed", "separation_failed", "rmvpe_failed"))
 SEP_REASONS = SEP_RETRY_REASONS | {"not_configured", "canonical_16k", "band_limited"}
-SING_RETRY_REASONS = frozenset(("models_invalid", "notes_failed"))  # timeout, no_time and too_many_notes stay: same audio, same cost
-SING_REASONS = SING_RETRY_REASONS | {"no_vocal", "canonical_16k", "timeout", "no_time", "too_many_notes"}
+SING_RETRY_REASONS = frozenset(("models_invalid", "notes_failed"))  # timeout, no_time, too_many_notes and no_notes stay: same audio, same cost
+SING_REASONS = SING_RETRY_REASONS | {"no_vocal", "canonical_16k", "timeout", "no_time", "too_many_notes", "no_notes"}
 
 
 def _notes_per_second(notes):
@@ -2695,7 +2695,8 @@ class App:
                         sep += ["--singing-python", rh["yourmt3_python"]]
                 if "chord_model" in rh:
                     sep += ["--chord-model", rh["chord_model"]]
-                p = subprocess.Popen([rh["python"], "-I", rh["worker"], "--words-stdin"] + sep + [wav], stdin=inp, stdout=out,
+                p = subprocess.Popen([rh["python"], "-I", rh["worker"], "--words-stdin", "--time-budget", "%.0f" % max(timeout, 1.0)]
+                                     + sep + [wav], stdin=inp, stdout=out,
                                      stderr=err, env=self.child_env(), cwd="/", close_fds=True, pass_fds=(lock_fd,),
                                      shell=False, start_new_session=True)
             except OSError:

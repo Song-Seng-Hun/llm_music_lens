@@ -511,7 +511,7 @@ class RhythmAnalyzeTest(RhythmBase):
         self.assertEqual(len(calls), 1)
         inbox_name = self.env.argv_log()[-1][1]
         # same promoted WAV, argv; the ASR words of the result on stdin
-        self.assertEqual(calls[0]["argv"], ["--words-stdin", os.path.join(self.env.inbox, inbox_name)])
+        self.assertEqual(calls[0]["argv"], ["--words-stdin", "--time-budget", "300", os.path.join(self.env.inbox, inbox_name)])
         self.assertEqual(json.loads(calls[0]["stdin"]), {"words": [[w["text"], w["start"], w["end"]] for w in WORDS]})
         self.assertTrue(calls[0]["exists"])
         self.assertTrue(calls[0]["lock_held"], "team flock held while the worker runs")
