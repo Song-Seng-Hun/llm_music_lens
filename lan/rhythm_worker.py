@@ -9,6 +9,7 @@ Usage: <essentia python> -I rhythm_worker.py [--words-stdin] WAV
        looked up by name in that directory and their SHA-256 pins are not overridable)
        --demucs /abs/demucs-mlx --rmvpe-model /abs/rmvpe.pt --melody-scratch /abs/dir [--melody-source /abs/upload]
        (0.6.0; melody from a separated vocal, see "Vocal melody" below. No --melody-source = canonical 16 kHz upload.)
+       (0.17.0: the same options also give mix and part_positions from a stereo decode, see "Mix and stereo" in README.md.)
        --chord-model /abs/btc_model_large_voca.pt (0.7.0; chords from BTC instead of ChordsDetection)
        --basic-pitch-python /abs/python (0.8.0; with the Demucs options: a bass layer, see "Bass notes" below, and from
        0.12.0 an accompaniment layer, see "Accompaniment notes" in README.md)
@@ -190,7 +191,7 @@ import tempfile
 import unicodedata
 import wave
 
-TOOL = {"name": "music-lens-rhythm-worker", "version": "0.16.0"}
+TOOL = {"name": "music-lens-rhythm-worker", "version": "0.17.0"}
 SRC_RATE = 16000
 RATE = 44100
 MAX_SECONDS = 600.0
@@ -350,6 +351,17 @@ PART_WINDOW_S = 2.0
 PART_THRESHOLD_DB = -15  # stem window RMS against the whole mix's RMS; chosen on RWC-P 1-50
 PART_METHOD = ("Demucs htdemucs_ft stems: share of 2 s windows whose RMS is within 15 dB of the mix's RMS. "
                "Quiet parts can read as off. Note and hit rates come from the note layers.")
+# Mix and stereo (0.17.0): the upload decoded to stereo, and a second Demucs run on it; see "Mix and stereo" in README.md.
+STEREO_ARGS = ("-n", "htdemucs_ft", "-b", "1", "--seed", "0")
+STEREO_PARTS = ("vocals", "bass", "drums", "other")
+STEREO_WINDOW_S = 1.0
+STEREO_BANDS = (("low_width_db", 0.0, 200.0), ("mid_width_db", 200.0, 2000.0), ("high_width_db", 2000.0, None))
+STEREO_WIDTH_DB = 40.0  # width is side energy over mid energy, kept within +-40 dB
+STEREO_PART_DB = -15.0  # a part under this against the section's mix has no position
+MIX_METHOD = ("Stereo decode. balance = (R-L)/(R+L) of energy; width = side over mid energy in dB; low under 200 Hz, high over "
+              "2 kHz; loudness by Essentia LoudnessEBUR128.")
+PART_POSITION_METHOD = ("Demucs htdemucs_ft on the stereo decode: balance, width and level against the mix per section. "
+                        "Stem bleed moves these values.")
 # Musical units (0.14.0): existing results grouped by the section model's downbeats; see "Musical units" in README.md.
 BAR_MAX = 2000
 BAR_STEPS = 16
@@ -1804,6 +1816,137 @@ def swing_field(downbeats, drums, drum_hits):
             "hits": len(off), "feel": None if phase is None else "swung" if phase >= SWING_AT else "straight"}
 
 
+def stereo_energy(path, bands=False):
+    """Per STEREO_WINDOW_S of a 16-bit stereo WAV: a row (LL, RR, LR), plus with bands one (mid, side) energy pair per band."""
+    import numpy as np
+    with wave.open(path, "rb") as w:
+        if (w.getsampwidth(), w.getnchannels()) != (2, 2):
+            raise ValueError("not 16-bit stereo")
+        rate, hop = w.getframerate(), int(STEREO_WINDOW_S * w.getframerate())
+        rows = []
+        while True:
+            b = w.readframes(hop)
+            if not b:
+                return rows
+            x = np.frombuffer(b, dtype="<i2").astype(np.float64).reshape(-1, 2) / 32768.0
+            left, right = x[:, 0], x[:, 1]
+            row = [float(left @ left), float(right @ right), float(left @ right)]
+            if bands:
+                f = np.fft.rfftfreq(len(x), 1.0 / rate)
+                # one-sided spectra; only the ratio of mid to side in a band is used
+                mid, side = np.abs(np.fft.rfft((left + right) / 2.0)) ** 2, np.abs(np.fft.rfft((left - right) / 2.0)) ** 2
+                for _, lo, hi in STEREO_BANDS:
+                    k = (f >= lo) & (f < hi) if hi else f >= lo
+                    row += [float(mid[k].sum()), float(side[k].sum())]
+            rows.append(row)
+
+
+def stereo_lufs(path):
+    """(integrated LUFS, loudness range) of a 16-bit stereo WAV; None for a value that is not finite."""
+    import essentia.standard as es
+    import numpy as np
+    with wave.open(path, "rb") as w:
+        x = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2").astype(np.float32).reshape(-1, 2) / 32768.0
+        rate = float(w.getframerate())
+    _, _, integrated, lra = es.LoudnessEBUR128(sampleRate=rate)(np.ascontiguousarray(x))
+    return tuple(round(float(v), 2) if math.isfinite(float(v)) else None for v in (integrated, lra))
+
+
+def stereo_input(sep, vocal_reason):
+    """Sets sep["stereo"] to (mix field or None, position field or None, measures). Runs before the scratch goes. Never raises."""
+    def skip(reason, position_reason=None):
+        sep["stereo"] = ({"status": "skipped", "reason": reason}, {"status": "skipped", "reason": position_reason or reason}, None)
+    d = sep["scratch"]
+    if not os.path.isfile(os.path.join(d, "full.wav")):
+        return skip(vocal_reason or "separation_failed")
+    wav = os.path.join(d, "stereo.wav")
+    if run_tool(["/usr/bin/afconvert", "-f", "WAVE", "-d", "LEI16@%d" % SEP_RATE, "-c", "2", sep["source"], wav]):
+        return skip("decode_failed")
+    try:
+        mix = stereo_energy(wav, bands=True)
+        if not any(r[0] + r[1] - 2.0 * r[2] > 0 for r in mix):  # identical channels: a mono upload has no stereo to read
+            return skip("mono_source")
+        lufs, lra = stereo_lufs(wav)
+    except Exception:
+        return skip("mix_failed")
+    parts = None
+    try:
+        out = os.path.join(d, "stereo_out")
+        if not run_tool([sep["demucs"]] + list(STEREO_ARGS) + ["-o", out, wav]):
+            parts = {s: stereo_energy(os.path.join(out, "stereo", s + ".wav")) for s in STEREO_PARTS}
+    except Exception:
+        parts = None
+    position = None if parts else {"status": "skipped", "reason": "separation_failed"}
+    sep["stereo"] = (None, position, {"mix": mix, "parts": parts, "lufs": lufs, "lra": lra})
+
+
+def _section_sum(rows, start, end):
+    """Columns summed over the windows whose midpoint lies in [start, end) (else the window holding the midpoint), or None."""
+    sel = [r for i, r in enumerate(rows) if start <= (i + 0.5) * STEREO_WINDOW_S < end]
+    if not sel:
+        i = int(((start + end) / 2.0) // STEREO_WINDOW_S)
+        if i >= len(rows):
+            return None
+        sel = [rows[i]]
+    return [sum(c) for c in zip(*sel)]
+
+
+def _width_db(mid, side):
+    if mid <= 0 and side <= 0:
+        return None
+    if side <= 0 or mid <= 0:
+        return -STEREO_WIDTH_DB if side <= 0 else STEREO_WIDTH_DB
+    return round(max(-STEREO_WIDTH_DB, min(STEREO_WIDTH_DB, 10.0 * math.log10(side / mid))), 2)
+
+
+def _balance_width(ll, rr, lr):
+    """(balance, width_db), or (None, None) for silence."""
+    if ll + rr <= 0:
+        return None, None
+    return round((rr - ll) / (ll + rr), 3), _width_db(ll + rr + 2.0 * lr, ll + rr - 2.0 * lr)
+
+
+def mix_row(sec, rows):
+    c = _section_sum(rows, sec["start"], sec["end"])
+    out = {"start": sec["start"], "end": sec["end"], "label": sec["label"], "balance": None, "width_db": None}
+    out.update((b[0], None) for b in STEREO_BANDS)
+    if c is None:
+        return out
+    out["balance"], out["width_db"] = _balance_width(c[0], c[1], c[2])
+    for i, b in enumerate(STEREO_BANDS):
+        out[b[0]] = _width_db(c[3 + 2 * i], c[4 + 2 * i])
+    return out
+
+
+def position_row(sec, mix, parts):
+    m = _section_sum(mix, sec["start"], sec["end"])
+    out = {"start": sec["start"], "end": sec["end"], "label": sec["label"]}
+    for s in STEREO_PARTS:
+        c, v = _section_sum(parts[s], sec["start"], sec["end"]), None
+        if c is not None and m is not None and m[0] + m[1] > 0 and c[0] + c[1] > 0:
+            level = 10.0 * math.log10((c[0] + c[1]) / (m[0] + m[1]))
+            if level >= STEREO_PART_DB:
+                pan, width = _balance_width(c[0], c[1], c[2])
+                v = {"pan": pan, "width_db": width, "level_db": round(level, 2)}
+        out[s] = v
+    return out
+
+
+def stereo_fields(sep, sections):
+    """(mix field or None, position field or None); both None without separation configured."""
+    if not sep or "stereo" not in sep:
+        return None, None
+    mix, position, m = sep["stereo"]
+    if m is None:
+        return mix, position
+    mix = {"status": "done", "method": MIX_METHOD, "reliability": "reference_candidate", "lufs": m["lufs"],
+           "loudness_range": m["lra"], "sections": [mix_row(s, m["mix"]) for s in sections]}
+    if position is None:
+        position = {"status": "done", "method": PART_POSITION_METHOD, "reliability": "low_reference", "threshold_db": STEREO_PART_DB,
+                    "sections": [position_row(s, m["mix"], m["parts"]) for s in sections]}
+    return mix, position
+
+
 def section_segments(sep, duration):
     """(segments, None) or (None, reason). The scratch already holds full.wav and any stems made so far."""
     model = sep["sections_model"]
@@ -2013,6 +2156,7 @@ def melody_input(sep, n16):
     if sep.get("source") is None:
         sep["bass"] = sep["other"] = sep["drums"] = sep["sections"] = ({"status": "skipped", "reason": "canonical_16k"}, [])
         sep["parts"] = ({"status": "skipped", "reason": "canonical_16k"}, None)
+        sep["stereo"] = ({"status": "skipped", "reason": "canonical_16k"}, {"status": "skipped", "reason": "canonical_16k"}, None)
         return None, None, {"status": "skipped", "reason": "canonical_16k"}
     try:
         pitch, stem, reason = vocal_pitch(sep, n16)
@@ -2027,6 +2171,7 @@ def melody_input(sep, n16):
         if sep.get("sections_python"):
             sections_input(sep, n16, reason)
         parts_input(sep, reason)
+        stereo_input(sep, reason)
     finally:
         shutil.rmtree(sep["scratch"], ignore_errors=True)
     return pitch, stem, {"status": "done"} if reason is None else {"status": "skipped", "reason": reason}
@@ -2252,6 +2397,10 @@ def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None, genre_di
         warnings.append("parts_failed: levels_failed")
     bars = bars_field((sep or {}).get("downbeats"), chords, drums, drum_hits, btc_used, duration)
     swing = swing_field((sep or {}).get("downbeats"), drums, drum_hits)
+    mix_field, positions = stereo_fields(sep, sections)
+    for name, f in (("mix", mix_field), ("part_positions", positions)):
+        if f and f.get("reason") in ("decode_failed", "mix_failed", "separation_failed"):
+            warnings.append("%s_failed: %s" % (name, f["reason"]))
     try:  # pure Python on the server's words; never fails the worker
         lyr, lyr_warn = lyric_repeats(words, r3(duration), words_reason)
     except Exception:
@@ -2295,6 +2444,8 @@ def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None, genre_di
         **({"parts": parts} if parts else {}),
         **({"bars": bars} if bars else {}),
         **({"swing": swing} if swing else {}),
+        **({"mix": mix_field} if mix_field else {}),
+        **({"part_positions": positions} if positions else {}),
         "structure_debug": sec_debug,
         "lyric_repeats": lyr,
         "genre": gn,

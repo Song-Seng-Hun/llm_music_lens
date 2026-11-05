@@ -708,6 +708,34 @@ Limits: a quiet part can read as off, and -15 dB was the top of the range tried.
 The accompaniment is not judged on or off, because it sounds almost all the time; read its rate instead. Instruments are not named.
 Section labels are not corrected by this: similar chords and busy vocals did not mean a chorus on the real song.
 
+### Mix and stereo (worker 0.17.0)
+
+How wide a section is, where it leans, how loud the song is, and where each part sits. It needs no config of its own and no new
+model: it comes with the separation config. The rest of the worker still reads mono; this reads a second, stereo decode of the upload
+and runs Demucs on it once more, which adds about 11 s to a five-minute song and the same memory as the first run, one after the other.
+
+- `rhythm.mix` is `{status: "done", method, reliability: "reference_candidate", lufs, loudness_range, sections}` or
+  `{status: "skipped", reason}`. `sections` has one row per `rhythm.sections` row: `{start, end, label, balance, width_db, low_width_db,
+  mid_width_db, high_width_db}`. `balance` is `(R-L)/(R+L)` of energy, -1 to 1. `width_db` is side energy over mid energy, within
+  +-40 dB, so -40 is mono and 0 is as much side as mid. Low is under 200 Hz, high is over 2 kHz. `lufs` and `loudness_range` are for the
+  whole song, from Essentia `LoudnessEBUR128`. `null` means silence or not finite.
+- `rhythm.part_positions` is `{status: "done", method, reliability: "low_reference", threshold_db: -15, sections}` or
+  `{status: "skipped", reason}`. A row is `{start, end, label, vocals, bass, drums, other}`, each `{pan, width_db, level_db}` or `null`
+  when that part is under -15 dB of the section's mix. `level_db` is against the section's mix.
+- Reasons: `canonical_16k`, `band_limited`, `mono_source` (identical channels), `models_invalid`, and the failures `decode_failed`, `mix_failed`,
+  `separation_failed`, which add a warning and are retried on the next request that can give the field. A failed second Demucs run
+  leaves `mix` done. Before this worker, or without separation, both fields are `null`. Results are per section; there is no `/timeline` layer.
+
+Evaluated locally with bars set beforehand. Mix values were checked on signals with exact answers. Part values were checked by giving
+separated stems known positions, levels and widths in 30 s blocks, mixing them, separating again and comparing, and all four parts
+passed. That test is likely kind, because Demucs output is easier for Demucs than real tracks, which is why `part_positions` is
+`low_reference`. It shows the values are read correctly, not that they say anything about a song's arrangement by themselves.
+
+Limits: one bar was missed and accepted by the owner. AAC at 256 kbps moved `balance` by up to about 0.05 on a lone, slightly panned noise
+with identical waveforms on both channels, against a bar of 0.02; the cause was not found, and on 15 real songs the largest change seen was about 0.001.
+Other codecs and bitrates were not tried. Bleed between stems moves the part values, and a nearly mono part such as bass can show a large
+width error. `lufs` is not per section. Sum and difference only: phase tricks and time-delay panning are not told apart.
+
 ### Musical units (worker 0.14.0, scale and degree 0.15.0, swing 0.16.0)
 
 Existing results grouped by bar, for reading a song the way it is written. It needs no config of its own and no new model: it comes
