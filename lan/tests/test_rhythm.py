@@ -2082,6 +2082,12 @@ class ScoopJoinTest(unittest.TestCase):
             self.assertEqual(rw.scoop_join(notes), notes, notes)
         self.assertEqual(rw.scoop_join([]), [])
 
+    def test_dip_inside_held_note(self):
+        # A4 with a 0.1 s dip to G#4: the scoop rule takes the dip into the second A; melody() then joins the two As
+        n = [_n(0.0, 0.5, 69), _n(0.5, 0.6, 68), _n(0.6, 1.0, 69)]
+        self.assertEqual(rw.scoop_join(n), [_n(0.0, 0.5, 69), _n(0.5, 1.0, 69)])
+        self.assertEqual(rw.same_pitch_join(rw.scoop_join(n), rw.MERGE_GAP), [_n(0.0, 1.0, 69)])
+
     def test_once_left_to_right(self):
         # two scoops in a row each join their own target; the joined note is not a scoop source again
         n = [_n(0.0, 0.1, 67), _n(0.1, 0.5, 68), _n(0.5, 0.6, 69), _n(0.6, 1.0, 70)]

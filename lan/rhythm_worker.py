@@ -1391,7 +1391,7 @@ def scoop_join(notes, short=SCOOP_MAX, gap=MERGE_GAP, steps=SCOOP_STEPS):
     """Vocal notes only (0.20.0). A note <= `short` whose gap to the next note is <= `gap`, where the next note is
     `steps` semitones higher and at least twice as long, is removed and the next note starts at its start: a sung
     scoop from below otherwise reads as an extra note a semitone flat (synthetic 200-cent scoops of 80 and 150 ms
-    each gave a 0.104 s note). Left to right, once. Compared in integer ms like the merge. Songs 51-100 of RWC-P
+    each gave a 0.104 s note). Left to right, once; the caller joins same-pitch pieces again afterwards. Compared in integer ms like the merge. Songs 51-100 of RWC-P
     against MIDI vocal notes: pitch F 31.5 -> 34.3, rhythm F 62.0 -> 62.2 (Goal R, not blind)."""
     out, i, n = [], 0, len(notes)
     while i < n:
@@ -2383,7 +2383,7 @@ def melody(x16, duration, tonic, scale, sections, sep=None, separated=None):
         raw = len(notes)
         notes = merge_notes(notes)
         if vocal:
-            notes = scoop_join(notes)
+            notes = same_pitch_join(scoop_join(notes), MERGE_GAP)  # a dip inside a held note leaves two same-pitch pieces
         warns = []
         if separation.get("reason") in SEP_RETRY_REASONS:
             warns.append("melody_separation_failed: %s, used the mix method" % separation["reason"])
