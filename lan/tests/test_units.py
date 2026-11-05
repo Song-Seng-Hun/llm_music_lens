@@ -1,4 +1,4 @@
-"""Musical units (worker 0.14.0): downbeats and bars."""
+"""Musical units (worker 0.14.0, 0.15.0): downbeats, bars, scale and degree."""
 import json
 import unittest
 
@@ -15,7 +15,7 @@ CHORDS = [{"start": 0.0, "end": 1.5, "label": "Am"}, {"start": 1.5, "end": 4.0, 
 def stored(**fields):
     base = dict(RHYTHM_OUT_V40, downbeats={"status": "done", "method": rw.DOWNBEAT_METHOD, "reliability": "reference_candidate",
                                            "count": 3},
-                bars=rw.bars_field(BEATS, CHORDS, DONE, HITS, True))
+                bars=rw.bars_field(BEATS, CHORDS, DONE, HITS, True, 4.0))
     return json.loads(json.dumps(dict(base, **fields)))
 
 
@@ -37,17 +37,52 @@ class BarTest(unittest.TestCase):
         self.assertEqual(rw.bar_steps([3.99], BEATS), {})
 
     def test_rows(self):
-        rows = rw.bars_field(BEATS, CHORDS, DONE, HITS, True)["rows"]
-        self.assertEqual(rows, [{"start": 0.0, "end": 2.0, "chord": "Am", "kick": [0], "snare": [4]},
-                                {"start": 2.0, "end": 4.0, "chord": "F", "kick": [0], "snare": []}])
+        rows = rw.bars_field(BEATS, CHORDS, DONE, HITS, True, 4.0)["rows"]
+        self.assertEqual(rows, [{"start": 0.0, "end": 2.0, "chord": "Am", "scale": "C", "degree": "6", "kick": [0], "snare": [4]},
+                                {"start": 2.0, "end": 4.0, "chord": "F", "scale": "C", "degree": "4", "kick": [0], "snare": []}])
 
     def test_missing_layers_are_none(self):
-        row = rw.bars_field(BEATS, CHORDS, {"status": "skipped", "reason": "x"}, [], False)["rows"][0]
-        self.assertEqual((row["chord"], row["kick"], row["snare"]), (None, None, None))
+        row = rw.bars_field(BEATS, CHORDS, {"status": "skipped", "reason": "x"}, [], False, 4.0)["rows"][0]
+        self.assertEqual((row["chord"], row["scale"], row["degree"], row["kick"], row["snare"]), (None,) * 5)
 
     def test_no_downbeats_no_field(self):
-        self.assertIsNone(rw.bars_field([], CHORDS, DONE, HITS, True))
-        self.assertIsNone(rw.bars_field(None, CHORDS, DONE, HITS, True))
+        self.assertIsNone(rw.bars_field([], CHORDS, DONE, HITS, True, 4.0))
+        self.assertIsNone(rw.bars_field(None, CHORDS, DONE, HITS, True, 4.0))
+
+
+class ScaleTest(unittest.TestCase):
+    def test_chord_tones(self):
+        for label, want in (("Am", [9, 0, 4]), ("F#maj7", [6, 10, 1, 5]), ("G7", [7, 11, 2, 5]), ("C:min7", [0, 3, 7, 10]),
+                            ("Bb/D", [10, 2, 5]), ("Dsus4", [2, 7, 9]), ("Bhdim7", [11, 2, 5, 9]), ("Bm7b5", [11, 2, 5, 9]),
+                            ("AmMaj7", [9, 0, 4, 8]), ("Fdim7", [5, 8, 11, 2]), ("Eaug", [4, 8, 0]), ("Cm6", [0, 3, 7]), ("C6", [0, 4, 7]),
+                            ("Csus2", [0, 2, 7])):
+            self.assertEqual(rw.chord_tones(label), want, label)
+        for label in ("N", "X", "", None, "?"):
+            self.assertIsNone(rw.chord_tones(label))
+
+    def test_a_long_change_moves_and_a_short_visit_stays(self):
+        c, d = ["C", "F", "Dm", "Am"] * 6, ["D", "A", "Bm", "Em"] * 6
+        self.assertEqual(rw.scale_path(c + d), [0] * 24 + [2] * 24)
+        self.assertEqual(rw.scale_path(c + ["Ab", "Db"] + c), [0] * 50)
+
+    def test_no_chords_at_all(self):
+        self.assertIsNone(rw.scale_path(["N", None]))
+
+    def test_bars_run_on_past_the_last_downbeat(self):
+        self.assertEqual(rw.bars_to_song_end([0.0, 2.0, 4.0], 7.0), [(0.0, 2.0), (2.0, 4.0), (4.0, 6.0), (6.0, 7.0)])
+        self.assertEqual(rw.bars_to_song_end([0.0, 2.0], 2.5), [(0.0, 2.0), (2.0, 2.5)])
+
+    def test_chords_past_the_last_downbeat_count_but_get_no_row(self):
+        chords = [{"start": 0.0, "end": 4.0, "label": "C"}, {"start": 4.0, "end": 40.0, "label": "F"},
+                  {"start": 40.0, "end": 60.0, "label": "Bb"}]
+        out = rw.bar_scales([0.0, 2.0, 4.0], chords, 60.0)
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[0], ("F", "5"))
+
+    def test_bar_without_a_chord(self):
+        out = rw.bar_scales([0.0, 2.0, 4.0], [{"start": 0.0, "end": 2.0, "label": "N"}, {"start": 2.0, "end": 4.0, "label": "C"}], 4.0)
+        self.assertEqual(out[0][1], None)
+        self.assertEqual(out[1][1], "1")
 
 
 class CheckTest(unittest.TestCase):
@@ -68,6 +103,17 @@ class CheckTest(unittest.TestCase):
         self.rejected(lambda v: v["bars"]["rows"][0].update(snare=[1, 1]))
         self.rejected(lambda v: v["bars"]["rows"][1].update(start=2.5))
         self.rejected(lambda v: v["bars"]["rows"][0].update(extra=1))
+        self.rejected(lambda v: v["bars"]["rows"][0].update(scale="H"))
+        self.rejected(lambda v: v["bars"]["rows"][0].update(degree="8"))
+        self.rejected(lambda v: v["bars"]["rows"][0].update(scale=None))
+        self.rejected(lambda v: v["bars"]["rows"][0].update(chord=None))
+        self.rejected(lambda v: v["bars"]["rows"][1].pop("degree"))
+
+    def test_results_stored_by_0_14_0_stay_valid(self):
+        v = stored()
+        for r in v["bars"]["rows"]:
+            del r["scale"], r["degree"]
+        self.assertIsNotNone(server.check_rhythm(v))
 
     def test_rejects_units_without_downbeats(self):
         self.rejected(lambda v: v.update(downbeats={"status": "not_provided"}))

@@ -708,17 +708,22 @@ Limits: a quiet part can read as off, and -15 dB was the top of the range tried.
 The accompaniment is not judged on or off, because it sounds almost all the time; read its rate instead. Instruments are not named.
 Section labels are not corrected by this: similar chords and busy vocals did not mean a chorus on the real song.
 
-### Musical units (worker 0.14.0)
+### Musical units (worker 0.14.0, scale and degree 0.15.0)
 
 Existing results grouped by bar, for reading a song the way it is written. It needs no config of its own and no new model: it comes
-with the section model and reads the downbeats that model already finds, the chords, and the drum hits. Key stays in `key` and `key_sections`.
+with the section model and reads the downbeats that model already finds, the chords, and the drum hits.
 
 - `rhythm.downbeats` is `{status: "done", method, reliability: "reference_candidate", count}`, or `{status: "not_provided", reason}`
   without the section model. The times are the `start` of each bar.
 - `rhythm.bars` is `{status: "done", method, reliability: "reference_candidate", bar_count}`, or `null`. Read the rows with `/timeline`
-  `layer=bars`: `{start, end, chord, kick, snare}`, one per pair of consecutive downbeats, so anything before the first or after the last
+  `layer=bars`: `{start, end, chord, scale, degree, kick, snare}`, one per pair of consecutive downbeats, so anything before the first or after the last
   downbeat is in no bar. `chord` is the label sounding longest in the bar, `N` for none, `null` unless BTC made the chords. `kick` and
-  `snare` list steps 0 to 15 of 16 equal steps, `null` without a drum layer.
+  `snare` list steps 0 to 15 of 16 equal steps, `null` without a drum layer. Results stored by worker 0.14.0 have no `scale` or `degree`.
+- `scale` is one of 12 major scales, sharps as in the chord labels, so `C` also stands for A minor. `degree` is where the chord's root
+  sits in that scale: `1`, `b2`, `2`, ... `7`, so Am in `C` is `6`, and a minor song's tonic chord reads `6`, not `1`. It names the root only;
+  read major or minor from `chord`. It is `null` for a bar with no chord, and both are `null` unless BTC made the chords.
+  The path takes the share of each bar's chord tones inside the scale, and a change must be worth a fixed penalty, so brief visits stay in
+  the surrounding scale. Chords after the last downbeat count for the path but get no row.
 
 Evaluated locally on RWC-P songs 51-100 against the aligned annotations and MIDI. Downbeats, the chord root per bar, and kick and snare
 steps each passed the bar set beforehand, and the downbeats beat every 4th Essentia beat.
@@ -727,8 +732,12 @@ Limits: a wrong downbeat shifts every bar built on it; two songs scored under 50
 on one real song the bars ended about 11 s early. Steps read as a 4/4 grid even when a bar has another length. Drum scores leave out songs
 whose MIDI has no standard kick or snare notes.
 
-A key path computed from the bars' chords is not included. There is no human key annotation to check it against, its agreement with
-annotated chords passed at every setting tried, and on a real song only one setting found a half-step rise a person heard, about 8 s early.
+Scale and degree differ from `key`, one estimate for the whole song, and from `key_sections`, which comes from fixed 20 s windows of audio
+and can change more often; they may disagree. They were evaluated on RWC-P against a reference built from the MIDI notes and annotated chords, and they passed the bars set
+beforehand, on a second try after the first failed, so those songs were no longer blind. The reference shares the method's pitch-class
+idea and holds clear changes only, not checked by ear, so subtle changes are unmeasured. Most songs were right throughout, but in a few the
+whole path was one scale off, and then every degree in that stretch is wrong. Treat both as an estimate. A real song's half-step rise,
+heard by a person, was found about where they heard it.
 
 ### Chord display (worker 0.10.0)
 

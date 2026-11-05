@@ -14,7 +14,7 @@ Usage: <essentia python> -I rhythm_worker.py [--words-stdin] WAV
        0.12.0 an accompaniment layer, see "Accompaniment notes" in README.md)
        --drum-model /abs/checkpoint.index (0.9.0; with the Demucs options: a drum layer, see "Drum hits" in README.md)
        With the Demucs options, 0.13.0 adds part activity per section, see "Part activity" in README.md.
-       With the section model, 0.14.0 adds downbeats and bars, see "Musical units" in README.md.
+       With the section model, 0.14.0 adds downbeats and bars, and 0.15.0 a scale and degree per bar, see "Musical units" in README.md.
 WAV is the server's already-validated canonical file (PCM mono 16 kHz s16, 0 < duration <= 600 s).
 --words-stdin (0.4.3; the server always passes it): stdin holds one JSON object {"words": [[text, start, end], ...]}
 (the ASR words of the same result) or {"words": null, "reason": code} (the server could not provide them), at most
@@ -190,7 +190,7 @@ import tempfile
 import unicodedata
 import wave
 
-TOOL = {"name": "music-lens-rhythm-worker", "version": "0.14.0"}
+TOOL = {"name": "music-lens-rhythm-worker", "version": "0.15.0"}
 SRC_RATE = 16000
 RATE = 44100
 MAX_SECONDS = 600.0
@@ -354,8 +354,15 @@ PART_METHOD = ("Demucs htdemucs_ft stems: share of 2 s windows whose RMS is with
 BAR_MAX = 2000
 BAR_STEPS = 16
 DOWNBEAT_METHOD = "All-In-One 8-fold ensemble on Demucs htdemucs_ft stems. A wrong downbeat shifts every bar built on it."
-BAR_METHOD = ("Between consecutive downbeats: the chord sounding longest, and kick and snare on 16 equal steps. "
-              "The steps read as a 4/4 grid even when a bar has another length.")
+BAR_METHOD = ("Between consecutive downbeats: the chord sounding longest; kick and snare on 16 equal steps, a 4/4 grid "
+              "even if the bar differs; scale and degree estimated from chord tones.")
+# Scale and degree (0.15.0): best path over the 12 major scales, relative minors merged. Evaluated at this penalty.
+SCALE_PENALTY = 4.0
+SCALE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+DEGREE_NAMES = ("1", "b2", "2", "b3", "3", "4", "b5", "5", "b6", "6", "b7", "7")
+MAJOR_STEPS = (0, 2, 4, 5, 7, 9, 11)
+NOTE_PCS = {"C": 0, "B#": 0, "C#": 1, "Db": 1, "D": 2, "D#": 3, "Eb": 3, "E": 4, "Fb": 4, "F": 5, "E#": 5, "F#": 6, "Gb": 6,
+            "G": 7, "G#": 8, "Ab": 8, "A": 9, "A#": 10, "Bb": 10, "B": 11, "Cb": 11}
 OTHER_DEMUCS_ARGS = ("-n", "htdemucs_ft", "--stem", "other", "-b", "1", "--seed", "0")
 OTHER_NOTES_CODE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "other_notes.py")
 OTHER_NOTES_SHA256 = "53de95ae2b1abd6c793a91241a81cfd9836d021ff4f2847feb4edf821494e37c"
@@ -1683,16 +1690,94 @@ def bar_steps(times, downbeats):
     return {i: sorted(v) for i, v in out.items()}
 
 
-def bars_field(downbeats, chords, drums, drum_hits, chords_ok):
-    """The bars field, or None without downbeats. A bar's chord is None unless BTC made the chords; kick and snare
-    are None without a drum layer."""
+def chord_tones(label):
+    """Pitch classes of a chord label (triad plus written 7th), root first, or None for no chord."""
+    if label in ("N", "X", "", None):
+        return None
+    head = label.split("/")[0]
+    root = head.split(":")[0]
+    root = root[:2] if root[:2] in NOTE_PCS else root[:1]
+    if root not in NOTE_PCS:
+        return None
+    q = (head.split(":")[1] if ":" in head else head[len(root):]).split("(")[0]
+    if q.startswith(("hdim", "m7b5")):
+        steps = (0, 3, 6, 10)
+    elif q.startswith("mMaj7"):
+        steps = (0, 3, 7, 11)
+    elif q.startswith("dim"):
+        steps = (0, 3, 6, 9) if q.startswith("dim7") else (0, 3, 6)
+    elif q.startswith("aug"):
+        steps = (0, 4, 8)
+    elif q.startswith("sus2"):
+        steps = (0, 2, 7)
+    elif q.startswith("sus"):
+        steps = (0, 5, 7)
+    elif q.startswith(("maj7", "maj9")):
+        steps = (0, 4, 7, 11)
+    elif q.startswith(("min", "m")) and not q.startswith("maj"):
+        steps = (0, 3, 7, 10) if q.startswith(("min7", "min9", "m7", "m9")) else (0, 3, 7)
+    elif q[:1] in ("7", "9"):
+        steps = (0, 4, 7, 10)
+    else:
+        steps = (0, 4, 7)
+    return [(NOTE_PCS[root] + s) % 12 for s in steps]
+
+
+def scale_path(labels, penalty=SCALE_PENALTY):
+    """Major-scale tonic per label by Viterbi: a bar scores the share of its chord's tones in the scale, a change costs
+    the penalty. None when no label is a chord."""
+    tones = [chord_tones(x) for x in labels]
+    if not any(tones):
+        return None
+    scales = [{(k + s) % 12 for s in MAJOR_STEPS} for k in range(12)]
+    score = [[sum(p in sc for p in t) / len(t) for sc in scales] if t else [0.0] * 12 for t in tones]
+    best, back = score[0][:], []
+    for row in score[1:]:
+        j = best.index(max(best))
+        back.append([k if best[k] >= best[j] - penalty else j for k in range(12)])
+        best = [max(best[k], best[j] - penalty) + row[k] for k in range(12)]
+    out = [best.index(max(best))]
+    for b in reversed(back):
+        out.append(b[out[-1]])
+    return out[::-1]
+
+
+def bars_to_song_end(downbeats, duration):
+    """Bars from the downbeats, then on at the median bar length to the song's end: the section model can stop early,
+    and the chords there still count for the scale path."""
+    spans = list(zip(downbeats, downbeats[1:]))
+    size = statistics.median(b - a for a, b in spans)
+    t = downbeats[-1]
+    while t + size < duration:
+        spans.append((t, t + size))
+        t += size
+    return spans + [(t, duration)]
+
+
+def bar_scales(downbeats, chords, duration):
+    """(scale name, degree name) per bar row; degree None for a bar with no chord, both None with no chords at all."""
+    labels = [top_chord(chords, a, b) for a, b in bars_to_song_end(downbeats, duration)]
+    path = scale_path(labels)
+    out = []
+    for i in range(len(downbeats) - 1):
+        t = chord_tones(labels[i])
+        out.append((SCALE_NAMES[path[i]] if path else None,
+                    DEGREE_NAMES[(t[0] - path[i]) % 12] if path and t else None))
+    return out
+
+
+def bars_field(downbeats, chords, drums, drum_hits, chords_ok, duration):
+    """The bars field, or None without downbeats. A bar's chord, scale and degree are None unless BTC made the chords;
+    kick and snare are None without a drum layer."""
     if not downbeats:
         return None
+    scales = bar_scales(downbeats, chords, duration) if chords_ok else [(None, None)] * (len(downbeats) - 1)
     done = bool(drums) and drums.get("status") == "done"
     steps = {c: bar_steps([h["time"] for h in drum_hits if h["class"] == c], downbeats) if done else None
              for c in ("kick", "snare")}
     return {"status": "done", "method": BAR_METHOD, "reliability": "reference_candidate",
             "rows": [{"start": a, "end": b, "chord": top_chord(chords, a, b) if chords_ok else None,
+                      "scale": scales[i][0], "degree": scales[i][1],
                       **{c: steps[c].get(i, []) if done else None for c in steps}}
                      for i, (a, b) in enumerate(zip(downbeats, downbeats[1:]))]}
 
@@ -2143,7 +2228,7 @@ def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None, genre_di
     parts = parts_field(sep, sections, bass, bass_notes, other, other_notes, drums, drum_hits)
     if parts and parts.get("reason") == "levels_failed":
         warnings.append("parts_failed: levels_failed")
-    bars = bars_field((sep or {}).get("downbeats"), chords, drums, drum_hits, btc_used)
+    bars = bars_field((sep or {}).get("downbeats"), chords, drums, drum_hits, btc_used, duration)
     try:  # pure Python on the server's words; never fails the worker
         lyr, lyr_warn = lyric_repeats(words, r3(duration), words_reason)
     except Exception:
