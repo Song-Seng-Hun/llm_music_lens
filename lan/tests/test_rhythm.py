@@ -2232,7 +2232,7 @@ class RealWorkerTest(unittest.TestCase):
             self.assertEqual((v["sample_rate"], v["chords_reliability"]), (44100, "low_reference"))
             self.assertIn(v["duration"], (30.0, 60.0))
             self.assertEqual(v["tool"]["essentia_version"], "2.1-beta6-dev")
-            self.assertEqual(v["tool"]["version"], "0.14.0")
+            self.assertEqual(v["tool"]["version"], "0.15.0")
             g = v["genre"]
             self.assertEqual(g["status"], "done" if GENRE_PRESENT else "unavailable", g)
             if GENRE_PRESENT:  # measured: 29 patches for 30 s, 59 for 60 s (hop 0.992 s, first from ~2.04 s)

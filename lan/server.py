@@ -1577,7 +1577,10 @@ def _rhythm_v120_ok(v, dur):
 
 
 BAR_MAX = 2000  # worker cap
-BAR_ROW_KEYS = {"start", "end", "chord", "kick", "snare"}
+BAR_ROW_KEYS = {"start", "end", "chord", "kick", "snare"}  # stored by worker 0.14.0
+BAR_ROW_KEYS_V150 = BAR_ROW_KEYS | {"scale", "degree"}
+SCALE_NAMES = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"}
+DEGREE_NAMES = {"1", "b2", "2", "b3", "3", "4", "b5", "5", "b6", "6", "b7", "7"}
 PART_ROW_KEYS = {"start", "end", "label", "vocals", "bass", "drums", "bass_notes_per_s", "other_notes_per_s", "drum_hits_per_s"}
 PART_RATE_MAX = 1000
 
@@ -1590,7 +1593,7 @@ def _unit_rows_ok(rows, dur):
 
 
 def _rhythm_v140_ok(v, dur):
-    """Worker 0.14.0: downbeats and the bars, which exist only together."""
+    """Worker 0.14.0: downbeats and the bars, which exist only together. Worker 0.15.0: scale and degree in every row."""
     d, bars = v["downbeats"], v.get("bars")
     if d.get("status") != "done":
         return bars is None and "count" not in d
@@ -1599,8 +1602,15 @@ def _rhythm_v140_ok(v, dur):
             and bars["reliability"] == "reference_candidate" and _short_str(bars["method"], 200)
             and _unit_rows_ok(bars["rows"], dur) and d["count"] == len(bars["rows"]) + 1):
         return False
+    keys = set(bars["rows"][0])
+    if keys not in (BAR_ROW_KEYS, BAR_ROW_KEYS_V150):
+        return False
     for r in bars["rows"]:
-        if not (set(r) == BAR_ROW_KEYS and (r["chord"] is None or _short_str(r["chord"], 24))):
+        if not (set(r) == keys and (r["chord"] is None or _short_str(r["chord"], 24))):
+            return False
+        if keys == BAR_ROW_KEYS_V150 and not (
+                (r["scale"] is None or r["scale"] in SCALE_NAMES) and (r["degree"] is None or r["degree"] in DEGREE_NAMES)
+                and (r["degree"] is None or (r["scale"] is not None and r["chord"] is not None))):
             return False
         for c in ("kick", "snare"):
             s = r[c]
