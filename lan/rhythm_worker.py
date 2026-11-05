@@ -13,6 +13,7 @@ Usage: <essentia python> -I rhythm_worker.py [--words-stdin] WAV
        --basic-pitch-python /abs/python (0.8.0; with the Demucs options: a bass layer, see "Bass notes" below, and from
        0.12.0 an accompaniment layer, see "Accompaniment notes" in README.md)
        --drum-model /abs/checkpoint.index (0.9.0; with the Demucs options: a drum layer, see "Drum hits" in README.md)
+       With the Demucs options, 0.13.0 adds part activity per section, see "Part activity" in README.md.
 WAV is the server's already-validated canonical file (PCM mono 16 kHz s16, 0 < duration <= 600 s).
 --words-stdin (0.4.3; the server always passes it): stdin holds one JSON object {"words": [[text, start, end], ...]}
 (the ASR words of the same result) or {"words": null, "reason": code} (the server could not provide them), at most
@@ -186,7 +187,7 @@ import tempfile
 import unicodedata
 import wave
 
-TOOL = {"name": "music-lens-rhythm-worker", "version": "0.12.0"}
+TOOL = {"name": "music-lens-rhythm-worker", "version": "0.13.0"}
 SRC_RATE = 16000
 RATE = 44100
 MAX_SECONDS = 600.0
@@ -340,6 +341,12 @@ SEC_MODEL_FAIL_REASONS = ("models_invalid", "decode_failed", "separation_failed"
 SEC_METHOD_ALLIN1 = ("All-In-One 8-fold ensemble on Demucs htdemucs_ft stems at 44.1 kHz; letters group equal functions "
                      "(verse parts are not told apart); similarity as in the beat method")
 # Accompaniment notes (0.12.0, with the bass layer's Basic Pitch): the Demucs other stem as one group of notes.
+# Part activity (0.13.0): which of vocals, bass and drums is sounding in each section, from the stems already made.
+PART_STEMS = ("vocals", "bass", "drums")
+PART_WINDOW_S = 2.0
+PART_THRESHOLD_DB = -15  # stem window RMS against the whole mix's RMS; chosen on RWC-P 1-50
+PART_METHOD = ("Demucs htdemucs_ft stems: share of 2 s windows whose RMS is within 15 dB of the mix's RMS. "
+               "Quiet parts can read as off. Note and hit rates come from the note layers.")
 OTHER_DEMUCS_ARGS = ("-n", "htdemucs_ft", "--stem", "other", "-b", "1", "--seed", "0")
 OTHER_NOTES_CODE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "other_notes.py")
 OTHER_NOTES_SHA256 = "53de95ae2b1abd6c793a91241a81cfd9836d021ff4f2847feb4edf821494e37c"
@@ -1668,6 +1675,95 @@ def section_segments(sep, duration):
     return (None, "too_many_sections") if len(segs) > SEC_MAX else (segs, None)
 
 
+def wav_rms(path, window_s):
+    """(RMS of each window, RMS of the whole file) of a 16-bit WAV, channels averaged. The last window may be short."""
+    import numpy as np
+    with wave.open(path, "rb") as w:
+        if w.getsampwidth() != 2:
+            raise ValueError("not 16-bit")
+        ch, hop = w.getnchannels(), int(window_s * w.getframerate())
+        out, total, count = [], 0.0, 0
+        while True:
+            b = w.readframes(hop)
+            if not b:
+                return out, math.sqrt(total / max(count, 1))
+            x = np.frombuffer(b, dtype="<i2").astype(np.float64).reshape(-1, ch).mean(axis=1) / 32768.0
+            power = float(np.sum(x * x))
+            out.append(math.sqrt(power / len(x)))
+            total, count = total + power, count + len(x)
+
+
+def part_levels(d):
+    """{part: [window active?] or None when that stem is absent or unreadable}, from scratch d."""
+    floor = wav_rms(os.path.join(d, "full.wav"), PART_WINDOW_S)[1] * 10 ** (PART_THRESHOLD_DB / 20.0)
+    out = {}
+    for s in PART_STEMS:
+        try:
+            out[s] = [0 < r >= floor for r in wav_rms(os.path.join(d, "full", s + ".wav"), PART_WINDOW_S)[0]]
+        except (OSError, EOFError, ValueError, wave.Error):
+            out[s] = None
+    return out
+
+
+def parts_input(sep, vocal_reason):
+    """Sets sep["parts"] to (field or None, levels). Runs before the scratch goes. Never raises."""
+    if not os.path.isfile(os.path.join(sep["scratch"], "full.wav")):
+        sep["parts"] = ({"status": "skipped", "reason": vocal_reason or "separation_failed"}, None)
+        return
+    try:
+        levels = part_levels(sep["scratch"])
+    except Exception:
+        levels = None
+    if levels is None or all(v is None for v in levels.values()):
+        sep["parts"] = ({"status": "skipped", "reason": vocal_reason or "levels_failed"}, None)
+    else:
+        sep["parts"] = (None, levels)
+
+
+def _active_share(windows, start, end):
+    """Share of the windows whose midpoint lies in [start, end) (else the window holding the midpoint)."""
+    if windows is None:
+        return None
+    sel = [v for i, v in enumerate(windows) if start <= (i + 0.5) * PART_WINDOW_S < end]
+    if not sel:
+        i = int(((start + end) / 2.0) // PART_WINDOW_S)
+        sel = [windows[i]] if i < len(windows) else [False]
+    return round(sum(sel) / float(len(sel)), 3)
+
+
+def _rate(times, start, end):
+    """Events per second in [start, end), or None when the layer gave no rows to count."""
+    if times is None:
+        return None
+    return round(sum(1 for t in times if start <= t < end) / max(end - start, 0.001), 2)
+
+
+def part_rows(sections, levels, bass_times, other_times, drum_times):
+    """One row per section: part activity 0..1, and note or hit rates. None = that layer was not available."""
+    return [{"start": s["start"], "end": s["end"], "label": s["label"],
+             "vocals": _active_share(levels["vocals"], s["start"], s["end"]),
+             "bass": _active_share(levels["bass"], s["start"], s["end"]),
+             "drums": _active_share(levels["drums"], s["start"], s["end"]),
+             "bass_notes_per_s": _rate(bass_times, s["start"], s["end"]),
+             "other_notes_per_s": _rate(other_times, s["start"], s["end"]),
+             "drum_hits_per_s": _rate(drum_times, s["start"], s["end"])} for s in sections]
+
+
+def parts_field(sep, sections, bass, bass_notes, other, other_notes, drums, drum_hits):
+    """The parts field, or None without separation configured."""
+    if not sep or "parts" not in sep:
+        return None
+    field, levels = sep["parts"]
+    if field:
+        return field
+    def done(layer, rows, key):
+        return [r[key] for r in rows] if layer and layer.get("status") == "done" else None
+    return {"status": "done", "method": PART_METHOD, "reliability": "reference_candidate", "window_s": PART_WINDOW_S,
+            "threshold_db": PART_THRESHOLD_DB,
+            "sections": part_rows(sections, levels, done(bass, bass_notes, "start"), done(other, other_notes, "start"),
+                                  done(drums, drum_hits, "time"))}
+
+
 def sections_input(sep, n16, vocal_reason):
     """Sets sep["sections"] to (field, segments). Runs before the scratch goes. Never raises."""
     if not os.path.isfile(os.path.join(sep["scratch"], "full.wav")):
@@ -1757,6 +1853,7 @@ def melody_input(sep, n16):
         return None, None, {"status": "skipped", "reason": "not_configured"}
     if sep.get("source") is None:
         sep["bass"] = sep["other"] = sep["drums"] = sep["sections"] = ({"status": "skipped", "reason": "canonical_16k"}, [])
+        sep["parts"] = ({"status": "skipped", "reason": "canonical_16k"}, None)
         return None, None, {"status": "skipped", "reason": "canonical_16k"}
     try:
         pitch, stem, reason = vocal_pitch(sep, n16)
@@ -1770,6 +1867,7 @@ def melody_input(sep, n16):
             drum_input(sep, n16, reason)
         if sep.get("sections_python"):
             sections_input(sep, n16, reason)
+        parts_input(sep, reason)
     finally:
         shutil.rmtree(sep["scratch"], ignore_errors=True)
     return pitch, stem, {"status": "done"} if reason is None else {"status": "skipped", "reason": reason}
@@ -1990,6 +2088,9 @@ def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None, genre_di
     if drums and drums.get("reason") in DRUM_FAIL_REASONS:
         warnings.append("drums_failed: " + drums["reason"])
     add_chord_display(chords, key_sections, str(tonic), str(scale), bass_notes)
+    parts = parts_field(sep, sections, bass, bass_notes, other, other_notes, drums, drum_hits)
+    if parts and parts.get("reason") == "levels_failed":
+        warnings.append("parts_failed: levels_failed")
     try:  # pure Python on the server's words; never fails the worker
         lyr, lyr_warn = lyric_repeats(words, r3(duration), words_reason)
     except Exception:
@@ -2028,6 +2129,7 @@ def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None, genre_di
         **({"bass": bass, "bass_notes": bass_notes} if bass else {}),
         **({"other": other, "other_notes": other_notes} if other else {}),
         **({"drums": drums, "drum_hits": drum_hits} if drums else {}),
+        **({"parts": parts} if parts else {}),
         "structure_debug": sec_debug,
         "lyric_repeats": lyr,
         "genre": gn,

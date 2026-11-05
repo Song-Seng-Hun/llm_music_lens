@@ -30,6 +30,7 @@ There are two ways to use it.
 - **Server analysis tools (MCP)**: beat and BPM, waveform dynamics, spectral texture, attacks against the beat, pitch of an isolated vocal, whole-song transition candidates, and a timeline joining several segments
 - **Save and import**: a per-user library for signed-in users (up to 1.9 MB of UTF-8 JSON). Audio is not stored.
 - **Mac analysis server (`lan/`)**: a separate server that lets AI teammates on the same router use the Mac's analysis through signed requests
+- **Reading the arrangement by part (Mac analysis server, optional)**: separates vocals, bass and drums to read their notes and hits, and adds accompaniment notes, chords and the song's sections. Each section also says which parts are on, so you can see how the arrangement builds.
 - **Genre estimate (Mac analysis server, optional)**: Discogs styles (e.g. Pop---J-pop) and parent genres (Pop, Rock, ...) with scores, for the whole song and every 30 s window.
 
 ## Quick start
