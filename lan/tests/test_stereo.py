@@ -221,7 +221,9 @@ class ServerTest(unittest.TestCase):
         mix, pos = rw.stereo_fields({"stereo": (None, None, {"mix": [row] * 400, "parts": part, "lufs": -10.5, "lra": 3.2})}, sections)
         self.assertIsNone(mix["sections"][-1]["balance"])
         self.assertIsNone(pos["sections"][-1]["vocals"])
-        self.assertIsNotNone(server.check_rhythm(self.stored(sections=sections, mix=mix, part_positions=pos)))
+        v = self.stored(sections=sections, mix=mix, part_positions=pos)
+        v["melody"]["sections"][-1]["label"] = rw.SILENCE_LABEL
+        self.assertIsNotNone(server.check_rhythm(v))
 
     def test_older_results_stay_valid(self):
         v = self.stored()
