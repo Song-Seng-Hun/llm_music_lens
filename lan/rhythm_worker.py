@@ -14,7 +14,7 @@ Usage: <essentia python> -I rhythm_worker.py [--words-stdin] WAV
        0.12.0 an accompaniment layer, see "Accompaniment notes" in README.md)
        --drum-model /abs/checkpoint.index (0.9.0; with the Demucs options: a drum layer, see "Drum hits" in README.md)
        With the Demucs options, 0.13.0 adds part activity per section, see "Part activity" in README.md.
-       With the section model, 0.14.0 adds downbeats and bars, and 0.15.0 a scale and degree per bar, see "Musical units" in README.md.
+       With the section model, 0.14.0 adds downbeats and bars, and 0.15.0 a scale and degree per bar, and 0.16.0 swing, see "Musical units" in README.md.
 WAV is the server's already-validated canonical file (PCM mono 16 kHz s16, 0 < duration <= 600 s).
 --words-stdin (0.4.3; the server always passes it): stdin holds one JSON object {"words": [[text, start, end], ...]}
 (the ASR words of the same result) or {"words": null, "reason": code} (the server could not provide them), at most
@@ -190,7 +190,7 @@ import tempfile
 import unicodedata
 import wave
 
-TOOL = {"name": "music-lens-rhythm-worker", "version": "0.15.0"}
+TOOL = {"name": "music-lens-rhythm-worker", "version": "0.16.0"}
 SRC_RATE = 16000
 RATE = 44100
 MAX_SECONDS = 600.0
@@ -356,6 +356,12 @@ BAR_STEPS = 16
 DOWNBEAT_METHOD = "All-In-One 8-fold ensemble on Demucs htdemucs_ft stems. A wrong downbeat shifts every bar built on it."
 BAR_METHOD = ("Between consecutive downbeats: the chord sounding longest; kick and snare on 16 equal steps, a 4/4 grid "
               "even if the bar differs; scale and degree estimated from chord tones.")
+# Swing (0.16.0): where hi-hat and cymbal hits fall between two beats. Evaluated at these values.
+SWING_METHOD = ("Median position inside the beat, 0 to 1, of hi-hat and cymbal hits between 0.4 and 0.8, a beat being a quarter "
+                "of a bar: about 0.5 straight, 0.67 triplet swing.")
+SWING_OFF_BEAT = (0.4, 0.8)
+SWING_MIN_HITS = 30
+SWING_AT = 0.58
 # Scale and degree (0.15.0): best path over the 12 major scales, relative minors merged. Evaluated at this penalty.
 SCALE_PENALTY = 4.0
 SCALE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
@@ -1782,6 +1788,22 @@ def bars_field(downbeats, chords, drums, drum_hits, chords_ok, duration):
                      for i, (a, b) in enumerate(zip(downbeats, downbeats[1:]))]}
 
 
+def swing_field(downbeats, drums, drum_hits):
+    """The swing field, or None without downbeats or a finished drum layer. The value is None under SWING_MIN_HITS."""
+    if not downbeats or not drums or drums.get("status") != "done":
+        return None
+    off = []
+    for h in drum_hits:
+        i = bisect.bisect_right(downbeats, h["time"]) - 1
+        if h["class"] in ("hihat", "cymbal") and 0 <= i < len(downbeats) - 1:
+            pos = (h["time"] - downbeats[i]) / (downbeats[i + 1] - downbeats[i]) * 4 % 1
+            if SWING_OFF_BEAT[0] < pos < SWING_OFF_BEAT[1]:
+                off.append(pos)
+    phase = round(statistics.median(off), 3) if len(off) >= SWING_MIN_HITS else None
+    return {"status": "done", "method": SWING_METHOD, "reliability": "reference_candidate", "off_beat_phase": phase,
+            "hits": len(off), "feel": None if phase is None else "swung" if phase >= SWING_AT else "straight"}
+
+
 def section_segments(sep, duration):
     """(segments, None) or (None, reason). The scratch already holds full.wav and any stems made so far."""
     model = sep["sections_model"]
@@ -2229,6 +2251,7 @@ def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None, genre_di
     if parts and parts.get("reason") == "levels_failed":
         warnings.append("parts_failed: levels_failed")
     bars = bars_field((sep or {}).get("downbeats"), chords, drums, drum_hits, btc_used, duration)
+    swing = swing_field((sep or {}).get("downbeats"), drums, drum_hits)
     try:  # pure Python on the server's words; never fails the worker
         lyr, lyr_warn = lyric_repeats(words, r3(duration), words_reason)
     except Exception:
@@ -2271,6 +2294,7 @@ def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None, genre_di
         **({"drums": drums, "drum_hits": drum_hits} if drums else {}),
         **({"parts": parts} if parts else {}),
         **({"bars": bars} if bars else {}),
+        **({"swing": swing} if swing else {}),
         "structure_debug": sec_debug,
         "lyric_repeats": lyr,
         "genre": gn,

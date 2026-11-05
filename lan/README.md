@@ -708,7 +708,7 @@ Limits: a quiet part can read as off, and -15 dB was the top of the range tried.
 The accompaniment is not judged on or off, because it sounds almost all the time; read its rate instead. Instruments are not named.
 Section labels are not corrected by this: similar chords and busy vocals did not mean a chorus on the real song.
 
-### Musical units (worker 0.14.0, scale and degree 0.15.0)
+### Musical units (worker 0.14.0, scale and degree 0.15.0, swing 0.16.0)
 
 Existing results grouped by bar, for reading a song the way it is written. It needs no config of its own and no new model: it comes
 with the section model and reads the downbeats that model already finds, the chords, and the drum hits.
@@ -724,6 +724,9 @@ with the section model and reads the downbeats that model already finds, the cho
   read major or minor from `chord`. It is `null` for a bar with no chord, and both are `null` unless BTC made the chords.
   The path takes the share of each bar's chord tones inside the scale, and a change must be worth a fixed penalty, so brief visits stay in
   the surrounding scale. Chords after the last downbeat count for the path but get no row.
+- `rhythm.swing` is `{status: "done", method, reliability: "reference_candidate", off_beat_phase, hits, feel}`, or `null` without bars and a
+  drum layer. `off_beat_phase` is the median position inside the beat of the hi-hat and cymbal hits between 0.4 and 0.8: about 0.5 for straight
+  eighths, 0.67 for triplet swing. `feel` is `swung` from 0.58, else `straight`. `hits` counts those hits; under 30, `off_beat_phase` and `feel` are `null`.
 
 Evaluated locally on RWC-P songs 51-100 against the aligned annotations and MIDI. Downbeats, the chord root per bar, and kick and snare
 steps each passed the bar set beforehand, and the downbeats beat every 4th Essentia beat.
@@ -731,6 +734,11 @@ steps each passed the bar set beforehand, and the downbeats beat every 4th Essen
 Limits: a wrong downbeat shifts every bar built on it; two songs scored under 50 on downbeats. The model can stop before the music does:
 on one real song the bars ended about 11 s early. Steps read as a 4/4 grid even when a bar has another length. Drum scores leave out songs
 whose MIDI has no standard kick or snare notes.
+
+Swing was evaluated on the same songs against the MIDI hats, with its bars set beforehand and passed. Few of those songs swing (3 of 35), so
+the call rests on little evidence, and sixteenth-note swing is not measured. Steady straight sixteenth hats put as many hits at 0.75 as at 0.5, so they can read as `swung` with a phase
+near 0.625; no evaluated song did this, so how often it happens is unknown. A beat is a quarter of a bar, so a bar of another length misplaces it.
+A fill flag per bar was tried too and failed its bar, so it is not provided; the hit times are in `layer=drums`.
 
 Scale and degree differ from `key`, one estimate for the whole song, and from `key_sections`, which comes from fixed 20 s windows of audio
 and can change more often; they may disagree. They were evaluated on RWC-P against a reference built from the MIDI notes and annotated chords, and they passed the bars set
