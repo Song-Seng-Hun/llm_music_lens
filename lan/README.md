@@ -736,6 +736,26 @@ with identical waveforms on both channels, against a bar of 0.02; the cause was 
 Other codecs and bitrates were not tried. Bleed between stems moves the part values, and a nearly mono part such as bass can show a large
 width error. `lufs` is not per section. Sum and difference only: phase tricks and time-delay panning are not told apart.
 
+### Part tone (worker 0.19.0)
+
+How the parts sound, as far as this could be measured. It needs no config or model of its own: it reads the stems the stereo run in
+"Mix and stereo" already made, so it is skipped for the same reasons, including `mono_source`, plus the failure `tone_failed`, which adds a warning and is retried.
+
+- `rhythm.tone` is `{status: "done", method, reliability: "low_reference", sections}` or `{status: "skipped", reason}`. A row per
+  `rhythm.sections` row: `{start, end, label, vocals_brightness_hz, drums_brightness_hz, other_brightness_hz, kick_weight_db, snare_brightness_hz}`.
+- Brightness is the median spectral centroid of the frames within 30 dB of the section's loudest. `kick_weight_db` is energy under 120 Hz
+  over all energy in the 120 ms after each kick, median over hits; nearer 0 means more of the hit is low end. `snare_brightness_hz` is the
+  centroid of the same 120 ms after each snare. Fewer than 5 hits in a section gives `null`, as do a part under -15 dB of the section's mix and a `silence` section.
+- To read a value, compare it with the song's other sections or with this range from 28 s blocks of pop test songs (10th percentile, median, 90th):
+  vocals 519, 915, 1338 Hz (50 songs); drums 182, 1056, 3704 Hz (38); other 358, 657, 1136 Hz (50); kick weight -1.6, -0.7, -0.3 dB (38); snare 628, 1376, 4505 Hz (37). It is one song set, not a standard.
+
+Evaluated locally with bars set beforehand and no ground truth for tone: separated stems were changed by known amounts in 30 s blocks,
+mixed, separated again and compared. These five values passed. Bass brightness failed, and roughness failed on every part, so neither is reported. On vocals,
+drums and other, roughness moved more with a treble change than with distortion; on bass it did not follow distortion reliably. The test shows a value follows a change in the sound, not that it helps composing.
+
+Limits: nothing here says distorted, clean, wet or dry, and instruments are not named. A mostly low kick reads near 0 whatever else changes: +6 dB under 120 Hz moved kick
+weight by about 0.3 dB, and songs differ by about 0.5 dB, so read only large differences. Sections were not tested, only 28 s blocks; a short section is noisier by an unmeasured amount. Hit detection on changed drums was not tested. There is no `/timeline` layer.
+
 ### Musical units (worker 0.14.0, scale and degree 0.15.0, swing 0.16.0, two chords in a bar 0.18.0)
 
 Existing results grouped by bar, for reading a song the way it is written. It needs no config of its own and no new model: it comes

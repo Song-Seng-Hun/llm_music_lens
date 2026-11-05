@@ -166,7 +166,8 @@ class InputTest(unittest.TestCase):
             import essentia  # noqa: F401
         except ImportError:
             self.skipTest("run under the Essentia runtime")
-        _, (mix, pos) = self.run_input(np.stack([c * math.sqrt(0.5), c * math.sqrt(1.5)], 1))
+        sep, (mix, pos) = self.run_input(np.stack([c * math.sqrt(0.5), c * math.sqrt(1.5)], 1))
+        self.assertEqual(rw.tone_field(sep, [{"start": 0.0, "end": 4.0, "label": "A"}])["status"], "done")
         self.assertEqual(mix["status"], "done")
         self.assertAlmostEqual(mix["sections"][0]["balance"], 0.5, delta=0.01)
         self.assertEqual(pos["status"], "done")

@@ -10,6 +10,7 @@ Usage: <essentia python> -I rhythm_worker.py [--words-stdin] WAV
        --demucs /abs/demucs-mlx --rmvpe-model /abs/rmvpe.pt --melody-scratch /abs/dir [--melody-source /abs/upload]
        (0.6.0; melody from a separated vocal, see "Vocal melody" below. No --melody-source = canonical 16 kHz upload.)
        (0.17.0: the same options also give mix and part_positions from a stereo decode, see "Mix and stereo" in README.md.)
+       (0.19.0: and tone from those stems, see "Part tone" in README.md.)
        --chord-model /abs/btc_model_large_voca.pt (0.7.0; chords from BTC instead of ChordsDetection)
        --basic-pitch-python /abs/python (0.8.0; with the Demucs options: a bass layer, see "Bass notes" below, and from
        0.12.0 an accompaniment layer, see "Accompaniment notes" in README.md)
@@ -191,7 +192,7 @@ import tempfile
 import unicodedata
 import wave
 
-TOOL = {"name": "music-lens-rhythm-worker", "version": "0.18.1"}
+TOOL = {"name": "music-lens-rhythm-worker", "version": "0.19.0"}
 SRC_RATE = 16000
 RATE = 44100
 MAX_SECONDS = 600.0
@@ -358,6 +359,13 @@ STEREO_WINDOW_S = 1.0
 STEREO_BANDS = (("low_width_db", 0.0, 200.0), ("mid_width_db", 200.0, 2000.0), ("high_width_db", 2000.0, None))
 STEREO_WIDTH_DB = 40.0  # width is side energy over mid energy, kept within +-40 dB
 STEREO_PART_DB = -15.0  # a part under this against the section's mix has no position
+TONE_PARTS = ("vocals", "drums", "other")  # bass brightness and every roughness value failed evaluation
+TONE_WIN, TONE_HOP, TONE_CHUNK = 2048, 1024, 256
+TONE_GATE = 1e-3  # frames within 30 dB of the section's loudest
+TONE_LOW_HZ, TONE_HIGH_HZ = 20.0, 16000.0
+TONE_KICK_HZ, TONE_HIT_S, TONE_MIN_HITS = 120.0, 0.12, 5
+TONE_METHOD = ("Spectral centroid per section of the Demucs htdemucs_ft stems of the stereo decode, summed to mono; "
+               "kick and snare from 120 ms after each ADTOF hit.")
 MIX_METHOD = ("Stereo decode. balance = (R-L)/(R+L) of energy; width = side over mid energy in dB; low under 200 Hz, high over "
               "2 kHz; loudness by Essentia LoudnessEBUR128.")
 PART_POSITION_METHOD = ("Demucs htdemucs_ft on the stereo decode: balance, width and level against the mix per section. "
@@ -1874,6 +1882,65 @@ def stereo_lufs(path):
     return tuple(round(float(v), 2) if math.isfinite(float(v)) else None for v in (integrated, lra))
 
 
+def read_mono(path):
+    """(samples, rate) of a 16-bit stereo WAV summed to mono."""
+    import numpy as np
+    with wave.open(path, "rb") as w:
+        if (w.getsampwidth(), w.getnchannels()) != (2, 2):
+            raise ValueError("not 16-bit stereo")
+        rate = w.getframerate()
+        x = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2").astype(np.float64).reshape(-1, 2)
+    return x.mean(axis=1) / 32768.0, rate
+
+
+def tone_frames(x, rate):
+    """(frame centre times, energies, log2 centroids in Hz; NaN where the band is empty)."""
+    import numpy as np
+    n = max(0, (len(x) - TONE_WIN) // TONE_HOP + 1)
+    f = np.fft.rfftfreq(TONE_WIN, 1.0 / rate)
+    band = (f >= TONE_LOW_HZ) & (f <= TONE_HIGH_HZ)
+    window, energy, bright = np.hanning(TONE_WIN), np.zeros(n), np.full(n, np.nan)
+    for first in range(0, n, TONE_CHUNK):
+        idx = np.arange(first, min(n, first + TONE_CHUNK))
+        p = np.abs(np.fft.rfft(np.stack([x[i * TONE_HOP:i * TONE_HOP + TONE_WIN] for i in idx]) * window, axis=1)) ** 2
+        energy[idx] = p.sum(axis=1)
+        total = p[:, band].sum(axis=1)
+        ok = total > 0
+        bright[idx[ok]] = np.log2((p[ok][:, band] * f[band]).sum(axis=1) / total[ok])
+    return (np.arange(n) * TONE_HOP + TONE_WIN / 2.0) / rate, energy, bright
+
+
+def tone_hit_rows(x, rate, times, kind):
+    """(time, value) per hit: kick weight in dB, or snare log2 centroid in Hz."""
+    import numpy as np
+    size = int(TONE_HIT_S * rate)
+    f = np.fft.rfftfreq(size, 1.0 / rate)
+    low, band = f < TONE_KICK_HZ, (f >= TONE_LOW_HZ) & (f <= TONE_HIGH_HZ)
+    rows = []
+    for t in times:
+        i = int(round(t * rate))
+        if i < 0 or i + size > len(x):
+            continue
+        p = np.abs(np.fft.rfft(x[i:i + size])) ** 2
+        if kind == "kick":
+            if p.sum() > 0:
+                rows.append((t, 10.0 * math.log10(max(float(p[low].sum()), 1e-30) / float(p.sum()))))
+        elif p[band].sum() > 0:
+            rows.append((t, math.log2(float((p[band] * f[band]).sum() / p[band].sum()))))
+    return rows
+
+
+def tone_measures(folder, drum_hits):
+    """Everything tone needs later, when the sections are known and the stems are gone."""
+    frames = {}
+    for s in TONE_PARTS:
+        x, rate = read_mono(os.path.join(folder, s + ".wav"))
+        frames[s] = tone_frames(x, rate)
+        if s == "drums":
+            hits = {c: tone_hit_rows(x, rate, [h["time"] for h in drum_hits if h["class"] == c], c) for c in ("kick", "snare")}
+    return {"frames": frames, "hits": hits}
+
+
 def stereo_input(sep, vocal_reason):
     """Sets sep["stereo"] to (mix field or None, position field or None, measures). Runs before the scratch goes. Never raises."""
     def skip(reason, position_reason=None):
@@ -1898,8 +1965,14 @@ def stereo_input(sep, vocal_reason):
             parts = {s: stereo_energy(os.path.join(out, "stereo", s + ".wav")) for s in STEREO_PARTS}
     except Exception:
         parts = None
+    tone = None
+    if parts:
+        try:
+            tone = tone_measures(os.path.join(out, "stereo"), sep.get("drums", (None, []))[1])
+        except Exception:
+            tone = None
     position = None if parts else {"status": "skipped", "reason": "separation_failed"}
-    sep["stereo"] = (None, position, {"mix": mix, "parts": parts, "lufs": lufs, "lra": lra})
+    sep["stereo"] = (None, position, {"mix": mix, "parts": parts, "lufs": lufs, "lra": lra, "tone": tone})
 
 
 def _section_sum(rows, start, end):
@@ -1970,6 +2043,54 @@ def stereo_fields(sep, sections):
         position = {"status": "done", "method": PART_POSITION_METHOD, "reliability": "low_reference", "threshold_db": STEREO_PART_DB,
                     "sections": [position_row(s, m["mix"], m["parts"]) for s in sections]}
     return mix, position
+
+
+def _tone_value(frames, start, end):
+    """Hz at the median log2 centroid of the section's frames within 30 dB of its loudest, or None."""
+    import numpy as np
+    t, e, b = frames
+    k = (t >= start) & (t < end)
+    if not k.any() or e[k].max() <= 0:
+        return None
+    k &= (e >= e[k].max() * TONE_GATE) & np.isfinite(b)
+    return round(2.0 ** float(np.median(b[k])), 1) if k.any() else None
+
+
+def _hit_median(rows, start, end):
+    import numpy as np
+    v = [x for t, x in rows if start <= t and t + TONE_HIT_S <= end]
+    return float(np.median(v)) if len(v) >= TONE_MIN_HITS else None
+
+
+def tone_row(sec, m):
+    out = {"start": sec["start"], "end": sec["end"], "label": sec["label"], "vocals_brightness_hz": None, "drums_brightness_hz": None,
+           "other_brightness_hz": None, "kick_weight_db": None, "snare_brightness_hz": None}
+    if sec["label"] == SILENCE_LABEL:
+        return out
+    start, end = sec["start"], sec["end"]
+    mix = _section_sum(m["mix"], start, end)
+    for s in TONE_PARTS:
+        c = _section_sum(m["parts"][s], start, end)
+        if not (mix and c and mix[0] + mix[1] > 0 and c[0] + c[1] > 0 and 10.0 * math.log10((c[0] + c[1]) / (mix[0] + mix[1])) >= STEREO_PART_DB):
+            continue
+        out[s + "_brightness_hz"] = _tone_value(m["tone"]["frames"][s], start, end)
+        if s == "drums":
+            kick, snare = _hit_median(m["tone"]["hits"]["kick"], start, end), _hit_median(m["tone"]["hits"]["snare"], start, end)
+            out["kick_weight_db"] = None if kick is None else round(kick, 2)
+            out["snare_brightness_hz"] = None if snare is None else round(2.0 ** snare, 1)
+    return out
+
+
+def tone_field(sep, sections):
+    """The tone field, or None without separation configured."""
+    if not sep or "stereo" not in sep:
+        return None
+    mix, position, m = sep["stereo"]
+    if m is None or position:
+        return {"status": "skipped", "reason": (mix or position)["reason"] if m is None else position["reason"]}
+    if not m.get("tone"):
+        return {"status": "skipped", "reason": "tone_failed"}
+    return {"status": "done", "method": TONE_METHOD, "reliability": "low_reference", "sections": [tone_row(s, m) for s in sections]}
 
 
 def section_segments(sep, duration):
@@ -2423,8 +2544,9 @@ def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None, genre_di
     bars = bars_field((sep or {}).get("downbeats"), chords, drums, drum_hits, btc_used, duration)
     swing = swing_field((sep or {}).get("downbeats"), drums, drum_hits)
     mix_field, positions = stereo_fields(sep, sections)
-    for name, f in (("mix", mix_field), ("part_positions", positions)):
-        if f and f.get("reason") in ("decode_failed", "mix_failed", "separation_failed"):
+    tone = tone_field(sep, sections)
+    for name, f in (("mix", mix_field), ("part_positions", positions), ("tone", tone)):
+        if f and f.get("reason") in ("decode_failed", "mix_failed", "separation_failed", "tone_failed"):
             warnings.append("%s_failed: %s" % (name, f["reason"]))
     try:  # pure Python on the server's words; never fails the worker
         lyr, lyr_warn = lyric_repeats(words, r3(duration), words_reason)
@@ -2471,6 +2593,7 @@ def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None, genre_di
         **({"swing": swing} if swing else {}),
         **({"mix": mix_field} if mix_field else {}),
         **({"part_positions": positions} if positions else {}),
+        **({"tone": tone} if tone else {}),
         "structure_debug": sec_debug,
         "lyric_repeats": lyr,
         "genre": gn,
