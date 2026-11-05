@@ -1,4 +1,4 @@
-"""Musical units (worker 0.14.0, 0.15.0): downbeats, bars, scale and degree."""
+"""Musical units (worker 0.14.0, 0.15.0, 0.16.0): downbeats, bars, scale and degree, swing."""
 import json
 import unittest
 
@@ -85,6 +85,43 @@ class ScaleTest(unittest.TestCase):
         self.assertEqual(out[1][1], "1")
 
 
+def hats(positions, beats=40, cls="hihat"):
+    """Hits at these positions inside each beat, on bars of 4 beats of 0.5 s."""
+    return [{"time": round((b + p) * 0.5, 3), "class": cls} for b in range(beats) for p in positions]
+
+
+GRID = [i * 2.0 for i in range(11)]  # 10 bars, 40 beats
+
+
+class SwingTest(unittest.TestCase):
+    def test_straight_and_swung(self):
+        for pos, feel in ((0.5, "straight"), (0.66, "swung")):
+            s = rw.swing_field(GRID, DONE, hats([0.0, pos]))
+            self.assertEqual((s["off_beat_phase"], s["hits"], s["feel"]), (pos, 40, feel))
+
+    def test_the_boundary_is_swung(self):
+        self.assertEqual(rw.swing_field(GRID, DONE, hats([0.58]))["feel"], "swung")
+
+    def test_other_classes_and_positions_do_not_count(self):
+        s = rw.swing_field(GRID, DONE, hats([0.5], cls="kick") + hats([0.25, 0.9]))
+        self.assertEqual((s["off_beat_phase"], s["hits"], s["feel"]), (None, 0, None))
+        self.assertEqual(rw.swing_field(GRID, DONE, hats([0.5], cls="cymbal"))["hits"], 40)
+
+    def test_too_few_hits(self):
+        s = rw.swing_field(GRID, DONE, hats([0.5], beats=29))
+        self.assertEqual((s["off_beat_phase"], s["hits"], s["feel"]), (None, 29, None))
+        self.assertEqual(rw.swing_field(GRID, DONE, hats([0.5], beats=30))["feel"], "straight")
+
+    def test_hits_outside_the_bars_are_dropped(self):
+        self.assertEqual(rw.swing_field([10.0, 12.0], DONE, hats([0.5]))["hits"], 4)
+
+    def test_no_field_without_bars_or_drums(self):
+        self.assertIsNone(rw.swing_field([], DONE, hats([0.5])))
+        self.assertIsNone(rw.swing_field(None, DONE, hats([0.5])))
+        self.assertIsNone(rw.swing_field(GRID, {"status": "skipped", "reason": "x"}, []))
+        self.assertIsNone(rw.swing_field(GRID, None, []))
+
+
 class CheckTest(unittest.TestCase):
     def test_accepts_the_worker_fields(self):
         self.assertIsNotNone(server.check_rhythm(stored()))
@@ -114,6 +151,20 @@ class CheckTest(unittest.TestCase):
         for r in v["bars"]["rows"]:
             del r["scale"], r["degree"]
         self.assertIsNotNone(server.check_rhythm(v))
+
+    def test_swing(self):
+        good = rw.swing_field(GRID, DONE, hats([0.0, 0.5]))
+        self.assertIsNotNone(server.check_rhythm(stored(swing=good)))
+        self.assertIsNotNone(server.check_rhythm(stored(swing=rw.swing_field(GRID, DONE, []))))
+        self.assertEqual(server.rhythm_summary(stored(swing=good))["swing"]["feel"], "straight")
+        self.assertIsNone(server.rhythm_summary(stored())["swing"])
+        for change in (dict(feel="odd"), dict(feel=None), dict(off_beat_phase=0.9), dict(off_beat_phase=None), dict(hits=-1), dict(extra=1),
+                       dict(status="failed")):
+            self.assertIsNone(server.check_rhythm(stored(swing=dict(good, **change))), change)
+        v = stored(swing=good)
+        del v["bars"]
+        v["downbeats"] = {"status": "not_provided", "reason": "x"}
+        self.assertIsNone(server.check_rhythm(v))
 
     def test_rejects_units_without_downbeats(self):
         self.rejected(lambda v: v.update(downbeats={"status": "not_provided"}))

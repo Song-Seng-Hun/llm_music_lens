@@ -937,7 +937,7 @@ def check_rhythm(v):
         if (not _rhythm_v2_ok(v, dur) or not _rhythm_v21_ok(v) or not _rhythm_v22_ok(v)
                 or not _rhythm_v30_ok(v, dur) or not _rhythm_v40_ok(v, dur) or not _rhythm_v43_ok(v, dur)
                 or not _rhythm_v50_ok(v, dur) or not _rhythm_v80_ok(v, dur) or not _rhythm_v90_ok(v, dur)
-                or not _rhythm_v110_ok(v) or not _rhythm_v120_ok(v, dur) or not _rhythm_v130_ok(v) or not _rhythm_v140_ok(v, dur)):
+                or not _rhythm_v110_ok(v) or not _rhythm_v120_ok(v, dur) or not _rhythm_v130_ok(v) or not _rhythm_v140_ok(v, dur) or not _rhythm_v160_ok(v)):
             return None
         for k in ("worker_sha256", "words_sha256"):  # server-added identities
             if k in v and not (isinstance(v[k], str) and RE_HEX64.match(v[k])):
@@ -1583,6 +1583,7 @@ SCALE_NAMES = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"}
 DEGREE_NAMES = {"1", "b2", "2", "b3", "3", "4", "b5", "5", "b6", "6", "b7", "7"}
 PART_ROW_KEYS = {"start", "end", "label", "vocals", "bass", "drums", "bass_notes_per_s", "other_notes_per_s", "drum_hits_per_s"}
 PART_RATE_MAX = 1000
+SWING_HITS_MAX = 1000000
 
 
 def _unit_rows_ok(rows, dur):
@@ -1617,6 +1618,20 @@ def _rhythm_v140_ok(v, dur):
             if not (s is None or (isinstance(s, list) and all(_int(x, 0, 15) for x in s) and s == sorted(set(s)))):
                 return False
     return True
+
+
+def _rhythm_v160_ok(v):
+    """Worker 0.16.0: swing, which needs the bars. Absent in older results."""
+    if "swing" not in v:
+        return True
+    s = v["swing"]
+    if not (isinstance(s, dict) and set(s) == {"status", "method", "reliability", "off_beat_phase", "hits", "feel"}
+            and "bars" in v and s["status"] == "done" and s["reliability"] == "reference_candidate" and _short_str(s["method"], 200)
+            and _int(s["hits"], 0, SWING_HITS_MAX)):
+        return False
+    if s["off_beat_phase"] is None:
+        return s["feel"] is None
+    return _num(s["off_beat_phase"], 0.4, 0.8) and s["feel"] in ("straight", "swung")
 
 
 def _rhythm_v130_ok(v):
@@ -1770,7 +1785,7 @@ def rhythm_summary(v, overview=None):
             "energy_summary": v.get("energy_summary"), "sections": v.get("sections"),
             "sections_method": v.get("sections_method"), "sections_reliability": v.get("sections_reliability"),
             "sections_model": v.get("sections_model"),
-            "melody": v.get("melody"), "bass": v.get("bass"), "other": v.get("other"), "drums": v.get("drums"), "parts": v.get("parts"), "bars": bars_view(v.get("bars")), "lyric_repeats": v.get("lyric_repeats"), "overview": overview,
+            "melody": v.get("melody"), "bass": v.get("bass"), "other": v.get("other"), "drums": v.get("drums"), "parts": v.get("parts"), "bars": bars_view(v.get("bars")), "swing": v.get("swing"), "lyric_repeats": v.get("lyric_repeats"), "overview": overview,
             "genre": genre_view(v.get("genre")),
             "downbeats": v["downbeats"],
             "duration": v["duration"], "tool": v["tool"],
