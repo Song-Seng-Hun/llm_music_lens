@@ -718,10 +718,10 @@ and runs Demucs on it once more, which adds about 11 s to a five-minute song and
   `{status: "skipped", reason}`. `sections` has one row per `rhythm.sections` row: `{start, end, label, balance, width_db, low_width_db,
   mid_width_db, high_width_db}`. `balance` is `(R-L)/(R+L)` of energy, -1 to 1. `width_db` is side energy over mid energy, within
   +-40 dB, so -40 is mono and 0 is as much side as mid. Low is under 200 Hz, high is over 2 kHz. `lufs` and `loudness_range` are for the
-  whole song, from Essentia `LoudnessEBUR128`. `null` means silence or not finite.
+  whole song, from Essentia `LoudnessEBUR128`. `null` means silence or not finite, and from worker 0.18.1 every value in a `silence` section, which can still hold music in under half its length.
 - `rhythm.part_positions` is `{status: "done", method, reliability: "low_reference", threshold_db: -15, sections}` or
   `{status: "skipped", reason}`. A row is `{start, end, label, vocals, bass, drums, other}`, each `{pan, width_db, level_db}` or `null`
-  when that part is under -15 dB of the section's mix. `level_db` is against the section's mix.
+  when that part is under -15 dB of the section's mix, and from worker 0.18.1 in a `silence` section. `level_db` is against the section's mix.
 - Reasons: `canonical_16k`, `band_limited`, `mono_source` (identical channels), `models_invalid`, and the failures `decode_failed`, `mix_failed`,
   `separation_failed`, which add a warning and are retried on the next request that can give the field. A failed second Demucs run
   leaves `mix` done. Before this worker, or without separation, both fields are `null`. Results are per section; there is no `/timeline` layer.
@@ -762,7 +762,7 @@ Evaluated locally on RWC-P songs 51-100 against the aligned annotations and MIDI
 steps each passed the bar set beforehand, and the downbeats beat every 4th Essentia beat.
 
 Limits: a wrong downbeat shifts every bar built on it; two songs scored under 50 on downbeats. The model can stop before the music does:
-on one real song the bars ended about 11 s early. Steps read as a 4/4 grid even when a bar has another length. Drum scores leave out songs
+on one real song the bars ended about 13 s early, in a fading outro. On the 50 test songs the music ran on past the last bar by a median of 3.5 s, over 5 s on 14 songs, over 10 s on 5, and at most 26 s. Bars are not extended past the model. Steps read as a 4/4 grid even when a bar has another length. Drum scores leave out songs
 whose MIDI has no standard kick or snare notes.
 
 Swing was evaluated on the same songs against the MIDI hats, with its bars set beforehand and passed. Few of those songs swing (3 of 35), so
