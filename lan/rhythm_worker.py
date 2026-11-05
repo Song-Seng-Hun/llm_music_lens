@@ -191,7 +191,7 @@ import tempfile
 import unicodedata
 import wave
 
-TOOL = {"name": "music-lens-rhythm-worker", "version": "0.18.0"}
+TOOL = {"name": "music-lens-rhythm-worker", "version": "0.18.1"}
 SRC_RATE = 16000
 RATE = 44100
 MAX_SECONDS = 600.0
@@ -1932,7 +1932,7 @@ def mix_row(sec, rows):
     c = _section_sum(rows, sec["start"], sec["end"])
     out = {"start": sec["start"], "end": sec["end"], "label": sec["label"], "balance": None, "width_db": None}
     out.update((b[0], None) for b in STEREO_BANDS)
-    if c is None:
+    if c is None or sec["label"] == SILENCE_LABEL:  # 0.18.1: leftover noise there has a side and a width, but they mean nothing
         return out
     out["balance"], out["width_db"] = _balance_width(c[0], c[1], c[2])
     for i, b in enumerate(STEREO_BANDS):
@@ -1943,6 +1943,9 @@ def mix_row(sec, rows):
 def position_row(sec, mix, parts):
     m = _section_sum(mix, sec["start"], sec["end"])
     out = {"start": sec["start"], "end": sec["end"], "label": sec["label"]}
+    if sec["label"] == SILENCE_LABEL:
+        out.update((s, None) for s in STEREO_PARTS)
+        return out
     for s in STEREO_PARTS:
         c, v = _section_sum(parts[s], sec["start"], sec["end"]), None
         if c is not None and m is not None and m[0] + m[1] > 0 and c[0] + c[1] > 0:

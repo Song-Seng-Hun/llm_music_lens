@@ -73,6 +73,17 @@ class MeasureTest(unittest.TestCase):
         row = rw.mix_row({"start": 0.0, "end": 2.0, "label": "A"}, self.energy(np.stack([c, c], 1)))
         self.assertEqual((row["balance"], row["width_db"]), (0.0, -40.0))
 
+    def test_silence_section_has_no_values(self):
+        loud = self.energy(np.stack([noise(2, 4), noise(2, 5)], 1) * 0.1)
+        sec = {"start": 0.0, "end": 2.0, "label": rw.SILENCE_LABEL}
+        row = rw.mix_row(sec, loud)
+        self.assertEqual({k: row[k] for k in ("label", "balance", "width_db", "low_width_db", "mid_width_db", "high_width_db")},
+                         {"label": rw.SILENCE_LABEL, "balance": None, "width_db": None, "low_width_db": None, "mid_width_db": None, "high_width_db": None})
+        parts = {s: self.energy(np.stack([noise(2, 4), noise(2, 5)], 1) * 0.1, bands=False) for s in rw.STEREO_PARTS}
+        row = rw.position_row(sec, loud, parts)
+        self.assertTrue(all(row[s] is None for s in rw.STEREO_PARTS))
+        self.assertEqual(row["end"], 2.0)
+
     def test_short_section_and_past_the_end(self):
         rows = self.energy(np.stack([noise(2), noise(2, 3)], 1) * 0.05)
         self.assertIsNotNone(rw.mix_row({"start": 0.1, "end": 0.2, "label": "A"}, rows)["balance"])
@@ -202,6 +213,15 @@ class ServerTest(unittest.TestCase):
         s = server.rhythm_summary(v)
         self.assertEqual(s["mix"]["lufs"], -10.5)
         self.assertEqual(s["part_positions"]["reliability"], "low_reference")
+
+    def test_accepts_a_silence_section(self):
+        sections = SECTIONS[:-1] + [dict(SECTIONS[-1], label=rw.SILENCE_LABEL, similarity_to_first=None)]
+        row = [1.0, 1.0, 0.5] + [1.0, 0.1] * 3
+        part = {s: [[1.0, 1.0, 0.5]] * 400 for s in rw.STEREO_PARTS}
+        mix, pos = rw.stereo_fields({"stereo": (None, None, {"mix": [row] * 400, "parts": part, "lufs": -10.5, "lra": 3.2})}, sections)
+        self.assertIsNone(mix["sections"][-1]["balance"])
+        self.assertIsNone(pos["sections"][-1]["vocals"])
+        self.assertIsNotNone(server.check_rhythm(self.stored(sections=sections, mix=mix, part_positions=pos)))
 
     def test_older_results_stay_valid(self):
         v = self.stored()
