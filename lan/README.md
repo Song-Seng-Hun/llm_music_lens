@@ -567,6 +567,14 @@ What happens on a rhythm request: the upload is decoded to 44.1 kHz mono; audio 
 gives a vocal, RMVPE reads it on CPU, and the notes go through the same segmentation and merge as before. Only melody
 changes; every other layer still reads the 16 kHz mix.
 
+Scoop join (worker 0.20.0, vocal method only): a sung scoop from below used to come out as an extra short note a
+semitone flat before the real note. After the merge, a note up to 0.12 s that touches (gap up to 30 ms) a note 1 or 2
+semitones higher and at least twice as long is removed, and the longer note starts where it started. On songs 51-100 of
+RWC-P against the MIDI vocal part, pitch on a 16-step grid went from F 31.5 to 34.3 and rhythm from 62.0 to 62.2, with
+1,599 of 24,044 notes removed. The rule was fixed before scoring, but those songs had been used before, so the test was
+not blind. A grace note shaped the same way is joined too. Notes stay low_reference; most of the flat lean against that
+MIDI remains.
+
 `melody.separation` says what was used: `{"status": "done"}`, or `{"status": "skipped", "reason": ...}` with the mix
 method. `melody.method` names the method. Reasons: `not_configured`, `canonical_16k` (a 16 kHz WAV upload has no band
 above 8 kHz), `band_limited`, and the failures `models_invalid`, `decode_failed`, `separation_failed`, `rmvpe_failed`,

@@ -11,6 +11,7 @@ Usage: <essentia python> -I rhythm_worker.py [--words-stdin] WAV
        (0.6.0; melody from a separated vocal, see "Vocal melody" below. No --melody-source = canonical 16 kHz upload.)
        (0.17.0: the same options also give mix and part_positions from a stereo decode, see "Mix and stereo" in README.md.)
        (0.19.0: and tone from those stems, see "Part tone" in README.md.)
+       (0.20.0: vocal melody notes get a scoop join, see "Vocal melody" in README.md.)
        --chord-model /abs/btc_model_large_voca.pt (0.7.0; chords from BTC instead of ChordsDetection)
        --basic-pitch-python /abs/python (0.8.0; with the Demucs options: a bass layer, see "Bass notes" below, and from
        0.12.0 an accompaniment layer, see "Accompaniment notes" in README.md)
@@ -192,7 +193,7 @@ import tempfile
 import unicodedata
 import wave
 
-TOOL = {"name": "music-lens-rhythm-worker", "version": "0.19.0"}
+TOOL = {"name": "music-lens-rhythm-worker", "version": "0.20.0"}
 SRC_RATE = 16000
 RATE = 44100
 MAX_SECONDS = 600.0
@@ -277,6 +278,8 @@ MERGE_CENTRE = 0.5  # s; in a 2-semitone oscillation the middle pitch may last t
 # there for most of each +-100 cent cycle, and same-pitch pieces join before the oscillation join)
 MERGE_MAX_RUN = 400  # pieces per oscillation window (bounds the work; ~40 s of 0.1 s pieces)
 MERGE_SPAN = 2  # semitones; widest oscillation joined (+-100 cents vibrato reads as -1..+1)
+SCOOP_MAX = 0.12  # s; a vocal note this short that rises 1-2 semitones into a note twice as long is a scoop (0.20.0)
+SCOOP_STEPS = (1, 2)  # semitones up into the target note
 MERGE_REVERSALS = 2  # sign changes an oscillation needs: A-B-A-B = 3 alternating moves = 2 sign changes
 # Vocal melody (0.6.0, optional): Demucs on the full-band upload, then RMVPE on the vocal, instead of Melodia on the mix.
 # Mix0 mean against Melodia (RPA / false voicing, 2026-11-03): 4 synthetic songs 84.5/27.9 vs 79.6/47.5, 40 human clips
@@ -413,7 +416,7 @@ SEP_FLAGS = {"--demucs": "demucs", "--rmvpe-model": "rmvpe", "--melody-scratch":
              "--basic-pitch-python": "basic_pitch", "--drum-model": "drum_model",
              "--sections-python": "sections_python", "--sections-model": "sections_model"}
 MEL_METHOD_VOCAL = ("Demucs htdemucs_ft vocal at 44.1 kHz, then RMVPE threshold 0.03 on CPU in 30 s pieces; "
-                    "same note segmentation and merge as the mix method. The vocal stem can include backing vocals.")
+                    "same note segmentation and merge as the mix method, then scoop join. The vocal stem can include backing vocals.")
 MEL_METHOD = ("EqualLoudness+PredominantPitchMelodia 16 kHz frame 1024 hop 128 (predominant pitch of the full mix); "
               "0.2 s median f0 (cents); PitchContourSegmentation notes, midi rounded; vibrato/same-pitch merge")
 NOTE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
@@ -1382,6 +1385,27 @@ def merge_notes(notes, gap=MERGE_GAP, short=MERGE_SHORT, centre_max=MERGE_CENTRE
             out.append(notes[i])
             i += 1
     return same_pitch_join(out, gap)
+
+
+def scoop_join(notes, short=SCOOP_MAX, gap=MERGE_GAP, steps=SCOOP_STEPS):
+    """Vocal notes only (0.20.0). A note <= `short` whose gap to the next note is <= `gap`, where the next note is
+    `steps` semitones higher and at least twice as long, is removed and the next note starts at its start: a sung
+    scoop from below otherwise reads as an extra note a semitone flat (synthetic 200-cent scoops of 80 and 150 ms
+    each gave a 0.104 s note). Left to right, once; the caller joins same-pitch pieces again afterwards. Compared in integer ms like the merge. Songs 51-100 of RWC-P
+    against MIDI vocal notes: pitch F 31.5 -> 34.3, rhythm F 62.0 -> 62.2 (Goal R, not blind)."""
+    out, i, n = [], 0, len(notes)
+    while i < n:
+        a = notes[i]
+        if i + 1 < n:
+            b = notes[i + 1]
+            if (_dur_ms(a) <= _ms(short) and _gap_ms(a, b) <= _ms(gap) and b["midi"] - a["midi"] in steps
+                    and _dur_ms(b) >= 2 * _dur_ms(a)):
+                out.append(dict(b, start=a["start"]))
+                i += 2
+                continue
+        out.append(a)
+        i += 1
+    return out
 
 
 def notes_per_second(notes):
@@ -2358,6 +2382,8 @@ def melody(x16, duration, tonic, scale, sections, sep=None, separated=None):
         notes.sort(key=lambda n: (n["start"], n["end"]))
         raw = len(notes)
         notes = merge_notes(notes)
+        if vocal:
+            notes = same_pitch_join(scoop_join(notes), MERGE_GAP)  # a dip inside a held note leaves two same-pitch pieces
         warns = []
         if separation.get("reason") in SEP_RETRY_REASONS:
             warns.append("melody_separation_failed: %s, used the mix method" % separation["reason"])
