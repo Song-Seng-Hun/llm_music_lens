@@ -859,8 +859,14 @@ for this.
 
 Limits: use it as a reference. The model tells verse from chorus but not verse A from verse B, so it merges parts a person
 would keep apart, and it tends to give fewer sections than a person marks. It was trained on Western pop (Harmonix Set).
-Function names were not scored; only boundaries and grouping were. The song overview still builds on lyric repeats first
-and does not show `function`.
+The song overview still builds on lyric repeats first and does not show `function`.
+
+The `chorus` name was scored on RWC-P songs 51-100 against the AIST chorus annotation, with bars set beforehand. It covers
+most of the chorus time: median F 82.7 per song, where calling everything chorus gives 51.0, and 75.4% of the time it names
+is chorus. It missed one bar: the first section named `chorus` is right on 68% of songs, against a bar of 80%, so this is not
+a pass. Looking after the result, those misses are mostly the verse just before the first chorus, and later names do better
+(second name right on 43 of 49 songs). Read a first `chorus` with care and prefer a later one. Other function names were not
+scored. Annotation: AIST Annotation for the RWC Music Database.
 
 | Part | Terms | Notes |
 |---|---|---|
