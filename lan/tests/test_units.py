@@ -1,4 +1,4 @@
-"""Musical units (worker 0.14.0, 0.15.0, 0.16.0): downbeats, bars, scale and degree, swing."""
+"""Musical units (worker 0.14.0, 0.15.0, 0.16.0, 0.18.0): downbeats, bars, scale and degree, swing, two chords in a bar."""
 import json
 import unittest
 
@@ -38,16 +38,48 @@ class BarTest(unittest.TestCase):
 
     def test_rows(self):
         rows = rw.bars_field(BEATS, CHORDS, DONE, HITS, True, 4.0)["rows"]
-        self.assertEqual(rows, [{"start": 0.0, "end": 2.0, "chord": "Am", "scale": "C", "degree": "6", "kick": [0], "snare": [4]},
-                                {"start": 2.0, "end": 4.0, "chord": "F", "scale": "C", "degree": "4", "kick": [0], "snare": []}])
+        self.assertEqual(rows, [{"start": 0.0, "end": 2.0, "chord": "Am", "split": None, "scale": "C", "degree": "6", "kick": [0], "snare": [4]},
+                                {"start": 2.0, "end": 4.0, "chord": "F", "split": None, "scale": "C", "degree": "4", "kick": [0], "snare": []}])
 
     def test_missing_layers_are_none(self):
         row = rw.bars_field(BEATS, CHORDS, {"status": "skipped", "reason": "x"}, [], False, 4.0)["rows"][0]
-        self.assertEqual((row["chord"], row["scale"], row["degree"], row["kick"], row["snare"]), (None,) * 5)
+        self.assertEqual((row["chord"], row["split"], row["scale"], row["degree"], row["kick"], row["snare"]), (None,) * 6)
 
     def test_no_downbeats_no_field(self):
         self.assertIsNone(rw.bars_field([], CHORDS, DONE, HITS, True, 4.0))
         self.assertIsNone(rw.bars_field(None, CHORDS, DONE, HITS, True, 4.0))
+
+
+def chords(*rows):
+    return [{"start": a, "end": b, "label": label} for a, b, label in rows]
+
+
+class SplitTest(unittest.TestCase):
+    def test_two_roots_split(self):
+        self.assertEqual(rw.bar_split(chords((0.0, 1.0, "Am"), (1.0, 2.0, "F")), 0.0, 2.0), ["Am", "F"])
+
+    def test_the_share_is_inclusive(self):
+        c = chords((0.0, 0.6, "Am"), (0.6, 1.0, "E"), (1.0, 1.6, "F"), (1.6, 2.0, "G"))
+        self.assertEqual(rw.bar_split(c, 0.0, 2.0), ["Am", "F"])
+
+    def test_a_half_with_no_clear_chord_stays_one(self):
+        self.assertIsNone(rw.bar_split(chords((0.0, 1.0, "Am"), (1.0, 1.5, "F"), (1.5, 2.0, "G")), 0.0, 2.0))
+
+    def test_one_label_held_in_pieces_counts_whole(self):
+        c = chords((0.0, 1.0, "Am"), (1.0, 1.3, "F"), (1.3, 1.4, "G"), (1.4, 1.8, "F"), (1.8, 2.0, "C"))
+        self.assertEqual(rw.bar_split(c, 0.0, 2.0), ["Am", "F"])
+
+    def test_same_root_stays_one(self):
+        self.assertIsNone(rw.bar_split(chords((0.0, 1.0, "C"), (1.0, 2.0, "Cmaj7")), 0.0, 2.0))
+        self.assertIsNone(rw.bar_split(chords((0.0, 1.0, "C#"), (1.0, 2.0, "Db")), 0.0, 2.0))
+
+    def test_no_chord_stays_one(self):
+        self.assertIsNone(rw.bar_split(chords((0.0, 1.0, "N"), (1.0, 2.0, "F")), 0.0, 2.0))
+        self.assertIsNone(rw.bar_split(chords((1.0, 2.0, "F")), 0.0, 2.0))
+
+    def test_the_bar_chord_does_not_change(self):
+        rows = rw.bars_field([0.0, 2.0], chords((0.0, 1.0, "Am"), (1.0, 2.0, "F")), DONE, [], True, 2.0)["rows"]
+        self.assertEqual((rows[0]["chord"], rows[0]["split"]), ("Am", ["Am", "F"]))
 
 
 class ScaleTest(unittest.TestCase):
@@ -145,11 +177,28 @@ class CheckTest(unittest.TestCase):
         self.rejected(lambda v: v["bars"]["rows"][0].update(scale=None))
         self.rejected(lambda v: v["bars"]["rows"][0].update(chord=None))
         self.rejected(lambda v: v["bars"]["rows"][1].pop("degree"))
+        self.rejected(lambda v: v["bars"]["rows"][1].pop("split"))
+        self.rejected(lambda v: v["bars"]["rows"][0].update(split=["Am"]))
+        self.rejected(lambda v: v["bars"]["rows"][0].update(split=["Am", "Am"]))
+        self.rejected(lambda v: v["bars"]["rows"][0].update(split=["Am", 1]))
+        self.rejected(lambda v: v["bars"]["rows"][0].update(split="Am"))
+        self.rejected(lambda v: v["bars"]["rows"][0].update(chord=None, scale=None, degree=None, split=["Am", "F"]))
 
     def test_results_stored_by_0_14_0_stay_valid(self):
         v = stored()
         for r in v["bars"]["rows"]:
-            del r["scale"], r["degree"]
+            del r["scale"], r["degree"], r["split"]
+        self.assertIsNotNone(server.check_rhythm(v))
+
+    def test_results_stored_by_0_15_0_stay_valid(self):
+        v = stored()
+        for r in v["bars"]["rows"]:
+            del r["split"]
+        self.assertIsNotNone(server.check_rhythm(v))
+
+    def test_a_split_is_accepted(self):
+        v = stored()
+        v["bars"]["rows"][0]["split"] = ["Am", "F"]
         self.assertIsNotNone(server.check_rhythm(v))
 
     def test_swing(self):

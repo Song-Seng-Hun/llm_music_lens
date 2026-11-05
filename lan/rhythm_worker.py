@@ -15,7 +15,7 @@ Usage: <essentia python> -I rhythm_worker.py [--words-stdin] WAV
        0.12.0 an accompaniment layer, see "Accompaniment notes" in README.md)
        --drum-model /abs/checkpoint.index (0.9.0; with the Demucs options: a drum layer, see "Drum hits" in README.md)
        With the Demucs options, 0.13.0 adds part activity per section, see "Part activity" in README.md.
-       With the section model, 0.14.0 adds downbeats and bars, and 0.15.0 a scale and degree per bar, and 0.16.0 swing, see "Musical units" in README.md.
+       With the section model, 0.14.0 adds downbeats and bars, and 0.15.0 a scale and degree per bar, and 0.16.0 swing, and 0.18.0 a bar's two chords, see "Musical units" in README.md.
 WAV is the server's already-validated canonical file (PCM mono 16 kHz s16, 0 < duration <= 600 s).
 --words-stdin (0.4.3; the server always passes it): stdin holds one JSON object {"words": [[text, start, end], ...]}
 (the ASR words of the same result) or {"words": null, "reason": code} (the server could not provide them), at most
@@ -191,7 +191,7 @@ import tempfile
 import unicodedata
 import wave
 
-TOOL = {"name": "music-lens-rhythm-worker", "version": "0.17.0"}
+TOOL = {"name": "music-lens-rhythm-worker", "version": "0.18.0"}
 SRC_RATE = 16000
 RATE = 44100
 MAX_SECONDS = 600.0
@@ -367,7 +367,9 @@ BAR_MAX = 2000
 BAR_STEPS = 16
 DOWNBEAT_METHOD = "All-In-One 8-fold ensemble on Demucs htdemucs_ft stems. A wrong downbeat shifts every bar built on it."
 BAR_METHOD = ("Between consecutive downbeats: the chord sounding longest; kick and snare on 16 equal steps, a 4/4 grid "
-              "even if the bar differs; scale and degree estimated from chord tones.")
+              "even if the bar differs; scale and degree estimated from chord tones; split = each half's chord.")
+# Two chords in a bar (0.18.0): each half's chord must hold this share of its half. Evaluated at this value.
+BAR_SPLIT_SHARE = 0.6
 # Swing (0.16.0): where hi-hat and cymbal hits fall between two beats. Evaluated at these values.
 SWING_METHOD = ("Median position inside the beat, 0 to 1, of hi-hat and cymbal hits between 0.4 and 0.8, a beat being a quarter "
                 "of a bar: about 0.5 straight, 0.67 triplet swing.")
@@ -1784,6 +1786,25 @@ def bar_scales(downbeats, chords, duration):
     return out
 
 
+def half_chord(chords, start, end):
+    """(top chord label, its share of [start, end]), or (None, 0)."""
+    label = top_chord(chords, start, end)
+    if label is None:
+        return None, 0.0
+    held = sum(max(0.0, min(c["end"], end) - max(c["start"], start)) for c in chords if c["label"] == label)
+    return label, held / (end - start)
+
+
+def bar_split(chords, start, end):
+    """[first half's chord, second half's chord] when each holds BAR_SPLIT_SHARE of its half and their roots differ, else None."""
+    mid = (start + end) / 2.0
+    (a, share_a), (b, share_b) = half_chord(chords, start, mid), half_chord(chords, mid, end)
+    ta, tb = chord_tones(a), chord_tones(b)
+    if ta and tb and share_a >= BAR_SPLIT_SHARE and share_b >= BAR_SPLIT_SHARE and ta[0] != tb[0]:
+        return [a, b]
+    return None
+
+
 def bars_field(downbeats, chords, drums, drum_hits, chords_ok, duration):
     """The bars field, or None without downbeats. A bar's chord, scale and degree are None unless BTC made the chords;
     kick and snare are None without a drum layer."""
@@ -1795,6 +1816,7 @@ def bars_field(downbeats, chords, drums, drum_hits, chords_ok, duration):
              for c in ("kick", "snare")}
     return {"status": "done", "method": BAR_METHOD, "reliability": "reference_candidate",
             "rows": [{"start": a, "end": b, "chord": top_chord(chords, a, b) if chords_ok else None,
+                      "split": bar_split(chords, a, b) if chords_ok else None,
                       "scale": scales[i][0], "degree": scales[i][1],
                       **{c: steps[c].get(i, []) if done else None for c in steps}}
                      for i, (a, b) in enumerate(zip(downbeats, downbeats[1:]))]}

@@ -736,7 +736,7 @@ with identical waveforms on both channels, against a bar of 0.02; the cause was 
 Other codecs and bitrates were not tried. Bleed between stems moves the part values, and a nearly mono part such as bass can show a large
 width error. `lufs` is not per section. Sum and difference only: phase tricks and time-delay panning are not told apart.
 
-### Musical units (worker 0.14.0, scale and degree 0.15.0, swing 0.16.0)
+### Musical units (worker 0.14.0, scale and degree 0.15.0, swing 0.16.0, two chords in a bar 0.18.0)
 
 Existing results grouped by bar, for reading a song the way it is written. It needs no config of its own and no new model: it comes
 with the section model and reads the downbeats that model already finds, the chords, and the drum hits.
@@ -744,9 +744,11 @@ with the section model and reads the downbeats that model already finds, the cho
 - `rhythm.downbeats` is `{status: "done", method, reliability: "reference_candidate", count}`, or `{status: "not_provided", reason}`
   without the section model. The times are the `start` of each bar.
 - `rhythm.bars` is `{status: "done", method, reliability: "reference_candidate", bar_count}`, or `null`. Read the rows with `/timeline`
-  `layer=bars`: `{start, end, chord, scale, degree, kick, snare}`, one per pair of consecutive downbeats, so anything before the first or after the last
+  `layer=bars`: `{start, end, chord, split, scale, degree, kick, snare}`, one per pair of consecutive downbeats, so anything before the first or after the last
   downbeat is in no bar. `chord` is the label sounding longest in the bar, `N` for none, `null` unless BTC made the chords. `kick` and
-  `snare` list steps 0 to 15 of 16 equal steps, `null` without a drum layer. Results stored by worker 0.14.0 have no `scale` or `degree`.
+  `snare` list steps 0 to 15 of 16 equal steps, `null` without a drum layer. Results stored by worker 0.14.0 have no `scale` or `degree`, and those stored before 0.18.0 no `split`.
+- `split` is `[first half's chord, second half's chord]` when each holds at least 60% of its half and their roots differ, else `null`. `chord`,
+  `scale` and `degree` do not change with it, so `chord` is one of the two or, in a bar with no clear winner, a third.
 - `scale` is one of 12 major scales, sharps as in the chord labels, so `C` also stands for A minor. `degree` is where the chord's root
   sits in that scale: `1`, `b2`, `2`, ... `7`, so Am in `C` is `6`, and a minor song's tonic chord reads `6`, not `1`. It names the root only;
   read major or minor from `chord`. It is `null` for a bar with no chord, and both are `null` unless BTC made the chords.
@@ -767,6 +769,10 @@ Swing was evaluated on the same songs against the MIDI hats, with its bars set b
 the call rests on little evidence, and sixteenth-note swing is not measured. Steady straight sixteenth hats put as many hits at 0.75 as at 0.5, so they can read as `swung` with a phase
 near 0.625; no evaluated song did this, so how often it happens is unknown. A beat is a quarter of a bar, so a bar of another length misplaces it.
 A fill flag per bar was tried too and failed its bar, so it is not provided; the hit times are in `layer=drums`.
+
+`split` was evaluated on the same songs against the annotated chords, with 60% chosen on songs 1-50, and it missed one of its three bars, kept by the
+owner's decision. Answers with `split` were right 87.4% of the time and 2.5% of one-chord bars were split, but it found 47.9% of two-chord bars, an F of 61.9 against a bar of 65.
+So `split` is worth reading, and `null` does not mean one chord. A half-bar reading of the root agreed 84.0% of the time, against 77.3% with one chord per bar. A change away from the middle of the bar, or a third chord, cannot show.
 
 Scale and degree differ from `key`, one estimate for the whole song, and from `key_sections`, which comes from fixed 20 s windows of audio
 and can change more often; they may disagree. They were evaluated on RWC-P against a reference built from the MIDI notes and annotated chords, and they passed the bars set
