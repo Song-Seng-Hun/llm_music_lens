@@ -1579,6 +1579,7 @@ def _rhythm_v120_ok(v, dur):
 BAR_MAX = 2000  # worker cap
 BAR_ROW_KEYS = {"start", "end", "chord", "kick", "snare"}  # stored by worker 0.14.0
 BAR_ROW_KEYS_V150 = BAR_ROW_KEYS | {"scale", "degree"}
+BAR_ROW_KEYS_V180 = BAR_ROW_KEYS_V150 | {"split"}
 SCALE_NAMES = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"}
 DEGREE_NAMES = {"1", "b2", "2", "b3", "3", "4", "b5", "5", "b6", "6", "b7", "7"}
 PART_ROW_KEYS = {"start", "end", "label", "vocals", "bass", "drums", "bass_notes_per_s", "other_notes_per_s", "drum_hits_per_s"}
@@ -1594,7 +1595,7 @@ def _unit_rows_ok(rows, dur):
 
 
 def _rhythm_v140_ok(v, dur):
-    """Worker 0.14.0: downbeats and the bars, which exist only together. Worker 0.15.0: scale and degree in every row."""
+    """Worker 0.14.0: downbeats and the bars, which exist only together. Worker 0.15.0: scale and degree in every row. Worker 0.18.0: split."""
     d, bars = v["downbeats"], v.get("bars")
     if d.get("status") != "done":
         return bars is None and "count" not in d
@@ -1604,12 +1605,16 @@ def _rhythm_v140_ok(v, dur):
             and _unit_rows_ok(bars["rows"], dur) and d["count"] == len(bars["rows"]) + 1):
         return False
     keys = set(bars["rows"][0])
-    if keys not in (BAR_ROW_KEYS, BAR_ROW_KEYS_V150):
+    if keys not in (BAR_ROW_KEYS, BAR_ROW_KEYS_V150, BAR_ROW_KEYS_V180):
         return False
     for r in bars["rows"]:
         if not (set(r) == keys and (r["chord"] is None or _short_str(r["chord"], 24))):
             return False
-        if keys == BAR_ROW_KEYS_V150 and not (
+        if keys == BAR_ROW_KEYS_V180 and not (
+                r["split"] is None or (r["chord"] is not None and isinstance(r["split"], list) and len(r["split"]) == 2
+                                       and all(_short_str(x, 24) for x in r["split"]) and r["split"][0] != r["split"][1])):
+            return False
+        if keys != BAR_ROW_KEYS and not (
                 (r["scale"] is None or r["scale"] in SCALE_NAMES) and (r["degree"] is None or r["degree"] in DEGREE_NAMES)
                 and (r["degree"] is None or (r["scale"] is not None and r["chord"] is not None))):
             return False
