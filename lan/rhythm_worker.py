@@ -14,6 +14,7 @@ Usage: <essentia python> -I rhythm_worker.py [--words-stdin] WAV
        0.12.0 an accompaniment layer, see "Accompaniment notes" in README.md)
        --drum-model /abs/checkpoint.index (0.9.0; with the Demucs options: a drum layer, see "Drum hits" in README.md)
        With the Demucs options, 0.13.0 adds part activity per section, see "Part activity" in README.md.
+       With the section model, 0.14.0 adds downbeats and bars, see "Musical units" in README.md.
 WAV is the server's already-validated canonical file (PCM mono 16 kHz s16, 0 < duration <= 600 s).
 --words-stdin (0.4.3; the server always passes it): stdin holds one JSON object {"words": [[text, start, end], ...]}
 (the ASR words of the same result) or {"words": null, "reason": code} (the server could not provide them), at most
@@ -45,7 +46,8 @@ Choices:
 - chord display (0.10.0): every chord row gets "display", the label with its root spelled for the key section at the
   segment's middle, plus "/bass" when one bass pitch class sounds for at least half of the segment and is a chord tone other
   than the root. "label" stays as it was, because sections and the overview compare labels.
-- downbeats: Essentia has no native downbeat tracker; reported as {"status":"not_provided"}.
+- downbeats: Essentia has no native downbeat tracker; reported as {"status":"not_provided"} unless the section model
+  gave them (0.14.0, see "Musical units" in README.md).
 - double_tempo_evidence (diagnostic, uncalibrated; no decision, bpm untouched): onset-strength envelope = L1
   half-rectified spectral flux (Essentia Flux) of Hann-windowed 1024-sample frames, hop 512 (11.6 ms), frames centred
   on i*hop, divided by its maximum (0..1). Flux reacts to any broadband or low-frequency attack (a kick), unlike HFC,
@@ -170,6 +172,7 @@ Choices:
   styles. No patch -> unavailable too_short; all silent -> unavailable no_audible_patches; head output not 400
   columns -> failed class_count_mismatch; any exception -> failed; never fails the worker.
 """
+import bisect
 import errno
 import hashlib
 import json
@@ -187,7 +190,7 @@ import tempfile
 import unicodedata
 import wave
 
-TOOL = {"name": "music-lens-rhythm-worker", "version": "0.13.0"}
+TOOL = {"name": "music-lens-rhythm-worker", "version": "0.14.0"}
 SRC_RATE = 16000
 RATE = 44100
 MAX_SECONDS = 600.0
@@ -324,7 +327,7 @@ DRUM_FAIL_REASONS = ("models_invalid", "decode_failed", "separation_failed", "ad
 # Sections from All-In-One (0.11.0, optional): functional segments on the four Demucs stems, run in their own environment.
 # See "Sections from All-In-One" in README.md. Audio without stems keeps the beat method.
 ALLIN1_CODE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "allin1_sections.py")
-ALLIN1_CODE_SHA256 = "e2055c108779bc5f3d4e36ae943d8dd75ffe076b3eed413307dd23e65d113117"
+ALLIN1_CODE_SHA256 = "7abd3840f8765930ee2026a48461e4b2394e8b6d593fa7b3e7242c7a2c66d87f"
 ALLIN1_CODE_MAX_BYTES = 16 * 1024
 ALLIN1_WEIGHTS = (("harmonix-fold0-0vra4ys2.pth", "0db596dfb0995f41d62f6267d76a9d54c046f1649bd35e1dbeca0c5f9a7b8acd"),
                   ("harmonix-fold1-3ozjhtsj.pth", "607b4864eaabccd4f6951410d5ea6676666ad1cfa6ce2e18bc99f3824b77c3b7"),
@@ -347,6 +350,12 @@ PART_WINDOW_S = 2.0
 PART_THRESHOLD_DB = -15  # stem window RMS against the whole mix's RMS; chosen on RWC-P 1-50
 PART_METHOD = ("Demucs htdemucs_ft stems: share of 2 s windows whose RMS is within 15 dB of the mix's RMS. "
                "Quiet parts can read as off. Note and hit rates come from the note layers.")
+# Musical units (0.14.0): existing results grouped by the section model's downbeats; see "Musical units" in README.md.
+BAR_MAX = 2000
+BAR_STEPS = 16
+DOWNBEAT_METHOD = "All-In-One 8-fold ensemble on Demucs htdemucs_ft stems. A wrong downbeat shifts every bar built on it."
+BAR_METHOD = ("Between consecutive downbeats: the chord sounding longest, and kick and snare on 16 equal steps. "
+              "The steps read as a 4/4 grid even when a bar has another length.")
 OTHER_DEMUCS_ARGS = ("-n", "htdemucs_ft", "--stem", "other", "-b", "1", "--seed", "0")
 OTHER_NOTES_CODE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "other_notes.py")
 OTHER_NOTES_SHA256 = "53de95ae2b1abd6c793a91241a81cfd9836d021ff4f2847feb4edf821494e37c"
@@ -1649,6 +1658,45 @@ def other_input(sep, n16, vocal_reason):
         sep["other"] = ({"status": "done", "method": OTHER_METHOD, "reliability": "low_reference", "note_count": len(rows)}, rows)
 
 
+def clean_downbeats(times, duration):
+    """Rounded ascending downbeats inside the song, or [] when they cannot make at least one bar."""
+    if not (isinstance(times, list) and all(isinstance(t, (int, float)) and math.isfinite(t) for t in times)):
+        return []
+    rows = [r3(t) for t in times if 0 <= t < duration]
+    if not 2 <= len(rows) <= BAR_MAX or any(b <= a for a, b in zip(rows, rows[1:])):
+        return []
+    return rows
+
+
+def bar_steps(times, downbeats):
+    """{bar index: sorted steps}: each hit goes to the nearest of 16 steps, the last one to the next bar's first."""
+    out = {}
+    for t in times:
+        i = bisect.bisect_right(downbeats, t) - 1
+        if i < 0 or i >= len(downbeats) - 1:
+            continue
+        k = int(round((t - downbeats[i]) / (downbeats[i + 1] - downbeats[i]) * BAR_STEPS))
+        if k == BAR_STEPS:
+            i, k = i + 1, 0
+        if i < len(downbeats) - 1:
+            out.setdefault(i, set()).add(k)
+    return {i: sorted(v) for i, v in out.items()}
+
+
+def bars_field(downbeats, chords, drums, drum_hits, chords_ok):
+    """The bars field, or None without downbeats. A bar's chord is None unless BTC made the chords; kick and snare
+    are None without a drum layer."""
+    if not downbeats:
+        return None
+    done = bool(drums) and drums.get("status") == "done"
+    steps = {c: bar_steps([h["time"] for h in drum_hits if h["class"] == c], downbeats) if done else None
+             for c in ("kick", "snare")}
+    return {"status": "done", "method": BAR_METHOD, "reliability": "reference_candidate",
+            "rows": [{"start": a, "end": b, "chord": top_chord(chords, a, b) if chords_ok else None,
+                      **{c: steps[c].get(i, []) if done else None for c in steps}}
+                     for i, (a, b) in enumerate(zip(downbeats, downbeats[1:]))]}
+
+
 def section_segments(sep, duration):
     """(segments, None) or (None, reason). The scratch already holds full.wav and any stems made so far."""
     model = sep["sections_model"]
@@ -1669,9 +1717,13 @@ def section_segments(sep, duration):
     if run_tool([sep["sections_python"], "-I", ALLIN1_CODE, root, stems, out]):
         return None, "sections_failed"
     with open(out) as f:
-        segs = clean_segments(json.load(f), duration)
+        got = json.load(f)
+    if not isinstance(got, dict):
+        return None, "sections_failed"
+    segs = clean_segments(got.get("segments"), duration)
     if segs is None:
         return None, "sections_failed"
+    sep["downbeats"] = clean_downbeats(got.get("downbeats"), duration)
     return (None, "too_many_sections") if len(segs) > SEC_MAX else (segs, None)
 
 
@@ -2091,6 +2143,7 @@ def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None, genre_di
     parts = parts_field(sep, sections, bass, bass_notes, other, other_notes, drums, drum_hits)
     if parts and parts.get("reason") == "levels_failed":
         warnings.append("parts_failed: levels_failed")
+    bars = bars_field((sep or {}).get("downbeats"), chords, drums, drum_hits, btc_used)
     try:  # pure Python on the server's words; never fails the worker
         lyr, lyr_warn = lyric_repeats(words, r3(duration), words_reason)
     except Exception:
@@ -2108,7 +2161,9 @@ def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None, genre_di
         "double_tempo_evidence": dte,
         "double_tempo_evidence_note": DTE_NOTE,
         "tempo_cnn": tc,
-        "downbeats": {"status": "not_provided", "reason": "Essentia has no native downbeat tracker"},
+        "downbeats": ({"status": "done", "method": DOWNBEAT_METHOD, "reliability": "reference_candidate",
+                       "count": len(bars["rows"]) + 1} if bars else
+                      {"status": "not_provided", "reason": "Essentia has no native downbeat tracker"}),
         "key": {"tonic": str(tonic), "scale": str(scale), "strength": round(kstrength, 3), "profile": KEY_PROFILE},
         "key_sections": key_sections,
         "key_change_count": max(0, len(key_sections) - 1),
@@ -2130,6 +2185,7 @@ def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None, genre_di
         **({"other": other, "other_notes": other_notes} if other else {}),
         **({"drums": drums, "drum_hits": drum_hits} if drums else {}),
         **({"parts": parts} if parts else {}),
+        **({"bars": bars} if bars else {}),
         "structure_debug": sec_debug,
         "lyric_repeats": lyr,
         "genre": gn,
