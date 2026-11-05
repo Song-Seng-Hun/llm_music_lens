@@ -937,7 +937,7 @@ def check_rhythm(v):
         if (not _rhythm_v2_ok(v, dur) or not _rhythm_v21_ok(v) or not _rhythm_v22_ok(v)
                 or not _rhythm_v30_ok(v, dur) or not _rhythm_v40_ok(v, dur) or not _rhythm_v43_ok(v, dur)
                 or not _rhythm_v50_ok(v, dur) or not _rhythm_v80_ok(v, dur) or not _rhythm_v90_ok(v, dur)
-                or not _rhythm_v110_ok(v) or not _rhythm_v120_ok(v, dur) or not _rhythm_v130_ok(v) or not _rhythm_v140_ok(v, dur) or not _rhythm_v160_ok(v)):
+                or not _rhythm_v110_ok(v) or not _rhythm_v120_ok(v, dur) or not _rhythm_v130_ok(v) or not _rhythm_v140_ok(v, dur) or not _rhythm_v160_ok(v) or not _rhythm_v170_ok(v)):
             return None
         for k in ("worker_sha256", "words_sha256"):  # server-added identities
             if k in v and not (isinstance(v[k], str) and RE_HEX64.match(v[k])):
@@ -1634,6 +1634,60 @@ def _rhythm_v160_ok(v):
     return _num(s["off_beat_phase"], 0.4, 0.8) and s["feel"] in ("straight", "swung")
 
 
+MIX_ROW_KEYS = {"start", "end", "label", "balance", "width_db", "low_width_db", "mid_width_db", "high_width_db"}
+POSITION_PARTS = ("vocals", "bass", "drums", "other")
+STEREO_FAIL_REASONS = frozenset(("decode_failed", "mix_failed", "separation_failed"))
+STEREO_REASONS = STEREO_FAIL_REASONS | BASS_FAIL_REASONS | BASS_FINAL_REASONS | {"mono_source"}
+
+
+def _db_or_none(x, lo=-40, hi=40):
+    return x is None or _num(x, lo, hi)
+
+
+def _stereo_rows(rows, sections, keys):
+    return (isinstance(rows, list) and isinstance(sections, list) and len(rows) == len(sections)
+            and all(isinstance(r, dict) and set(r) == keys and all(r[k] == s[k] for k in ("start", "end", "label"))
+                    for r, s in zip(rows, sections)))
+
+
+def _rhythm_v170_ok(v):
+    """Worker 0.17.0: mix and part_positions, one row per section. Absent in older results."""
+    for key in ("mix", "part_positions"):
+        f = v.get(key)
+        if key in v and isinstance(f, dict) and f.get("status") == "skipped" and not (set(f) == {"status", "reason"} and f["reason"] in STEREO_REASONS):
+            return False
+    if "mix" in v:
+        m = v["mix"]
+        if not isinstance(m, dict):
+            return False
+        if m.get("status") != "skipped":
+            if not (set(m) == {"status", "method", "reliability", "lufs", "loudness_range", "sections"} and m["status"] == "done"
+                    and m["reliability"] == "reference_candidate" and _short_str(m["method"], 200)
+                    and _db_or_none(m["lufs"], -200, 20) and _db_or_none(m["loudness_range"], 0, 200)
+                    and _stereo_rows(m["sections"], v.get("sections"), MIX_ROW_KEYS)):
+                return False
+            for r in m["sections"]:
+                if not ((r["balance"] is None or _num(r["balance"], -1, 1))
+                        and all(_db_or_none(r[k]) for k in ("width_db", "low_width_db", "mid_width_db", "high_width_db"))):
+                    return False
+    if "part_positions" in v:
+        p = v["part_positions"]
+        if not isinstance(p, dict):
+            return False
+        if p.get("status") != "skipped":
+            if not (set(p) == {"status", "method", "reliability", "threshold_db", "sections"} and p["status"] == "done"
+                    and p["reliability"] == "low_reference" and _short_str(p["method"], 200) and _num(p["threshold_db"], -120, 0)
+                    and _stereo_rows(p["sections"], v.get("sections"), {"start", "end", "label", *POSITION_PARTS})):
+                return False
+            for r in p["sections"]:
+                for k in POSITION_PARTS:
+                    x = r[k]
+                    if x is not None and not (isinstance(x, dict) and set(x) == {"pan", "width_db", "level_db"} and _num(x["pan"], -1, 1)
+                                              and _num(x["width_db"], -40, 40) and _num(x["level_db"], p["threshold_db"], 200)):
+                        return False
+    return True
+
+
 def _rhythm_v130_ok(v):
     """Worker 0.13.0: part activity, one row per section."""
     if "parts" not in v:
@@ -1720,12 +1774,23 @@ def _sections_can_improve(v, separable):
     return _stem_can_improve(v, "sections_model", SECTIONS_MODEL_FAIL_REASONS - {"too_many_sections"}, separable)  # same audio, same count
 
 
+def _stereo_can_improve(v, separable):
+    """A stored failed or 16 kHz mix or position field, when this upload can give it. Same audio: mono_source stays."""
+    if not separable:
+        return False
+    for key in ("mix", "part_positions"):
+        f = v.get(key)
+        if isinstance(f, dict) and (f.get("reason") in STEREO_FAIL_REASONS or f.get("reason") == "canonical_16k"):
+            return True
+    return False
+
+
 def _has_separated_layer(v):
     """True when a stored result holds anything made from stems, which an upload without the band cannot give again."""
     m = v.get("melody")
     sp = m.get("separation") if isinstance(m, dict) else None
     return ((isinstance(sp, dict) and sp.get("status") == "done")
-            or any(isinstance(v.get(k), dict) and v[k].get("status") == "done" for k in ("bass", "other", "drums", "sections_model", "parts")))
+            or any(isinstance(v.get(k), dict) and v[k].get("status") == "done" for k in ("bass", "other", "drums", "sections_model", "parts", "mix", "part_positions")))
 
 
 def _rhythm_retry(v):
@@ -1785,7 +1850,7 @@ def rhythm_summary(v, overview=None):
             "energy_summary": v.get("energy_summary"), "sections": v.get("sections"),
             "sections_method": v.get("sections_method"), "sections_reliability": v.get("sections_reliability"),
             "sections_model": v.get("sections_model"),
-            "melody": v.get("melody"), "bass": v.get("bass"), "other": v.get("other"), "drums": v.get("drums"), "parts": v.get("parts"), "bars": bars_view(v.get("bars")), "swing": v.get("swing"), "lyric_repeats": v.get("lyric_repeats"), "overview": overview,
+            "melody": v.get("melody"), "bass": v.get("bass"), "other": v.get("other"), "drums": v.get("drums"), "parts": v.get("parts"), "bars": bars_view(v.get("bars")), "swing": v.get("swing"), "mix": v.get("mix"), "part_positions": v.get("part_positions"), "lyric_repeats": v.get("lyric_repeats"), "overview": overview,
             "genre": genre_view(v.get("genre")),
             "downbeats": v["downbeats"],
             "duration": v["duration"], "tool": v["tool"],
@@ -2505,6 +2570,7 @@ class App:
                 and stored.get("words_sha256") == words_sha and not _rhythm_retry(stored)
                 and not (separable and _melody_can_improve(stored))
                 and not (separable and (stored.get("parts") or {}).get("reason") == "levels_failed")
+                and not _stereo_can_improve(stored, separable)
                 and not ("chord_model" in self.cfg["rhythm"] and stored.get("chords_reliability") != "reference_candidate")
                 and not ("basic_pitch_python" in self.cfg["rhythm"] and (_bass_can_improve(stored, separable)
                                                                          or _other_can_improve(stored, separable)))
