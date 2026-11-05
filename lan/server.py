@@ -1666,6 +1666,14 @@ def _sections_can_improve(v, separable):
     return _stem_can_improve(v, "sections_model", SECTIONS_MODEL_FAIL_REASONS - {"too_many_sections"}, separable)  # same audio, same count
 
 
+def _has_separated_layer(v):
+    """True when a stored result holds anything made from stems, which an upload without the band cannot give again."""
+    m = v.get("melody")
+    sp = m.get("separation") if isinstance(m, dict) else None
+    return ((isinstance(sp, dict) and sp.get("status") == "done")
+            or any(isinstance(v.get(k), dict) and v[k].get("status") == "done" for k in ("bass", "other", "drums", "sections_model", "parts")))
+
+
 def _rhythm_retry(v):
     """True when a stored file with the current worker must still be recomputed: an optional stage (tempo_cnn or,
     worker 0.4.0+, melody, or 0.4.3 lyric_repeats, or 0.5.0 genre) ended in an outcome whose cause can change
@@ -2423,6 +2431,10 @@ class App:
         words, words_sha = self.lyric_words(result_id)
         # reuse needs the same worker file and the same ASR words (a re-run ASR can change them for this result_id)
         separable = "demucs" in self.cfg["rhythm"] and not (job.kind == "wav" and strict_wav_check(job.src))
+        # a 16 kHz upload must not replace stems with nothing, whatever else would recompute: it serves the stored file as it is
+        if state == "ok" and "demucs" in self.cfg["rhythm"] and not separable and _has_separated_layer(stored):
+            return dict(rhythm_summary(stored, self.rhythm_overview(result_id, stored, words, words_sha)),
+                        cache_hit=True, stored=True)
         if (state == "ok" and cur is not None and stored.get("worker_sha256") == cur
                 and stored.get("words_sha256") == words_sha and not _rhythm_retry(stored)
                 and not (separable and _melody_can_improve(stored))

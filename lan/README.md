@@ -133,6 +133,7 @@ API:
   - `{"status":"failed","code":...}` with the worker's error code (`invalid_audio`, `too_short`, `analysis_failed`,
     `dependency_missing`, `timeout`), or `invalid_output`, `internal_error`, `server_misconfigured`,
     `lock_unavailable`, `no_result_id`, `shutting_down`.
+- Exception to the reuse rules below: with separation configured, a 16 kHz WAV upload never recomputes a stored result that holds anything made from stems, see "Vocal melody".
 - The worker JSON is stored durably (tmp 0600 + F_FULLFSYNC, replace, directory fsync) as
   `<root>/results-rhythm/<result_id>.json` (directory 0700), plus a server-added `worker_sha256`: the SHA-256 of the
   configured worker file, hashed once when the server starts. A later analyze with the same `result_id` (an `ml` cache
@@ -570,8 +571,10 @@ changes; every other layer still reads the 16 kHz mix.
 method. `melody.method` names the method. Reasons: `not_configured`, `canonical_16k` (a 16 kHz WAV upload has no band
 above 8 kHz), `band_limited`, and the failures `models_invalid`, `decode_failed`, `separation_failed`, `rmvpe_failed`,
 which also add the warning `melody_separation_failed` and are retried on the next request. A stored melody from the mix
-is recomputed when a later upload of the same audio can be separated; a stored vocal melody stays for a later 16 kHz
-upload. Send M4A, MP3 or a full-band WAV to get the vocal method.
+is recomputed when a later upload of the same audio can be separated. A stored result with anything made from stems (vocal
+melody, bass, accompaniment, drums, model sections, part activity) stays for a later 16 kHz upload, with no recompute for any
+reason, even if the worker changed; `tool.version` then shows the older worker, and a full-band upload recomputes it. Send M4A,
+MP3 or a full-band WAV to get the vocal method.
 
 Results, all on mixes built for the test (voice and accompaniment at equal level), since real songs have no pitch truth:
 
