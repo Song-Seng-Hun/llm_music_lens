@@ -937,7 +937,7 @@ def check_rhythm(v):
         if (not _rhythm_v2_ok(v, dur) or not _rhythm_v21_ok(v) or not _rhythm_v22_ok(v)
                 or not _rhythm_v30_ok(v, dur) or not _rhythm_v40_ok(v, dur) or not _rhythm_v43_ok(v, dur)
                 or not _rhythm_v50_ok(v, dur) or not _rhythm_v80_ok(v, dur) or not _rhythm_v90_ok(v, dur)
-                or not _rhythm_v110_ok(v) or not _rhythm_v120_ok(v, dur)):
+                or not _rhythm_v110_ok(v) or not _rhythm_v120_ok(v, dur) or not _rhythm_v130_ok(v)):
             return None
         for k in ("worker_sha256", "words_sha256"):  # server-added identities
             if k in v and not (isinstance(v[k], str) and RE_HEX64.match(v[k])):
@@ -1576,6 +1576,34 @@ def _rhythm_v120_ok(v, dur):
     return _note_layer_ok(v, dur, "other", OTHER_MAX_NOTES, OTHER_FAIL_REASONS | BASS_FINAL_REASONS | {"too_many_notes"})
 
 
+PART_ROW_KEYS = {"start", "end", "label", "vocals", "bass", "drums", "bass_notes_per_s", "other_notes_per_s", "drum_hits_per_s"}
+PART_RATE_MAX = 1000
+
+
+def _rhythm_v130_ok(v):
+    """Worker 0.13.0: part activity, one row per section."""
+    if "parts" not in v:
+        return True
+    p = v["parts"]
+    if not isinstance(p, dict):
+        return False
+    if p.get("status") == "skipped":
+        return set(p) == {"status", "reason"} and p["reason"] in BASS_FAIL_REASONS | BASS_FINAL_REASONS | {"levels_failed"}
+    if not (set(p) == {"status", "method", "reliability", "window_s", "threshold_db", "sections"} and p["status"] == "done"
+            and p["reliability"] == "reference_candidate" and _short_str(p["method"], 200)
+            and _num(p["window_s"], 0.1, 60) and _num(p["threshold_db"], -120, 0) and isinstance(p["sections"], list)):
+        return False
+    ss = v.get("sections")
+    if not isinstance(ss, list) or len(ss) != len(p["sections"]):
+        return False
+    for r, s in zip(p["sections"], ss):
+        if not (isinstance(r, dict) and set(r) == PART_ROW_KEYS and all(r[k] == s[k] for k in ("start", "end", "label"))
+                and all(r[k] is None or _num(r[k], 0, 1) for k in ("vocals", "bass", "drums"))
+                and all(r[k] is None or _num(r[k], 0, PART_RATE_MAX) for k in ("bass_notes_per_s", "other_notes_per_s", "drum_hits_per_s"))):
+            return False
+    return True
+
+
 def _rhythm_v90_ok(v, dur):
     """Worker 0.9.0: the optional drum layer, summary and rows together."""
     if ("drums" in v) != ("drum_hits" in v):
@@ -1688,7 +1716,7 @@ def rhythm_summary(v, overview=None):
             "energy_summary": v.get("energy_summary"), "sections": v.get("sections"),
             "sections_method": v.get("sections_method"), "sections_reliability": v.get("sections_reliability"),
             "sections_model": v.get("sections_model"),
-            "melody": v.get("melody"), "bass": v.get("bass"), "other": v.get("other"), "drums": v.get("drums"), "lyric_repeats": v.get("lyric_repeats"), "overview": overview,
+            "melody": v.get("melody"), "bass": v.get("bass"), "other": v.get("other"), "drums": v.get("drums"), "parts": v.get("parts"), "lyric_repeats": v.get("lyric_repeats"), "overview": overview,
             "genre": genre_view(v.get("genre")),
             "downbeats": v["downbeats"],
             "duration": v["duration"], "tool": v["tool"],
@@ -2398,6 +2426,7 @@ class App:
         if (state == "ok" and cur is not None and stored.get("worker_sha256") == cur
                 and stored.get("words_sha256") == words_sha and not _rhythm_retry(stored)
                 and not (separable and _melody_can_improve(stored))
+                and not (separable and (stored.get("parts") or {}).get("reason") == "levels_failed")
                 and not ("chord_model" in self.cfg["rhythm"] and stored.get("chords_reliability") != "reference_candidate")
                 and not ("basic_pitch_python" in self.cfg["rhythm"] and (_bass_can_improve(stored, separable)
                                                                          or _other_can_improve(stored, separable)))

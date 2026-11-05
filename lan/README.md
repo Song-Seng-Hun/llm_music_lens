@@ -684,6 +684,27 @@ Limits: use it for register and how busy the part is, and treat single notes as 
 more than the chord layer does. YourMT3+ (55.4 exact pitch, 35.7 note starts, seven times slower) did not beat it by the 5 points
 fixed beforehand. Read `chords` for harmony.
 
+### Part activity (worker 0.13.0)
+
+Which parts sound in each section, for reading how an arrangement builds. It needs no config of its own and no new model: it comes
+with the separation config and reads the stems already made for that request. `vocals` needs only separation; `bass` and `drums` are
+`null` unless the bass, drum or section layer made those stems.
+
+`rhythm.parts` is `{status: "done", method, reliability: "reference_candidate", window_s: 2.0, threshold_db: -15, sections}` or
+`{status: "skipped", reason}`. `sections` has one row per `rhythm.sections` row: `{start, end, label, vocals, bass, drums,
+bass_notes_per_s, other_notes_per_s, drum_hits_per_s}`. `vocals`, `bass` and `drums` are the share of 2 s windows, 0 to 1, whose
+stem RMS is within 15 dB of the whole mix's RMS. The rates count note starts or hits per second. `null` means that layer gave no
+result. Reasons: `canonical_16k`, `band_limited`, the separation failures, and `levels_failed`, which adds the warning `parts_failed`
+and is retried on the next request that can give the layer. Before this worker, or without separation, `rhythm.parts` is `null`.
+
+Evaluated locally against the aligned RWC-P MIDI in 2 s windows, with the threshold chosen on songs 1-50 and checked on songs 51-100.
+All three parts passed the bar set beforehand: pooled balanced accuracy at least 80, at least 70 on songs where the part comes and
+goes, at most 20% false activity on songs without it. On one real song the entries and a break matched by ear.
+
+Limits: a quiet part can read as off, and -15 dB was the top of the range tried. A cello or similar low instrument can read as bass.
+The accompaniment is not judged on or off, because it sounds almost all the time; read its rate instead. Instruments are not named.
+Section labels are not corrected by this: similar chords and busy vocals did not mean a chorus on the real song.
+
 ### Chord display (worker 0.10.0)
 
 Every `/timeline` `layer=chords` row gets `display`, the name to show a person: `Bb7`, `F#m`, `C/E`, `Bbm7/Db`. No config is needed.
