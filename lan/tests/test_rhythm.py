@@ -2059,6 +2059,35 @@ class LyricApproxTest(unittest.TestCase):
         self.assertEqual(warns, ["lyric_repeats_approx_capped: %d window checks" % rw.LYRIC_APPROX_MAX_CHECKS])
 
 
+class ScoopJoinTest(unittest.TestCase):
+    """Worker 0.20.0 scoop join on vocal notes (pure)."""
+
+    def test_scoop_into_note(self):
+        # the synthetic 200-cent scoop through melody(): G#4 0.104 s, gap 16 ms, A4 0.368 s
+        m = rw.scoop_join([_n(5.208, 5.312, 68), _n(5.328, 5.696, 69)])
+        self.assertEqual(m, [_n(5.208, 5.696, 69)])
+        self.assertEqual(rw.scoop_join([_n(0.0, 0.12, 67), _n(0.15, 0.4, 69)]), [_n(0.0, 0.4, 69)])  # 2 up, 120 ms, 30 ms gap
+
+    def test_left_alone(self):
+        cases = (
+            [_n(0.0, 0.121, 68), _n(0.121, 0.6, 69)],  # 121 ms: longer than a scoop
+            [_n(0.0, 0.1, 68), _n(0.131, 0.6, 69)],  # 31 ms gap
+            [_n(0.0, 0.1, 70), _n(0.1, 0.6, 69)],  # falls into the note
+            [_n(0.0, 0.1, 66), _n(0.1, 0.6, 69)],  # 3 semitones
+            [_n(0.0, 0.1, 68), _n(0.1, 0.199, 69)],  # next note under twice as long
+            [_n(0.0, 0.1, 69), _n(0.1, 0.6, 69)],  # same pitch (merge's job)
+            [_n(0.0, 0.1, 64), _n(0.1, 0.2, 65), _n(0.2, 0.3, 67)],  # quick rising run, no long target
+        )
+        for notes in cases:
+            self.assertEqual(rw.scoop_join(notes), notes, notes)
+        self.assertEqual(rw.scoop_join([]), [])
+
+    def test_once_left_to_right(self):
+        # two scoops in a row each join their own target; the joined note is not a scoop source again
+        n = [_n(0.0, 0.1, 67), _n(0.1, 0.5, 68), _n(0.5, 0.6, 69), _n(0.6, 1.0, 70)]
+        self.assertEqual(rw.scoop_join(n), [_n(0.0, 0.5, 68), _n(0.5, 1.0, 70)])
+
+
 class MergeLogicTest(unittest.TestCase):
     """Worker 0.4.2 note merge (pure; the 0.2 s contour median needs numpy and is covered by RealWorkerTest)."""
 
@@ -2232,7 +2261,7 @@ class RealWorkerTest(unittest.TestCase):
             self.assertEqual((v["sample_rate"], v["chords_reliability"]), (44100, "low_reference"))
             self.assertIn(v["duration"], (30.0, 60.0))
             self.assertEqual(v["tool"]["essentia_version"], "2.1-beta6-dev")
-            self.assertEqual(v["tool"]["version"], "0.19.0")
+            self.assertEqual(v["tool"]["version"], "0.20.0")
             g = v["genre"]
             self.assertEqual(g["status"], "done" if GENRE_PRESENT else "unavailable", g)
             if GENRE_PRESENT:  # measured: 29 patches for 30 s, 59 for 60 s (hop 0.992 s, first from ~2.04 s)
