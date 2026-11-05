@@ -2,7 +2,7 @@
 
 Usage: allin1_sections.py MODEL_DIR STEMS_DIR OUT.json
 MODEL_DIR holds the eight harmonix-fold checkpoints; the worker checks their SHA-256 first. STEMS_DIR holds bass.wav,
-drums.wav, other.wav and vocals.wav. OUT.json gets [{"start", "end", "label"}]. No download and no separation here.
+drums.wav, other.wav and vocals.wav. OUT.json gets {"segments": [{"start", "end", "label"}], "downbeats": [seconds]}. No download and no separation here.
 The checkpoints load with torch's restricted unpickler; the library's own loader uses the unrestricted one.
 """
 import json
@@ -44,7 +44,8 @@ def main(argv):
         r = run_inference(path=src, spec_path=spec, model=model, device="cpu", include_activations=False,
                           include_embeddings=False)
     with open(out, "w") as f:
-        json.dump([{"start": float(s.start), "end": float(s.end), "label": str(s.label)} for s in r.segments], f)
+        json.dump({"segments": [{"start": float(s.start), "end": float(s.end), "label": str(s.label)} for s in r.segments],
+                   "downbeats": [float(t) for t in r.downbeats]}, f)
     return 0
 
 

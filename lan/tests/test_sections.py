@@ -151,7 +151,7 @@ rw.ALLIN1_WEIGHTS = tuple((n, cfg.get("weight_sha", sha(os.path.join(root, n))))
 rw.ALLIN1_CODE, rw.ALLIN1_CODE_SHA256 = cfg["helper"], sha(cfg["helper"])
 sep = cfg["sep"]
 _, _, field = rw.melody_input(sep, 16000 * 2)
-print(json.dumps({"separation": field, "sections": sep.get("sections"), "scratch_left": os.path.exists(sep["scratch"])}))
+print(json.dumps({"separation": field, "sections": sep.get("sections"), "downbeats": sep.get("downbeats"), "scratch_left": os.path.exists(sep["scratch"])}))
 '''
 FAKE_DEMUCS = r'''#!%s -I
 import os, shutil, sys
@@ -183,7 +183,7 @@ elif mode == "many":
 else:
     rows = [{"start": 0, "end": 0, "label": "start"}, {"start": 0, "end": 0.9, "label": "intro"},
             {"start": 0.9, "end": 2.5, "label": "chorus"}, {"start": 5, "end": 6, "label": "end"}]
-json.dump(rows, open(out, "w"))
+json.dump({"segments": rows, "downbeats": [0.5, 1.0, 1.5]}, open(out, "w"))
 '''
 
 
@@ -237,7 +237,9 @@ class SectionFallbackTest(unittest.TestCase):
         self.assertEqual(r["sections"], [{"status": "skipped", "reason": reason}, []])
 
     def test_done(self):
-        field, segs = self.run_it()["sections"]
+        got = self.run_it()
+        self.assertEqual(got["downbeats"], [0.5, 1.0, 1.5])
+        field, segs = got["sections"]
         self.assertEqual(field, {"status": "done"})
         # the empty start row goes, the gap joins the row before it, the last row past the end is gone
         self.assertEqual(segs, [[0.0, 0.9, "intro"], [0.9, 2.0, "chorus"]])

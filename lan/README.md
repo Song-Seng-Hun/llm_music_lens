@@ -127,7 +127,7 @@ API:
   The worker also bounds itself (SIGALRM 330 s, RLIMIT_CPU 600 s) in case the server dies first.
 - Rhythm never fails the analyze: the reply stays 200 with the ASR fields unchanged plus `rhythm`:
   - success: the same compact summary as `/report` plus `cache_hit` and `stored` (no beat or chord rows; page
-    them with `/timeline` `layer=beats|chords|energy|melody|genre|bass|other|drums`);
+    them with `/timeline` `layer=beats|chords|energy|melody|genre|bass|other|drums|bars`);
   - `{"status":"busy","code":"busy"}` when the team lock is held (never waits);
   - `{"status":"timeout","code":"timeout"|"no_time_left"}`;
   - `{"status":"failed","code":...}` with the worker's error code (`invalid_audio`, `too_short`, `analysis_failed`,
@@ -176,7 +176,7 @@ API:
   from before 0.4.3 give `lyric_repeats: null` and `overview: null`, and files from before 0.5.0 give `genre: null`
   (summary `genre` = the stored one without `windows`, plus `window_count`). `structure_debug` is never in the summary (stored file only). A damaged file gives `rhythm: {"status":"failed","code":"invalid_result"}`.
   No file: native bytes unchanged.
-- `GET /timeline/<id>?layer=beats|chords|energy|melody|genre|bass|other|drums` is served by the server from the stored file with the native rules:
+- `GET /timeline/<id>?layer=beats|chords|energy|melody|genre|bass|other|drums|bars` is served by the server from the stored file with the native rules:
   `start`/`end` 0..600 (default 0 and 600, `end >= start`), rows overlapping the range, `limit` 1..200 (default 100),
   `cursor` <= total, a ~43 KB page byte cap, `truncated` and `continuation`. Beats rows are `{"time"}`, chords rows
   `{start, end, label, strength}`, with `display` from worker 0.10.0 and `one_beat: true` on some BTC rows (with `reliability`: `low_reference`, or
@@ -202,7 +202,7 @@ Worker output (worker 0.4.1): `bpm`, `bpm_confidence` (RhythmExtractor2013 multi
 uncalibrated), `bpm_estimates` (top 5 shares), `bpm_alternatives` (`[bpm/2, bpm*2]`, 2 decimals, only values within
 40..300; empty when bpm is 0) with `bpm_alternatives_note`, `double_tempo_evidence` with
 `double_tempo_evidence_note` (diagnostic, see below), `tempo_cnn` (learned estimate, see below), `beats` (s, ms rounding),
-`downbeats: {"status":"not_provided"}`, `key` (`tonic`, `scale`, `strength`, `profile: "bgate"`), `key_sections`
+`downbeats: {"status":"not_provided"}` without the section model, `key` (`tonic`, `scale`, `strength`, `profile: "bgate"`), `key_sections`
 (rows `{start, end, tonic, scale, strength}`, see below), `key_change_count` (sections - 1), `key_section_window`
 (20), `chords` (see below), `chords_grid` (`beat` or `frame`), `chord_frame_segment_count` (frame-level segment
 count before the beat vote, stored file only), `chords_reliability` (`low_reference`, or `reference_candidate` for BTC
@@ -235,7 +235,7 @@ material is not measured. A non-finite native chord strength becomes `strength: 
 Accuracy (honest notes): every value is a DSP estimate. On synthetic tests a 120 BPM click track gives 120.0 BPM
 (confidence ~3.9) and a C-Am-F-G triad loop gives C major with the four chords at the right 2 s boundaries; real
 music has not been measured. Confidence and strengths are native and uncalibrated. Chords are major/minor triads
-only, a low-reliability reference, not a transcription. There are no downbeats, bars or time signature. A 600 s
+only, a low-reliability reference, not a transcription. Downbeats and bars need the section model ("Musical units"); there is no time signature. A 600 s
 synthetic file (C-Am-F-G loop) took about 7.65 s and ~1.10 GB peak RSS on this Mac with worker 0.2.2 and the
 model present (3 runs; the same worker with the model unavailable: 6.8 s, 0.97-0.99 GB, equal to worker 0.2.1, so
 TempoCNN adds about +0.85 s wall / +1.45 s CPU and +0.12 GB peak RSS). Earlier: worker 0.2.1 6.8 s; 0.2.0 on
@@ -345,7 +345,7 @@ the same file: 6.3 s, 0.99 GB).
 ### Energy and sections (worker 0.3.0)
 
 Purpose: song-level form for "compose using this song as a reference" (where material repeats, where it gets loud),
-not a transcription. There are no downbeats, and named parts only with the section model ("Sections from All-In-One").
+not a transcription. Downbeats ("Musical units") and named parts ("Sections from All-In-One") need the section model.
 
 - `energy` `{unit: "dBFS", step_s: 1, values}`: RMS level of the 16 kHz source per non-overlapping 1 s window
   `[i, i+1)` (a last partial window of at least 0.5 s is kept, a shorter one dropped; at most 600 values), in dB
@@ -707,6 +707,28 @@ goes, at most 20% false activity on songs without it. On one real song the entri
 Limits: a quiet part can read as off, and -15 dB was the top of the range tried. A cello or similar low instrument can read as bass.
 The accompaniment is not judged on or off, because it sounds almost all the time; read its rate instead. Instruments are not named.
 Section labels are not corrected by this: similar chords and busy vocals did not mean a chorus on the real song.
+
+### Musical units (worker 0.14.0)
+
+Existing results grouped by bar, for reading a song the way it is written. It needs no config of its own and no new model: it comes
+with the section model and reads the downbeats that model already finds, the chords, and the drum hits. Key stays in `key` and `key_sections`.
+
+- `rhythm.downbeats` is `{status: "done", method, reliability: "reference_candidate", count}`, or `{status: "not_provided", reason}`
+  without the section model. The times are the `start` of each bar.
+- `rhythm.bars` is `{status: "done", method, reliability: "reference_candidate", bar_count}`, or `null`. Read the rows with `/timeline`
+  `layer=bars`: `{start, end, chord, kick, snare}`, one per pair of consecutive downbeats, so anything before the first or after the last
+  downbeat is in no bar. `chord` is the label sounding longest in the bar, `N` for none, `null` unless BTC made the chords. `kick` and
+  `snare` list steps 0 to 15 of 16 equal steps, `null` without a drum layer.
+
+Evaluated locally on RWC-P songs 51-100 against the aligned annotations and MIDI. Downbeats, the chord root per bar, and kick and snare
+steps each passed the bar set beforehand, and the downbeats beat every 4th Essentia beat.
+
+Limits: a wrong downbeat shifts every bar built on it; two songs scored under 50 on downbeats. The model can stop before the music does:
+on one real song the bars ended about 11 s early. Steps read as a 4/4 grid even when a bar has another length. Drum scores leave out songs
+whose MIDI has no standard kick or snare notes.
+
+A key path computed from the bars' chords is not included. There is no human key annotation to check it against, its agreement with
+annotated chords passed at every setting tried, and on a real song only one setting found a half-step rise a person heard, about 8 s early.
 
 ### Chord display (worker 0.10.0)
 
@@ -1090,7 +1112,7 @@ cleanup, so it alone does not prove the pipeline is idle).
    check (including 0 < duration <= 600 s) and no-overwrite hard link. A canonical WAV (PCM mono 16 kHz s16) skips
    afconvert. A conversion failure gives 400 `invalid_audio`; size limits, magic-byte detection and framing are
    unchanged.
-12. Optional rhythm layer (not in v0.6): `rhythm=1` on `/analyze`, a `rhythm` summary in `/report`, `layer=beats|chords|energy|melody|genre|bass|other|drums`
+12. Optional rhythm layer (not in v0.6): `rhythm=1` on `/analyze`, a `rhythm` summary in `/report`, `layer=beats|chords|energy|melody|genre|bass|other|drums|bars`
    on `/timeline`, and a `rhythm` object in `/status` (see "Optional rhythm layer"). New rhythm work and the `/status`
    field need the `rhythm` config key; `/report` and `/timeline` read stored files whenever they exist. The receipt
    records the ASR outcome only; the rhythm result lives in `results-rhythm/`. The worker runs while the API gate is

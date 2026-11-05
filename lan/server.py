@@ -60,7 +60,7 @@ RHYTHM_BASS_KEYS = {"basic_pitch_python"}
 RHYTHM_SECTIONS_KEYS = {"allin1_python", "allin1_model"}
 SEP_DIR = "sep"  # per-request scratch of the rhythm worker, under the upload directory
 RHYTHM_DIR = "results-rhythm"  # under root: <result_id>.json, 0600, written atomically
-RHYTHM_LAYERS = ("beats", "chords", "energy", "melody", "genre", "bass", "other", "drums")
+RHYTHM_LAYERS = ("beats", "chords", "energy", "melody", "genre", "bass", "other", "drums", "bars")
 RHYTHM_MAX_BEATS = 5000
 RHYTHM_MAX_CHORDS = 20000
 RHYTHM_MAX_KEY_SECTIONS = 64  # worker 0.2.0 emits <= 30 (20 s windows over 600 s)
@@ -923,7 +923,7 @@ def check_rhythm(v):
             return None
         for k in ("downbeats", "tool"):
             d = v.get(k)
-            if not isinstance(d, dict) or len(d) > 8 or not all(_short_str(x, 200) for x in d.values()):
+            if not isinstance(d, dict) or len(d) > 8 or not all(_short_str(x, 200) or (k, n) == ("downbeats", "count") for n, x in d.items()):
                 return None
         w = v.get("warnings")
         if not isinstance(w, list) or len(w) > 32 or not all(_short_str(x, 200) for x in w):
@@ -937,7 +937,7 @@ def check_rhythm(v):
         if (not _rhythm_v2_ok(v, dur) or not _rhythm_v21_ok(v) or not _rhythm_v22_ok(v)
                 or not _rhythm_v30_ok(v, dur) or not _rhythm_v40_ok(v, dur) or not _rhythm_v43_ok(v, dur)
                 or not _rhythm_v50_ok(v, dur) or not _rhythm_v80_ok(v, dur) or not _rhythm_v90_ok(v, dur)
-                or not _rhythm_v110_ok(v) or not _rhythm_v120_ok(v, dur) or not _rhythm_v130_ok(v)):
+                or not _rhythm_v110_ok(v) or not _rhythm_v120_ok(v, dur) or not _rhythm_v130_ok(v) or not _rhythm_v140_ok(v, dur)):
             return None
         for k in ("worker_sha256", "words_sha256"):  # server-added identities
             if k in v and not (isinstance(v[k], str) and RE_HEX64.match(v[k])):
@@ -1576,8 +1576,37 @@ def _rhythm_v120_ok(v, dur):
     return _note_layer_ok(v, dur, "other", OTHER_MAX_NOTES, OTHER_FAIL_REASONS | BASS_FINAL_REASONS | {"too_many_notes"})
 
 
+BAR_MAX = 2000  # worker cap
+BAR_ROW_KEYS = {"start", "end", "chord", "kick", "snare"}
 PART_ROW_KEYS = {"start", "end", "label", "vocals", "bass", "drums", "bass_notes_per_s", "other_notes_per_s", "drum_hits_per_s"}
 PART_RATE_MAX = 1000
+
+
+def _unit_rows_ok(rows, dur):
+    """Contiguous rows inside the song, in time order."""
+    return (isinstance(rows, list) and 0 < len(rows) <= BAR_MAX
+            and all(isinstance(r, dict) and _num(r.get("start"), 0, dur) and _num(r.get("end"), 0, dur) and r["start"] < r["end"] for r in rows)
+            and all(a["end"] == b["start"] for a, b in zip(rows, rows[1:])))
+
+
+def _rhythm_v140_ok(v, dur):
+    """Worker 0.14.0: downbeats and the bars, which exist only together."""
+    d, bars = v["downbeats"], v.get("bars")
+    if d.get("status") != "done":
+        return bars is None and "count" not in d
+    if not (set(d) == {"status", "method", "reliability", "count"} and d["reliability"] == "reference_candidate"
+            and isinstance(bars, dict) and set(bars) == {"status", "method", "reliability", "rows"} and bars["status"] == "done"
+            and bars["reliability"] == "reference_candidate" and _short_str(bars["method"], 200)
+            and _unit_rows_ok(bars["rows"], dur) and d["count"] == len(bars["rows"]) + 1):
+        return False
+    for r in bars["rows"]:
+        if not (set(r) == BAR_ROW_KEYS and (r["chord"] is None or _short_str(r["chord"], 24))):
+            return False
+        for c in ("kick", "snare"):
+            s = r[c]
+            if not (s is None or (isinstance(s, list) and all(_int(x, 0, 15) for x in s) and s == sorted(set(s)))):
+                return False
+    return True
 
 
 def _rhythm_v130_ok(v):
@@ -1703,6 +1732,13 @@ def _tempo_cnn_retry(v):
     return t.get("status") == "unavailable" or (t.get("status") == "failed" and t.get("code") in TEMPO_CNN_RETRY_CODES)
 
 
+def bars_view(bars):
+    """Summary form of stored bars: rows only from /timeline layer=bars (bar_count instead)."""
+    if bars is None:
+        return None
+    return dict({k: x for k, x in bars.items() if k != "rows"}, bar_count=len(bars["rows"]))
+
+
 def rhythm_summary(v, overview=None):
     """Compact view for analyze and /report; beats and chord rows stay in the stored file (/timeline).
     Fields from worker 0.2.0 (bpm_alternatives[_note], key_sections, key_change_count, chords_grid) and 0.2.1
@@ -1724,7 +1760,7 @@ def rhythm_summary(v, overview=None):
             "energy_summary": v.get("energy_summary"), "sections": v.get("sections"),
             "sections_method": v.get("sections_method"), "sections_reliability": v.get("sections_reliability"),
             "sections_model": v.get("sections_model"),
-            "melody": v.get("melody"), "bass": v.get("bass"), "other": v.get("other"), "drums": v.get("drums"), "parts": v.get("parts"), "lyric_repeats": v.get("lyric_repeats"), "overview": overview,
+            "melody": v.get("melody"), "bass": v.get("bass"), "other": v.get("other"), "drums": v.get("drums"), "parts": v.get("parts"), "bars": bars_view(v.get("bars")), "lyric_repeats": v.get("lyric_repeats"), "overview": overview,
             "genre": genre_view(v.get("genre")),
             "downbeats": v["downbeats"],
             "duration": v["duration"], "tool": v["tool"],
@@ -2220,6 +2256,8 @@ def rhythm_page(rid, v, layer, start, end, cursor, limit):
                 if start <= i * e["step_s"] <= end]
     elif layer == "drums":  # hits whose time lies in [start, end]
         rows = [h for h in v["drum_hits"] if start <= h["time"] <= end]
+    elif layer == "bars":  # bars overlapping [start, end]
+        rows = [r for r in v["bars"]["rows"] if r["end"] >= start and r["start"] <= end]
     elif layer == "genre":  # 30 s windows overlapping [start, end]; none unless the genre status is done
         g = v["genre"]
         rows = [w for w in g.get("windows", []) if w["end"] >= start and w["start"] <= end]
@@ -2252,6 +2290,9 @@ def rhythm_page(rid, v, layer, start, end, cursor, limit):
     elif layer == "drums":
         out["layer_status"] = v["drums"]["status"]
         out["reliability"] = "reference_candidate"
+    elif layer == "bars":
+        out["layer_status"] = v["bars"]["status"]
+        out["reliability"] = v["bars"]["reliability"]
     elif layer == "melody":
         out["layer_status"] = v["melody"]["status"]
         out["reliability"] = "low_reference"
@@ -3051,7 +3092,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(200, v)
 
     def rhythm_timeline(self, app, rid, q):
-        """layer=beats|chords|energy|melody|genre|bass|other|drums, served from the stored rhythm file with the native range/limit/cursor rules."""
+        """layer=beats|chords|energy|melody|genre|bass|other|drums|bars, served from the stored rhythm file with the native range/limit/cursor rules."""
         vals = {}
         for k, default in (("start", 0.0), ("end", 600.0)):
             if k in q:
@@ -3090,6 +3131,8 @@ class Handler(BaseHTTPRequestHandler):
         if q["layer"] == "other" and "other_notes" not in v:  # not configured, or stored before worker 0.12.0
             raise HttpError("rhythm_not_found")
         if q["layer"] == "drums" and "drum_hits" not in v:  # not configured, or stored before worker 0.9.0
+            raise HttpError("rhythm_not_found")
+        if q["layer"] == "bars" and "bars" not in v:  # no section model, or stored before worker 0.14.0
             raise HttpError("rhythm_not_found")
         self.send_json(200, rhythm_page(rid, v, q["layer"], vals["start"], vals["end"], cursor, limit))
 
