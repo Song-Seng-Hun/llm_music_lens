@@ -19,10 +19,10 @@ Nothing here is installed. No LaunchAgent, firewall rule, certificate or key is 
 | `bass_onsets.py` | Optional bass layer: Basic Pitch note starts, run by `rhythm_worker.py` in its own environment |
 | `other_notes.py` | Optional accompaniment layer: Basic Pitch notes of the other stem, run by `rhythm_worker.py` in its own environment |
 | `adtof_model.py` | Optional drum layer: ADTOF Frame_RNN inference on CPU, run by `rhythm_worker.py` as its own process (separate implementation, reads the official checkpoint) |
-| `limit_exec.py` | Sets RLIMIT_CPU 60 s / FSIZE 24 MiB / NOFILE 32, then `execv /usr/bin/afconvert -f WAVE -d LEI16@16000 -c 1 src dst` |
+| `limit_exec.py` | Sets RLIMIT_CPU 60 s / FSIZE 24 MiB / NOFILE 32, then `execv /usr/bin/afconvert -f WAVE -d LEI16@16000 -c 1 src dst`. Two more fixed modes for the ear check: `--listen SRC DST` (`-d LEI16@44100 -c 1`, FSIZE 56 MiB) and `--earcheck PYTHON SCRIPT RESULT SRC START END OUT LAYERS` (FSIZE 16 MiB, NOFILE 64, `execv PYTHON -I SCRIPT ...`) |
 | `sign.py` | Shared canonical-string and HMAC helper (server, tests, Python clients) |
 | `sheet.py` | LLM sheet: compact section-indexed text/JSON of a stored rhythm result, served at `/sheet/<id>` (stdlib only) |
-| `ear_check.py` | Ear check for a person: left ear the original, right ear a synth replay of a stored result, loudness following the original (local tool, not served; needs numpy) |
+| `ear_check.py` | Ear check for a person: left ear the original, right ear a synth replay of a stored result, loudness following the original (local tool, and run by the server for `POST /earcheck/<id>` under the rhythm python; needs numpy) |
 | `sign_vector.mjs` | Reference Node signer; prints or checks the fixed vector (`tests/vectors.json`) |
 | `examples/api.example.json` | Example production config (`~/.music-lens/api.json`, mode 0600) |
 | `examples/com.music-lens.lan-api.plist.template` | LaunchAgent **template** |
@@ -60,7 +60,13 @@ afconvert -f m4af -d aac -b 192000 check.wav check.m4a                         #
 rows and would leave the right ear silent. `SOURCE.wav` is any PCM 16/24/32-bit or float WAV of the same audio. Limits: the accompaniment layer has many notes
 and plays quietly; a note an octave above another note sounding at the same time may be a real note or an overtone,
 and the result cannot tell them apart. A filter that dropped such notes was tried and rejected: on a song with real
-octave jumps it cut the played high octave. Tests: `tests/test_ear_check.py` (skipped without numpy).
+octave jumps it cut the played high octave. Tests: `tests/test_ear_check.py` (skipped without numpy). Before deploying the LAN
+route, run it once with the configured rhythm python (`<rhythm python> -I -m unittest discover -s tests -p
+test_ear_check.py`): its `ServedTest` runs `ear_check.py` under `limit_exec.py --earcheck` (CPU 60 s, FSIZE 16 MiB,
+NOFILE 64) and fails if numpy does not start under those limits.
+
+A LAN client can get the same file from the server: `POST /earcheck/<result_id>?start=&end=` with the audio
+re-uploaded (see "Optional rhythm layer"); spans there are at most 30 s.
 
 ## Signing (summary)
 
@@ -83,7 +89,7 @@ Do these only after approving an always-on listener (RunAtLoad + KeepAlive, en0/
 
 1. Copy the code:
    ```sh
-   mkdir -p ~/tools/music-lens/api && cp ~/dev/llm_music_lens/lan/{server.py,limit_exec.py,sign.py,sheet.py} ~/tools/music-lens/api/
+   mkdir -p ~/tools/music-lens/api && cp ~/dev/llm_music_lens/lan/{server.py,limit_exec.py,sign.py,sheet.py,ear_check.py} ~/tools/music-lens/api/
    chmod 700 ~/tools/music-lens/api
    ```
 2. Create the TLS certificate and key by hand. They must have a DNS SAN and **named-curve** P-256 parameters.
@@ -218,8 +224,25 @@ API:
   timed with N.C., melody, parts, drum coverage and groove ID), each layer marked detected / empty / unavailable /
   failed. Give an LLM the sheet first and let it drill down with `/timeline` for exact rows. No stored file: 404
   `rhythm_not_found`; a damaged one: `invalid_result`. Question-test results: [docs/sheet-eval.md](docs/sheet-eval.md).
+- `POST /earcheck/<id>?start=<s>&end=<s>[&layers=<csv>]`, body = the song's audio again (WAV, MP3 or M4A; the server
+  deletes uploads after every job, so the client re-uploads). Returns an ear-check file for a person: left ear the
+  original, right ear `ear_check.py`'s synth replay of the stored result, as `{"result_id", "start", "end", "layers",
+  "format": "wav", "sample_rate": 44100, "channels": 2, "bytes", "sha256", "audio_base64"}`. `start >= 0`,
+  `0 < end - start <= 30` (numbers as in `/timeline`), `layers` a subset of `melody,bass,other,chords,drums,clicks`
+  (default all but `clicks`); anything else, unknown or repeated keys: 400 `bad_request`. Same signing, framing, size
+  limit, formats, staging and `Expect: 100-continue` as `/analyze`. The stored file is checked before the body is
+  read: 404 `rhythm_not_found`, 500 `invalid_result`. No `rhythm` config or no `ear_check.py` next to `server.py`:
+  503 `earcheck_unavailable`. It holds the API gate, and after the upload the team flock, so it never runs beside an
+  analysis (409 `busy`). The upload is always converted with `limit_exec.py --listen` (44.1 kHz mono; the analyze path's 16 kHz
+  is too dull to listen to) and checked strictly; a start past the audio's end gives 400 `invalid_argument`. The
+  synth runs as `limit_exec.py --earcheck <rhythm python> <install dir>/ear_check.py <stored file> ...` (cwd `/`,
+  minimal env, own session, 60 s wall timeout with the process group killed: 504 `timeout`; a failed run or an
+  output that is not a stereo 44.1 kHz WAV of at most the span: 500 `earcheck_failed`). It is synchronous and has
+  no receipt: nothing is stored and nothing runs after the reply, so a retry with a new nonce is always safe. The
+  upload, the converted file and the output are deleted in every path; the log holds ids, exit codes and seconds
+  only. 30 s gives 5,292,044 bytes, about 7.06 MB in base64, under the 8 MiB response cap.
 - `GET /status`: when the layer is configured, adds `rhythm: {configured, python_present, worker_present,
-  worker_sha256}` (file checks only, Essentia is not run; `worker_sha256` is the start-time hash, null if unreadable). Not configured: native bytes unchanged (no `rhythm` key means unavailable).
+  worker_sha256, ..., earcheck_available}` (`earcheck_available`: `ear_check.py` is next to `server.py`) (file checks only, Essentia is not run; `worker_sha256` is the start-time hash, null if unreadable). Not configured: native bytes unchanged (no `rhythm` key means unavailable).
 
 `bpm_confidence_band` maps the native confidence to Essentia's documented BeatTrackerMultiFeature bands:
 `very_low` [0, 1), `low` [1, 1.5], `good` (1.5, 3.5] (Essentia: about 80% AMLt), `excellent` above 3.5. It is
@@ -1236,7 +1259,10 @@ cleanup, so it alone does not prove the pipeline is idle).
 
 1. Conversion writes to `uploads/<op>/converted.wav` and not straight to the inbox. That file then gets the
    same strict check and the same no-overwrite hard link as an uploaded WAV. The 88 MiB staging quota is
-   64 MiB of upload plus 24 MiB of converted output.
+   64 MiB of upload plus 24 MiB of converted output. An ear check stages at most 64 MiB of upload, 56 MiB of
+   `listen.wav` and 16 MiB of `earcheck.wav` in `uploads/ec-<hex>/`. No receipt can own such a directory, so a
+   crash leftover is removed at the next start (`earcheck_leftovers_removed` with the count; only `ec-*`
+   directories, only the known file names).
 2. The strict WAV check also accepts WAVE_FORMAT_EXTENSIBLE, but only as plain 16-bit integer PCM (mono, mask 0 or 4,
    PCM GUID). `afconvert -f WAVE -d LEI16@16000 -c 1` writes this format for mono 16 kHz sources such as the
    fixture's M4A. The native analyzer (Python 3.12 `wave`) accepts it, and native validation stays authoritative.
