@@ -22,6 +22,7 @@ Nothing here is installed. No LaunchAgent, firewall rule, certificate or key is 
 | `limit_exec.py` | Sets RLIMIT_CPU 60 s / FSIZE 24 MiB / NOFILE 32, then `execv /usr/bin/afconvert -f WAVE -d LEI16@16000 -c 1 src dst` |
 | `sign.py` | Shared canonical-string and HMAC helper (server, tests, Python clients) |
 | `sheet.py` | LLM sheet: compact section-indexed text/JSON of a stored rhythm result, served at `/sheet/<id>` (stdlib only) |
+| `ear_check.py` | Ear check for a person: left ear the original, right ear a synth replay of a stored result, loudness following the original (local tool, not served; needs numpy) |
 | `sign_vector.mjs` | Reference Node signer; prints or checks the fixed vector (`tests/vectors.json`) |
 | `examples/api.example.json` | Example production config (`~/.music-lens/api.json`, mode 0600) |
 | `examples/com.music-lens.lan-api.plist.template` | LaunchAgent **template** |
@@ -41,6 +42,25 @@ WAV check, and `NODE` (or `node` on PATH) runs the signer vector test.
 
 Tests bind 127.0.0.1 only through the test-only `"test_mode": true` config flag. A production config (no
 `test_mode`) refuses loopback, `0.0.0.0`, literal bind IPs, port 0, `limits` overrides and `test_ready_file`.
+
+## Ear check (local, for a person)
+
+Hear whether a stored rhythm result matches the song: the left ear plays the original, the right ear a synth built
+only from the result's rows (melody, bass, accompaniment, chord pad, drums; clicks at bar starts on request). The right
+ear's loudness follows the original over 0.4 s windows, so both sides sit at the same level. Notes play at their
+detected pitch. Run it with a python that has numpy (for example the Essentia or emotion runtime):
+
+```sh
+python -I ear_check.py RESULT.json SOURCE.wav 60 85 check.wav                  # default layers, at most 60 s
+python -I ear_check.py RESULT.json SOURCE.wav 30 50 check.wav bass,drums,clicks  # chosen layers
+afconvert -f m4af -d aac -b 192000 check.wav check.m4a                         # optional, smaller file
+```
+
+`RESULT.json` is the stored worker file (`<root>/results-rhythm/<result_id>.json`); an API response has no note
+rows and would leave the right ear silent. `SOURCE.wav` is any PCM 16/24/32-bit or float WAV of the same audio. Limits: the accompaniment layer has many notes
+and plays quietly; a note an octave above another note sounding at the same time may be a real note or an overtone,
+and the result cannot tell them apart. A filter that dropped such notes was tried and rejected: on a song with real
+octave jumps it cut the played high octave. Tests: `tests/test_ear_check.py` (skipped without numpy).
 
 ## Signing (summary)
 
