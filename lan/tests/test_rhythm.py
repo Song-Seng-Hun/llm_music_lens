@@ -511,7 +511,7 @@ class RhythmAnalyzeTest(RhythmBase):
         self.assertEqual(len(calls), 1)
         inbox_name = self.env.argv_log()[-1][1]
         # same promoted WAV, argv; the ASR words of the result on stdin
-        self.assertEqual(calls[0]["argv"], ["--words-stdin", os.path.join(self.env.inbox, inbox_name)])
+        self.assertEqual(calls[0]["argv"], ["--words-stdin", "--time-budget", "300", os.path.join(self.env.inbox, inbox_name)])
         self.assertEqual(json.loads(calls[0]["stdin"]), {"words": [[w["text"], w["start"], w["end"]] for w in WORDS]})
         self.assertTrue(calls[0]["exists"])
         self.assertTrue(calls[0]["lock_held"], "team flock held while the worker runs")
@@ -1228,7 +1228,7 @@ class RhythmReadTest(RhythmBase):
     def test_status_reports_availability(self):
         st, b = self.c.json("GET", "/status")
         self.assertEqual(b["rhythm"], {"configured": True, "python_present": True, "worker_present": True,
-                                       "worker_sha256": self.worker_sha(), "separation_configured": False, "chord_model_configured": False, "bass_configured": False, "drums_configured": False, "sections_configured": False})
+                                       "worker_sha256": self.worker_sha(), "separation_configured": False, "chord_model_configured": False, "bass_configured": False, "drums_configured": False, "sections_configured": False, "singing_configured": False})
         self.assertEqual(b["tool_version"], "fake")
 
     def test_timeline_beats_paging(self):
@@ -2267,7 +2267,7 @@ class RealWorkerTest(unittest.TestCase):
             self.assertEqual((v["sample_rate"], v["chords_reliability"]), (44100, "low_reference"))
             self.assertIn(v["duration"], (30.0, 60.0))
             self.assertEqual(v["tool"]["essentia_version"], "2.1-beta6-dev")
-            self.assertEqual(v["tool"]["version"], "0.20.0")
+            self.assertEqual(v["tool"]["version"], "0.21.0")
             g = v["genre"]
             self.assertEqual(g["status"], "done" if GENRE_PRESENT else "unavailable", g)
             if GENRE_PRESENT:  # measured: 29 patches for 30 s, 59 for 60 s (hop 0.992 s, first from ~2.04 s)

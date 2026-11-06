@@ -12,6 +12,10 @@ Usage: <essentia python> -I rhythm_worker.py [--words-stdin] WAV
        (0.17.0: the same options also give mix and part_positions from a stereo decode, see "Mix and stereo" in README.md.)
        (0.19.0: and tone from those stems, see "Part tone" in README.md.)
        (0.20.0: vocal melody notes get a scoop join, see "Vocal melody" in README.md.)
+       --singing-python /abs/python (0.21.0; with the Demucs options: vocal melody notes from YourMT3+ singing notes,
+       RMVPE notes as the fallback, see "Sung notes" in README.md)
+       --time-budget S (0.21.0; the server always passes it): the seconds the server gives this run; the singing step
+       fits in what is left of it. Without it the server's default 300 s is assumed.
        --chord-model /abs/btc_model_large_voca.pt (0.7.0; chords from BTC instead of ChordsDetection)
        --basic-pitch-python /abs/python (0.8.0; with the Demucs options: a bass layer, see "Bass notes" below, and from
        0.12.0 an accompaniment layer, see "Accompaniment notes" in README.md)
@@ -190,17 +194,21 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import time
 import unicodedata
 import wave
 
-TOOL = {"name": "music-lens-rhythm-worker", "version": "0.20.0"}
+TOOL = {"name": "music-lens-rhythm-worker", "version": "0.21.0"}
 SRC_RATE = 16000
 RATE = 44100
 MAX_SECONDS = 600.0
 MIN_SECONDS = 1.0  # below this the analysis is refused
 SHORT_SECONDS = 10.0  # below this a warning is added
+START = time.monotonic()  # reset in main; sing_input counts the server's time from here
+BUDGET = 300.0  # s; --time-budget, else SING_BUDGET (set in main)
 WALL_SECONDS = 330  # self-bound in case the parent never kills us (server wall timeout is 300 s)
 CPU_SECONDS = 600
+SING_CPU_SECONDS = 1800  # hard CPU limit; only sing_notes.py raises its soft limit to it (600 s vocal: 995 s CPU)
 HOP = 2048
 FRAME = 4096
 KEY_PROFILE = "bgate"
@@ -413,10 +421,28 @@ CHORD_TONES = {"": (4, 7), "m": (3, 7), "dim": (3, 6), "aug": (4, 8), "m6": (3, 
                "sus2": (2, 7), "sus4": (5, 7)}
 SEP_RETRY_REASONS = ("models_invalid", "decode_failed", "separation_failed", "rmvpe_failed")
 SEP_FLAGS = {"--demucs": "demucs", "--rmvpe-model": "rmvpe", "--melody-scratch": "scratch", "--melody-source": "source",
-             "--basic-pitch-python": "basic_pitch", "--drum-model": "drum_model",
+             "--basic-pitch-python": "basic_pitch", "--drum-model": "drum_model", "--singing-python": "singing_python",
              "--sections-python": "sections_python", "--sections-model": "sections_model"}
 MEL_METHOD_VOCAL = ("Demucs htdemucs_ft vocal at 44.1 kHz, then RMVPE threshold 0.03 on CPU in 30 s pieces; "
                     "same note segmentation and merge as the mix method, then scoop join. The vocal stem can include backing vocals.")
+# Sung notes (0.21.0, optional): YourMT3+ on the same Demucs vocal, program 100 (singing voice). RWC-P songs 76-100 against
+# MIDI vocal notes (Goal V, bars fixed before scoring): pitch F 30.5 -> 54.2, rhythm F 61.0 -> 75.7; songs 51-75 38.0 -> 60.6
+# and 63.3 -> 80.1. About 80 s and 14.3 GB for a 600 s vocal on CPU, so it runs last, inside what is left of the server's
+# 300 s, and RMVPE notes stay the fallback.
+SING_DIR = os.path.expanduser("~/tools/music-lens/models/yourmt3")
+SING_CKPT = "amt/logs/2024/mc13_256_g4_all_v7_mt3f_sqr_rms_moe_wf4_n8k2_silu_rope_rp_b36_nops/checkpoints/last.ckpt"
+SING_CKPT_SHA256 = "bd7b9b6e609c05478eff4b9f5c574e6635fd6e6b306036eed1cb1466e775e5c4"  # weights-only copy (state_dict)
+SING_CKPT_MAX_BYTES = 512 * 1024 * 1024
+SING_CODE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sing_notes.py")
+SING_CODE_SHA256 = "82806f9225a98e3041eb689d6e8a09169ad1414fe2a2eb272fa3030e4f55c505"
+SING_CODE_MAX_BYTES = 16 * 1024
+SING_BUDGET = 300.0  # s; the server's default rhythm_timeout, used when --time-budget is absent
+SING_RESERVE = 10.0  # s kept for the steps after it (600 s file: the worker ended under 1 s after this step) and the server
+SING_MIN = 20.0  # s; with less left the model is not started
+SING_MAX = 150.0  # s; the most it may take (600 s vocal: about 80 s)
+SING_FAIL_REASONS = ("models_invalid", "notes_failed", "timeout", "no_time", "too_many_notes", "no_notes")
+MEL_METHOD_SING = ("Demucs htdemucs_ft vocal at 44.1 kHz, then YourMT3+ (mc13 MoE, CPU) notes on program 100, singing voice; "
+                   "no merge. The vocal stem can include backing vocals.")
 MEL_METHOD = ("EqualLoudness+PredominantPitchMelodia 16 kHz frame 1024 hop 128 (predominant pitch of the full mix); "
               "0.2 s median f0 (cents); PitchContourSegmentation notes, midi rounded; vibrato/same-pitch merge")
 NOTE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
@@ -1717,6 +1743,55 @@ def other_input(sep, n16, vocal_reason):
         sep["other"] = ({"status": "done", "method": OTHER_METHOD, "reliability": "low_reference", "note_count": len(rows)}, rows)
 
 
+def sing_stem_notes(sep, duration, left):
+    """(rows, None) or (None, reason). The scratch holds full/vocals.wav. left: seconds this step may take."""
+    if left < SING_MIN:
+        return None, "no_time"
+    if (read_pinned(SING_CODE, SING_CODE_SHA256, SING_CODE_MAX_BYTES, keep=False)[0]
+            or read_pinned(os.path.join(SING_DIR, SING_CKPT), SING_CKPT_SHA256, SING_CKPT_MAX_BYTES, keep=False)[0]):
+        return None, "models_invalid"
+    d = sep["scratch"]
+    out, tmp = os.path.join(d, "sing-notes.json"), os.path.join(d, "sing-tmp")
+    os.makedirs(tmp, mode=0o700, exist_ok=True)
+    env = {"PATH": "/usr/bin:/bin", "HOME": os.path.expanduser("~"), "LANG": "en_US.UTF-8", "TMPDIR": tmp, "MPLCONFIGDIR": tmp,
+           "NUMBA_CACHE_DIR": tmp, "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "WANDB_MODE": "disabled"}
+    try:
+        code = subprocess.run([sep["singing_python"], "-I", "-W", "ignore", SING_CODE, SING_DIR, os.path.join(d, "full", "vocals.wav"), out],
+                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env, cwd="/",
+                              timeout=min(left, SING_MAX)).returncode
+    except subprocess.TimeoutExpired:
+        return None, "timeout"
+    if code:
+        return None, "notes_failed"
+    with open(out) as f:
+        v = json.load(f)
+    rows = []
+    for s, e, m in v:
+        if not (isinstance(s, float) and isinstance(e, float) and math.isfinite(s) and math.isfinite(e)
+                and isinstance(m, int) and 0 <= m <= 127):
+            return None, "notes_failed"
+        start, end = r3(max(s, 0.0)), r3(min(e, duration))
+        if start < end:
+            rows.append({"start": start, "end": end, "midi": m, "note": note_name(m)})
+    rows.sort(key=lambda r: (r["start"], r["end"], r["midi"]))
+    if not rows:
+        return None, "no_notes"  # e.g. every note tagged chorus: keep the RMVPE notes
+    return (None, "too_many_notes") if len(rows) > MELODY_MAX_NOTES else (rows, None)
+
+
+def sing_input(sep, n16, vocal_reason):
+    """Sets sep["sing"] to (field, rows). Runs last before the scratch goes, in the time left. Never raises."""
+    if vocal_reason or not os.path.isfile(os.path.join(sep["scratch"], "full", "vocals.wav")):
+        sep["sing"] = ({"status": "skipped", "reason": "no_vocal"}, [])
+        return
+    left = BUDGET - SING_RESERVE - (time.monotonic() - START)
+    try:
+        rows, reason = sing_stem_notes(sep, n16 / SRC_RATE, left)
+    except Exception:
+        rows, reason = None, "notes_failed"
+    sep["sing"] = ({"status": "skipped", "reason": reason}, []) if reason else ({"status": "done"}, rows)
+
+
 def clean_downbeats(times, duration):
     """Rounded ascending downbeats inside the song, or [] when they cannot make at least one bar."""
     if not (isinstance(times, list) and all(isinstance(t, (int, float)) and math.isfinite(t) for t in times)):
@@ -2327,6 +2402,7 @@ def melody_input(sep, n16):
         sep["bass"] = sep["other"] = sep["drums"] = sep["sections"] = ({"status": "skipped", "reason": "canonical_16k"}, [])
         sep["parts"] = ({"status": "skipped", "reason": "canonical_16k"}, None)
         sep["stereo"] = ({"status": "skipped", "reason": "canonical_16k"}, {"status": "skipped", "reason": "canonical_16k"}, None)
+        sep["sing"] = ({"status": "skipped", "reason": "canonical_16k"}, [])
         return None, None, {"status": "skipped", "reason": "canonical_16k"}
     try:
         pitch, stem, reason = vocal_pitch(sep, n16)
@@ -2342,14 +2418,17 @@ def melody_input(sep, n16):
             sections_input(sep, n16, reason)
         parts_input(sep, reason)
         stereo_input(sep, reason)
+        if sep.get("singing_python"):
+            sing_input(sep, n16, reason)
     finally:
         shutil.rmtree(sep["scratch"], ignore_errors=True)
     return pitch, stem, {"status": "done"} if reason is None else {"status": "skipped", "reason": reason}
 
 
-def melody(x16, duration, tonic, scale, sections, sep=None, separated=None):
+def melody(x16, duration, tonic, scale, sections, sep=None, separated=None, sing=None):
     """(melody dict, notes, warnings) for the 16 kHz source; never raises (failure -> status failed, no notes).
-    separated: melody_input's result when the caller already ran it."""
+    separated: melody_input's result when the caller already ran it. sing: sing_input's (field, rows) when the singing
+    model is configured; done rows replace the RMVPE notes, which stay the fallback (0.21.0)."""
     try:
         import essentia.standard as es
         import numpy as np
@@ -2384,7 +2463,13 @@ def melody(x16, duration, tonic, scale, sections, sep=None, separated=None):
         notes = merge_notes(notes)
         if vocal:
             notes = same_pitch_join(scoop_join(notes), MERGE_GAP)  # a dip inside a held note leaves two same-pitch pieces
+        sung = vocal and sing is not None and sing[0].get("status") == "done"
+        if sung:
+            notes = [dict(n) for n in sing[1]]
+            raw = len(notes)
         warns = []
+        if vocal and sing is not None and sing[0].get("reason") in SING_FAIL_REASONS:
+            warns.append("melody_singing_failed: %s, used RMVPE notes" % sing[0]["reason"])
         if separation.get("reason") in SEP_RETRY_REASONS:
             warns.append("melody_separation_failed: %s, used the mix method" % separation["reason"])
         if not notes:
@@ -2393,7 +2478,9 @@ def melody(x16, duration, tonic, scale, sections, sep=None, separated=None):
         summary["note_count_raw"] = raw
         summary["separation"] = separation
         if vocal:
-            summary["method"] = MEL_METHOD_VOCAL
+            summary["method"] = MEL_METHOD_SING if sung else MEL_METHOD_VOCAL
+        if sing is not None:
+            summary["singing"] = sing[0]
         if summary["scale_degrees"] is None and notes:
             warns.append("melody_scale_degrees_unavailable: key tonic not recognized")
         if len(notes) > MELODY_MAX_NOTES:
@@ -2552,7 +2639,8 @@ def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None, genre_di
         sections, sec_warn, sec_debug = structure(pcp_rows, mfcc_rows, frame_times, beats, duration, energy, chords)
     if sec_warn:
         warnings.append(sec_warn)
-    mel, mel_notes, mel_warn = melody(x16, r3(duration), str(tonic), str(scale), sections, separated=separated)
+    mel, mel_notes, mel_warn = melody(x16, r3(duration), str(tonic), str(scale), sections, separated=separated,
+                                      sing=sep.get("sing") if sep and sep.get("singing_python") else None)
     warnings.extend(mel_warn)
     bass, bass_notes = sep.get("bass", (None, [])) if sep and sep.get("basic_pitch") else (None, [])
     if bass and bass.get("reason") in BASS_FAIL_REASONS:
@@ -2635,7 +2723,7 @@ def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None, genre_di
 def main(argv):
     model, use_model, use_words, rest = TEMPO_CNN_MODEL, False, False, list(argv[1:])
     genre_dir, use_genre = GENRE_DIR, False
-    sep, chord_model = {}, None
+    sep, chord_model, budget = {}, None, None
     usage = ("usage: rhythm_worker.py [--tempo-cnn-model /abs/model.pb] [--genre-models /abs/dir] [--words-stdin] "
              "[--demucs /abs --rmvpe-model /abs --melody-scratch /abs [--melody-source /abs]] "
              "[--sections-python /abs --sections-model /abs] [--chord-model /abs] /absolute/path.wav")
@@ -2646,6 +2734,9 @@ def main(argv):
             genre_dir, use_genre, rest = rest[1], True, rest[2:]
         elif rest[0] == "--words-stdin" and not use_words:
             use_words, rest = True, rest[1:]
+        elif rest[0] == "--time-budget" and not budget and len(rest) > 2 and re.fullmatch(r"[0-9]{1,4}(\.[0-9]{1,3})?", rest[1]) \
+                and float(rest[1]) > 0:
+            budget, rest = float(rest[1]), rest[2:]
         elif rest[0] == "--chord-model" and not chord_model and len(rest) > 2 and os.path.isabs(rest[1]):
             chord_model, rest = rest[1], rest[2:]
         elif SEP_FLAGS.get(rest[0]) and SEP_FLAGS[rest[0]] not in sep and len(rest) > 2 and os.path.isabs(rest[1]):
@@ -2664,8 +2755,10 @@ def main(argv):
             words, words_reason = None, "words_unreadable"
     signal.signal(signal.SIGALRM, on_alarm)
     signal.alarm(WALL_SECONDS)
+    global START, BUDGET
+    START, BUDGET = time.monotonic(), budget or SING_BUDGET
     try:
-        resource.setrlimit(resource.RLIMIT_CPU, (CPU_SECONDS, CPU_SECONDS))
+        resource.setrlimit(resource.RLIMIT_CPU, (CPU_SECONDS, SING_CPU_SECONDS if sep.get("singing_python") else CPU_SECONDS))
     except (ValueError, OSError):
         pass
     try:

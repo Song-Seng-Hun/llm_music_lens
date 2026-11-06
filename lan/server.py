@@ -58,6 +58,7 @@ RHYTHM_KEYS = {"python", "worker"}
 RHYTHM_SEPARATION_KEYS = {"demucs", "rmvpe"}
 RHYTHM_BASS_KEYS = {"basic_pitch_python"}
 RHYTHM_SECTIONS_KEYS = {"allin1_python", "allin1_model"}
+RHYTHM_SINGING_KEYS = {"yourmt3_python"}
 SEP_DIR = "sep"  # per-request scratch of the rhythm worker, under the upload directory
 RHYTHM_DIR = "results-rhythm"  # under root: <result_id>.json, 0600, written atomically
 RHYTHM_LAYERS = ("beats", "chords", "energy", "melody", "genre", "bass", "other", "drums", "bars")
@@ -595,8 +596,8 @@ def load_config(path):
     cfg["rhythm"] = None
     if "rhythm" in raw:  # optional layer; absent = unavailable
         rh = raw["rhythm"]
-        if not isinstance(rh, dict) or set(rh) - {"separation", "chord_model", "bass", "drum_model", "sections"} != RHYTHM_KEYS:
-            raise ConfigError("rhythm must be an object with python, worker and optionally separation, chord_model, bass, drum_model and sections")
+        if not isinstance(rh, dict) or set(rh) - {"separation", "chord_model", "bass", "drum_model", "sections", "singing"} != RHYTHM_KEYS:
+            raise ConfigError("rhythm must be an object with python, worker and optionally separation, chord_model, bass, drum_model, sections and singing")
         sp = rh.get("separation")
         if "separation" in rh and (not isinstance(sp, dict) or set(sp) != RHYTHM_SEPARATION_KEYS):
             raise ConfigError("rhythm separation must be an object with exactly demucs and rmvpe")
@@ -608,10 +609,13 @@ def load_config(path):
         sc = rh.get("sections")
         if "sections" in rh and (not sp or not isinstance(sc, dict) or set(sc) != RHYTHM_SECTIONS_KEYS):
             raise ConfigError("rhythm sections needs separation and exactly allin1_python and allin1_model")
+        sg = rh.get("singing")
+        if "singing" in rh and (not sp or not isinstance(sg, dict) or set(sg) != RHYTHM_SINGING_KEYS):
+            raise ConfigError("rhythm singing needs separation and exactly yourmt3_python")
         out = {}
         for k, raw_path in [("python", rh["python"]), ("worker", rh["worker"])] + sorted((sp or {}).items()) + (
                 [("chord_model", rh["chord_model"])] if "chord_model" in rh else []) + sorted((ba or {}).items()) + (
-                [("drum_model", rh["drum_model"])] if "drum_model" in rh else []) + sorted((sc or {}).items()):
+                [("drum_model", rh["drum_model"])] if "drum_model" in rh else []) + sorted((sc or {}).items()) + sorted((sg or {}).items()):
             out[k] = _abs(raw_path, "rhythm " + k)
             try:
                 st = os.stat(out[k])
@@ -629,6 +633,8 @@ def load_config(path):
             raise ConfigError("rhythm basic_pitch_python not executable")
         if sc and not os.access(out["allin1_python"], os.X_OK):
             raise ConfigError("rhythm allin1_python not executable")
+        if sg and not os.access(out["yourmt3_python"], os.X_OK):
+            raise ConfigError("rhythm yourmt3_python not executable")
         cfg["rhythm"] = out
     return cfg
 
@@ -1203,6 +1209,8 @@ DRUM_FAIL_REASONS = frozenset(("models_invalid", "decode_failed", "separation_fa
 SECTIONS_MODEL_FAIL_REASONS = frozenset(("models_invalid", "decode_failed", "separation_failed", "sections_failed", "too_many_sections"))
 SEP_RETRY_REASONS = frozenset(("models_invalid", "decode_failed", "separation_failed", "rmvpe_failed"))
 SEP_REASONS = SEP_RETRY_REASONS | {"not_configured", "canonical_16k", "band_limited"}
+SING_RETRY_REASONS = frozenset(("models_invalid", "notes_failed"))  # timeout, no_time, too_many_notes and no_notes stay: same audio, same cost
+SING_REASONS = SING_RETRY_REASONS | {"no_vocal", "canonical_16k", "timeout", "no_time", "too_many_notes", "no_notes"}
 
 
 def _notes_per_second(notes):
@@ -1247,6 +1255,14 @@ def _melody_done_ok(m, v, dur, notes):
                                                      and sp["status"] == "skipped" and sp["reason"] in SEP_REASONS):
             return False
         keys.discard("separation")
+    if "singing" in m:  # worker 0.21.0: whether the notes come from YourMT3+ singing notes, and why not
+        sg = m["singing"]
+        if sg != {"status": "done"} and not (isinstance(sg, dict) and set(sg) == {"status", "reason"}
+                                             and sg["status"] == "skipped" and sg["reason"] in SING_REASONS):
+            return False
+        if sg == {"status": "done"} and m.get("separation") != {"status": "done"}:
+            return False
+        keys.discard("singing")
     if keys != MELODY_KEYS or m["reliability"] != "low_reference" or not _short_str(m["method"], 200):
         return False
     n = m["note_count"]
@@ -1837,6 +1853,18 @@ def _melody_can_improve(v):
     m = v.get("melody")
     sp = m.get("separation") if isinstance(m, dict) else None
     return isinstance(sp, dict) and sp.get("reason") in ("not_configured", "canonical_16k")
+
+
+def _singing_can_improve(v, separable):
+    """With the singing model configured and an upload that can give a vocal: a stored melody that never had it, or whose
+    run failed in a way that can change (models_invalid, notes_failed). A 16 kHz upload never recomputes for this."""
+    if not separable:
+        return False
+    m = v.get("melody")
+    if not isinstance(m, dict) or m.get("status") != "done":
+        return False
+    sg = m.get("singing")
+    return not isinstance(sg, dict) or sg.get("reason") in SING_RETRY_REASONS or sg.get("reason") == "canonical_16k"
 
 
 def _tempo_cnn_retry(v):
@@ -2541,7 +2569,7 @@ class App:
                 "worker_present": os.path.isfile(rh["worker"]), "worker_sha256": self.rhythm_worker_sha256,
                 "separation_configured": "demucs" in rh, "chord_model_configured": "chord_model" in rh,
                 "bass_configured": "basic_pitch_python" in rh, "drums_configured": "drum_model" in rh,
-                "sections_configured": "allin1_model" in rh}
+                "sections_configured": "allin1_model" in rh, "singing_configured": "yourmt3_python" in rh}
 
     def lyric_words(self, rid):
         """(--words-stdin bytes, their SHA-256) from the ml result file <root>/results/<rid>.json (read-only)."""
@@ -2600,7 +2628,8 @@ class App:
                 and not ("basic_pitch_python" in self.cfg["rhythm"] and (_bass_can_improve(stored, separable)
                                                                          or _other_can_improve(stored, separable)))
                 and not ("drum_model" in self.cfg["rhythm"] and _drums_can_improve(stored, separable))
-                and not ("allin1_model" in self.cfg["rhythm"] and _sections_can_improve(stored, separable))):
+                and not ("allin1_model" in self.cfg["rhythm"] and _sections_can_improve(stored, separable))
+                and not ("yourmt3_python" in self.cfg["rhythm"] and _singing_can_improve(stored, separable))):
             return dict(rhythm_summary(stored, self.rhythm_overview(result_id, stored, words, words_sha)),
                         cache_hit=True, stored=True)
         # absent (worker 0.1.0/0.2.0 files), different or unverifiable worker identity: recompute; the stored file
@@ -2662,9 +2691,12 @@ class App:
                         sep += ["--drum-model", rh["drum_model"]]
                     if "allin1_model" in rh:
                         sep += ["--sections-python", rh["allin1_python"], "--sections-model", rh["allin1_model"]]
+                    if "yourmt3_python" in rh:
+                        sep += ["--singing-python", rh["yourmt3_python"]]
                 if "chord_model" in rh:
                     sep += ["--chord-model", rh["chord_model"]]
-                p = subprocess.Popen([rh["python"], "-I", rh["worker"], "--words-stdin"] + sep + [wav], stdin=inp, stdout=out,
+                p = subprocess.Popen([rh["python"], "-I", rh["worker"], "--words-stdin", "--time-budget", "%.0f" % max(timeout, 1.0)]
+                                     + sep + [wav], stdin=inp, stdout=out,
                                      stderr=err, env=self.child_env(), cwd="/", close_fds=True, pass_fds=(lock_fd,),
                                      shell=False, start_new_session=True)
             except OSError:
