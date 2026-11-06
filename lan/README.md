@@ -63,7 +63,7 @@ Do these only after approving an always-on listener (RunAtLoad + KeepAlive, en0/
 
 1. Copy the code:
    ```sh
-   mkdir -p ~/tools/music-lens/api && cp ~/dev/music-lens-lan/{server.py,limit_exec.py,sign.py,sheet.py} ~/tools/music-lens/api/
+   mkdir -p ~/tools/music-lens/api && cp ~/dev/llm_music_lens/lan/{server.py,limit_exec.py,sign.py,sheet.py} ~/tools/music-lens/api/
    chmod 700 ~/tools/music-lens/api
    ```
 2. Create the TLS certificate and key by hand. They must have a DNS SAN and **named-curve** P-256 parameters.
@@ -1231,7 +1231,7 @@ cleanup, so it alone does not prove the pipeline is idle).
 6. An address on a bind interface that falls outside `allow` is skipped and logged. The server exits (code 1) only
    when no address remains. A production `allow` must be a private /24 or narrower.
 7. Bind addresses are read once at start. An address change needs a restart (KeepAlive does not detect it).
-8. `server.py` adds its own directory to `sys.path` because `-I` drops it. It needs this to import `sign.py`.
+8. `server.py` adds its own directory to `sys.path` because `-I` drops it. It needs this to import `sign.py` and `sheet.py`.
 9. After an early error reply, the server reads at most 1 MiB or 0.5 s of unread body before it closes, so the
    reply is not lost to a TCP reset. A large body that keeps streaming after a `busy` reply can still reset the
    connection, and the client then reports outcome unknown and reads `/receipt`. A 404 there means only that no

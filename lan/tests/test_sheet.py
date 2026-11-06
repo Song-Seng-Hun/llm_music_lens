@@ -79,9 +79,9 @@ class BarsTest(unittest.TestCase):
         v["bars"]["rows"][0:2] = [bar(0.0, 1.0, "C"), bar(1.0, 2.0, "G")]
         self.assertEqual(sheet.build(v)["sections"][0]["drums"]["status"], "empty")
 
-    def test_drums_failed(self):
-        v = self.v(drums={"status": "failed", "code": "x"})
-        self.assertEqual(sheet.build(v)["sections"][0]["drums"], {"status": "failed"})
+    def test_drums_skipped(self):
+        v = self.v(drums={"status": "skipped", "reason": "adtof_failed"})
+        self.assertEqual(sheet.build(v)["sections"][0]["drums"], {"status": "unavailable"})
 
     def test_straddling(self):
         v = self.v()
