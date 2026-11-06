@@ -193,8 +193,8 @@ API:
   `bpm_estimates`, `bpm_alternatives`, `bpm_alternatives_note`, `double_tempo_evidence`,
   `double_tempo_evidence_note`, `tempo_cnn`, `key`, `key_sections`, `key_change_count`,
   `beat_count`, `chord_segment_count`, `chords_grid`, `energy_summary`, `sections`, `sections_method`,
-  `sections_reliability`, `melody`, `lyric_repeats`, `overview`, `genre`, `downbeats`, `duration`, `tool`, `warnings`) when a stored file
-  exists, re-serializing the native JSON (number formatting may change). Files stored by worker 0.1.0 lack the
+  `sections_reliability`, `melody`, `lyric_repeats`, `overview`, `genre`, `downbeats`, `duration`, `tool`, `warnings`,
+  `read_next`) when a stored file exists, re-serializing the native JSON (number formatting may change). Files stored by worker 0.1.0 lack the
   0.2.0 fields and still load; the summary then has `bpm_alternatives`, `bpm_alternatives_note`, `key_sections`,
   `key_change_count` and `chords_grid` set to `null` (they are not recomputed; old chord rows stay frame-level).
   Files from 0.1.0 and 0.2.0 likewise give `double_tempo_evidence` and `double_tempo_evidence_note` as `null`, and
@@ -218,6 +218,10 @@ API:
   new `rhythm=1` analyze recomputes it (the worker hash changed); `invalid_argument` would wrongly blame the
   request. `layer=melody` on a file stored before worker 0.4.0 and `layer=genre` before 0.5.0 give the same 404. Sections are in the summary only (at most 40 rows), not a timeline layer.
   `words`/`emotion` still go to `ml timeline` unchanged.
+- `read_next` (in `/report` and in analyze summaries whose result is stored) points an LLM at the next reads with
+  this result's ID filled in: `sheet` (`GET /sheet/<id>`), `zoom` (`GET /sheet/<id>?start=&end=`), `earcheck` (only
+  when `POST /earcheck` is available, the same condition as `/status` `rhythm.earcheck_available` plus the rhythm
+  config) and a `note` to read the sheet first.
 - `GET /sheet/<id>?format=text|json` (default `text`) builds the LLM sheet (`sheet.py`, format `music-lens-sheet/1`) from the
   stored file: `{"result_id", "format", "text"}`, or `{"result_id", "sheet"}` with the JSON the text is rendered from.
   One block per source section (ID, times, bars, key estimate and in-section key changes, level, chords per bar or

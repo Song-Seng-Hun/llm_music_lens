@@ -2622,6 +2622,16 @@ class App:
         b = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("ascii")
         return b, hashlib.sha256(b).hexdigest()
 
+    def read_next(self, rid):
+        """Where an LLM goes after this summary; only for a stored result (the routes read the stored file)."""
+        out = {"sheet": "GET /sheet/%s" % rid,
+               "zoom": "GET /sheet/%s?start=<s>&end=<s> (at most %.0f s, bar by bar)" % (rid, sheet.ZOOM_MAX)}
+        if self.cfg.get("rhythm") and os.path.isfile(EAR_CHECK):  # the same condition as POST /earcheck
+            out["earcheck"] = ("POST /earcheck/%s?start=<s>&end=<s>, body = the same audio again (at most %.0f s; "
+                               "left ear the original, right ear a synth of this result)" % (rid, EARCHECK_MAX_SPAN))
+        out["note"] = "the sheet is a compact text reading of this summary for an LLM; read it first, then zoom or drill down"
+        return out
+
     def rhythm_overview(self, rid, v, words=None, words_sha=None):
         """overview for the summary: computed at read time from the stored dict plus, for its word counts, the ASR
         words of <root>/results/<rid>.json when they still hash to the stored words_sha256. Never raises."""
@@ -2647,7 +2657,7 @@ class App:
         # a 16 kHz upload must not replace stems with nothing, whatever else would recompute: it serves the stored file as it is
         if state == "ok" and "demucs" in self.cfg["rhythm"] and not separable and _has_separated_layer(stored):
             return dict(rhythm_summary(stored, self.rhythm_overview(result_id, stored, words, words_sha)),
-                        cache_hit=True, stored=True)
+                        read_next=self.read_next(result_id), cache_hit=True, stored=True)
         if (state == "ok" and cur is not None and stored.get("worker_sha256") == cur
                 and stored.get("words_sha256") == words_sha and not _rhythm_retry(stored)
                 and not (separable and _melody_can_improve(stored))
@@ -2660,7 +2670,7 @@ class App:
                 and not ("allin1_model" in self.cfg["rhythm"] and _sections_can_improve(stored, separable))
                 and not ("yourmt3_python" in self.cfg["rhythm"] and _singing_can_improve(stored, separable))):
             return dict(rhythm_summary(stored, self.rhythm_overview(result_id, stored, words, words_sha)),
-                        cache_hit=True, stored=True)
+                        read_next=self.read_next(result_id), cache_hit=True, stored=True)
         # absent (worker 0.1.0/0.2.0 files), different or unverifiable worker identity: recompute; the stored file
         # is replaced only after a successful run, so /report and /timeline keep the old one until then
         if self.stopping:
@@ -2698,8 +2708,11 @@ class App:
         except OSError:
             self.log.event("rhythm_store_failed", id=job.rid)
             stored = False
-        return dict(rhythm_summary(data, self.rhythm_overview(result_id, data, words, words_sha)), cache_hit=False,
-                    stored=stored)
+        out = dict(rhythm_summary(data, self.rhythm_overview(result_id, data, words, words_sha)), cache_hit=False,
+                   stored=stored)
+        if stored:
+            out["read_next"] = self.read_next(result_id)
+        return out
 
     def _spawn_rhythm(self, rh, wav, lock_fd, timeout, words, job, separable):
         lim = self.limits
@@ -3234,7 +3247,7 @@ class Handler(BaseHTTPRequestHandler):
             st, v = app.load_rhythm(m.group(1))
             extra = None
             if st == "ok":
-                extra = ("rhythm", rhythm_summary(v, app.rhythm_overview(m.group(1), v)))
+                extra = ("rhythm", dict(rhythm_summary(v, app.rhythm_overview(m.group(1), v)), read_next=app.read_next(m.group(1))))
             elif st == "invalid":
                 extra = ("rhythm", {"status": "failed", "code": "invalid_result"})
             return self.read_call(app, ["report", m.group(1)], extra=extra)
