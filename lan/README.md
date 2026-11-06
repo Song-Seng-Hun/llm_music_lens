@@ -628,7 +628,7 @@ every checkpoint read is forced to `weights_only`.
 What happens on a rhythm request: after every other stem layer, the worker runs YourMT3+ on CPU on the same Demucs vocal
 and keeps the notes on program 100 (singing voice); chorus (101), other programs and drums are dropped. Those notes
 replace the RMVPE notes with no merge, scoop join or other rule. RMVPE still runs: `voiced_fraction` and `voiced_s` come
-from it, and its notes are the fallback. The step gets the time left of the server's 300 s, minus 45 s for what
+from it, and its notes are the fallback. The step gets the time left of the server's 300 s, minus 10 s for what
 follows, and at most 150 s; with under 20 s left it does not start. The server passes its real limit for the run with
 `--time-budget` (`rhythm_timeout`, 300 s by default, less when the request's own deadline is near).
 

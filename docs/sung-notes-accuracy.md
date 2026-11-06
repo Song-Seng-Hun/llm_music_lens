@@ -28,9 +28,12 @@ Both halves pass the bar.
 | Input | Wall time | Peak memory | CPU time |
 |---|---|---|---|
 | 600 s vocal, YourMT3+ alone | 82.4 s | 14.3 GB | 995 s (826 user, 168 sys) |
+| 600 s vocal from the server's mono decode, YourMT3+ alone | 84.2 s | 12.6 GB | 1,017 s (840 user, 177 sys) |
 | 600 s file, whole worker 0.20.0 as the server runs it | 150 s | 14.5 GB | not measured |
+| 600 s file, whole worker 0.21.0, singing step not limited | 262 s | 14.5 GB | 1,636 s (758 user, 878 sys) |
 
-M4 Max, 64 GB. The whole 0.21.0 worker on a 600 s file is measured at install, against the server's 300 s limit.
+M4 Max, 64 GB. Inside the worker the singing step started at 152 s and took 110 s, slower than alone; the worker ended
+under 1 s after it. The server's limit is 300 s, so the step keeps a 10 s reserve.
 
 ## Limits
 
