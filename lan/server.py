@@ -141,6 +141,7 @@ EARCHECK_DEFAULT = ("melody", "bass", "other", "chords", "drums")  # ear_check.D
 EARCHECK_MAX_SPAN = 30.0  # s; 30 s stereo s16 44.1 kHz = 5,292,044 bytes, base64 7.06 MB < response_max 8 MiB
 LISTEN_RATE = 44100
 LISTEN_MAX_BYTES = 56 * MiB  # limit_exec.LISTEN_FSIZE_BYTES
+RE_EARCHECK_OP = re.compile(r"\Aec-[0-9a-f]{32}\Z")  # uploads/ec-<hex>: ear-check staging, never owned by a receipt
 
 
 class ConfigError(Exception):
@@ -2508,6 +2509,13 @@ class App:
                            paths=[self.uploads + "/" + str(r["op"]) + "/", cfg["inbox"] + "/api-" + str(r["op"]) + ".wav"])
         self.gate = threading.Lock()
         self.conn_lock, self.conns = threading.Lock(), 0
+        swept = 0
+        for name in os.listdir(self.uploads):  # ear-check crash leftovers: no receipt can own them
+            if RE_EARCHECK_OP.match(name) and stat.S_ISDIR(os.lstat(self.uploads + "/" + name).st_mode):
+                self.cleanup(name, False)
+                swept += 1
+        if swept:
+            self.log.event("earcheck_leftovers_removed", count=swept)
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         ctx.options |= getattr(ssl, "OP_NO_COMPRESSION", 0) | getattr(ssl, "OP_NO_RENEGOTIATION", 0)
@@ -3419,8 +3427,11 @@ class Handler(BaseHTTPRequestHandler):
         always safe. Holds the API gate and the team flock, so it never runs beside an analysis."""
         lim = app.limits
         q = parse_query(query, ("start", "end", "layers"))
-        if "start" not in q or "end" not in q or not RE_NUM.match(q["start"]) or not RE_NUM.match(q["end"]):
+        if "start" not in q or "end" not in q:
             raise HttpError("bad_request")
+        for k in ("start", "end"):
+            if not RE_NUM.match(q[k]) or q[k].startswith("-"):  # also "-0"
+                raise HttpError("bad_request")
         start, end = float(q["start"]), float(q["end"])
         if start < 0 or not 0 < end - start <= EARCHECK_MAX_SPAN:
             raise HttpError("bad_request")
@@ -3440,7 +3451,7 @@ class Handler(BaseHTTPRequestHandler):
             raise HttpError("invalid_result")
         if not app.gate.acquire(blocking=False):
             raise HttpError("busy")
-        op, lfd = secrets.token_hex(16), None
+        op, lfd = "ec-" + secrets.token_hex(16), None
         t0 = time.monotonic()
         try:
             with app.job_lock:
@@ -3448,19 +3459,20 @@ class Handler(BaseHTTPRequestHandler):
                     raise HttpError("shutting_down")
             if shutil.disk_usage(app.cfg["root"]).free < lim["disk_floor"]:
                 raise HttpError("insufficient_storage")
-            try:
-                lfd = os.open(app.team_lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-                fcntl.flock(lfd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # a Mac-side `ml analyze` holds it: busy, as /analyze gets
-            except BlockingIOError:
-                raise HttpError("busy")
-            except OSError:
-                raise HttpError("storage_error")
+            app.log.event("earcheck_start", id=rid, op=op, result_id=result_id)
             if expect_continue:
                 self.sock.settimeout(lim["send_timeout"])
                 self.sock.sendall(b"HTTP/1.1 100 Continue\r\n\r\n")
             code, kind, _ = self.stage(app, op, cl, rest, body_sha)
             if code is not None:
                 raise HttpError(code)
+            try:  # after the upload, so a Mac-side `ml analyze` is not blocked while the client sends
+                lfd = os.open(app.team_lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+                fcntl.flock(lfd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # held by `ml analyze`: busy, as /analyze gets
+            except BlockingIOError:
+                raise HttpError("busy")
+            except OSError:
+                raise HttpError("storage_error")
             d = app.uploads + "/" + op
             listen, out = d + "/listen.wav", d + "/earcheck.wav"
             rc = app.convert(d + "/upload." + kind, listen, listen=True)

@@ -60,7 +60,10 @@ afconvert -f m4af -d aac -b 192000 check.wav check.m4a                         #
 rows and would leave the right ear silent. `SOURCE.wav` is any PCM 16/24/32-bit or float WAV of the same audio. Limits: the accompaniment layer has many notes
 and plays quietly; a note an octave above another note sounding at the same time may be a real note or an overtone,
 and the result cannot tell them apart. A filter that dropped such notes was tried and rejected: on a song with real
-octave jumps it cut the played high octave. Tests: `tests/test_ear_check.py` (skipped without numpy).
+octave jumps it cut the played high octave. Tests: `tests/test_ear_check.py` (skipped without numpy). Before deploying the LAN
+route, run it once with the configured rhythm python (`<rhythm python> -I -m unittest discover -s tests -p
+test_ear_check.py`): its `ServedTest` runs `ear_check.py` under `limit_exec.py --earcheck` (CPU 60 s, FSIZE 16 MiB,
+NOFILE 64) and fails if numpy does not start under those limits.
 
 A LAN client can get the same file from the server: `POST /earcheck/<result_id>?start=&end=` with the audio
 re-uploaded (see "Optional rhythm layer"); spans there are at most 30 s.
@@ -229,8 +232,8 @@ API:
   (default all but `clicks`); anything else, unknown or repeated keys: 400 `bad_request`. Same signing, framing, size
   limit, formats, staging and `Expect: 100-continue` as `/analyze`. The stored file is checked before the body is
   read: 404 `rhythm_not_found`, 500 `invalid_result`. No `rhythm` config or no `ear_check.py` next to `server.py`:
-  503 `earcheck_unavailable`. It holds the API gate and the team flock, so it never runs beside an analysis (409
-  `busy`). The upload is always converted with `limit_exec.py --listen` (44.1 kHz mono; the analyze path's 16 kHz
+  503 `earcheck_unavailable`. It holds the API gate, and after the upload the team flock, so it never runs beside an
+  analysis (409 `busy`). The upload is always converted with `limit_exec.py --listen` (44.1 kHz mono; the analyze path's 16 kHz
   is too dull to listen to) and checked strictly; a start past the audio's end gives 400 `invalid_argument`. The
   synth runs as `limit_exec.py --earcheck <rhythm python> <install dir>/ear_check.py <stored file> ...` (cwd `/`,
   minimal env, own session, 60 s wall timeout with the process group killed: 504 `timeout`; a failed run or an
@@ -1257,8 +1260,9 @@ cleanup, so it alone does not prove the pipeline is idle).
 1. Conversion writes to `uploads/<op>/converted.wav` and not straight to the inbox. That file then gets the
    same strict check and the same no-overwrite hard link as an uploaded WAV. The 88 MiB staging quota is
    64 MiB of upload plus 24 MiB of converted output. An ear check stages at most 64 MiB of upload, 56 MiB of
-   `listen.wav` and 16 MiB of `earcheck.wav` in `uploads/<op>/`; a server crash mid-request can leave that
-   directory behind (no receipt names it), like an `/analyze` crash leftover.
+   `listen.wav` and 16 MiB of `earcheck.wav` in `uploads/ec-<hex>/`. No receipt can own such a directory, so a
+   crash leftover is removed at the next start (`earcheck_leftovers_removed` with the count; only `ec-*`
+   directories, only the known file names).
 2. The strict WAV check also accepts WAVE_FORMAT_EXTENSIBLE, but only as plain 16-bit integer PCM (mono, mask 0 or 4,
    PCM GUID). `afconvert -f WAVE -d LEI16@16000 -c 1` writes this format for mono 16 kHz sources such as the
    fixture's M4A. The native analyzer (Python 3.12 `wave`) accepts it, and native validation stays authoritative.

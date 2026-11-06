@@ -127,6 +127,7 @@ class EarcheckRouteTest(EarcheckBase):
         self.assertEqual(call["argv"], ["-I", os.path.join(REPO, "ear_check.py"), self.rhythm_file(),
                                         call["argv"][3], "0.500000", "1.750000", call["argv"][6], "bass,drums,clicks"])
         self.assertTrue(call["argv"][3].endswith("/listen.wav") and call["argv"][6].endswith("/earcheck.wav"))
+        self.assertRegex(call["argv"][3], r"/uploads/ec-[0-9a-f]{32}/listen\.wav\Z")
         self.assertEqual((call["src_rate"], call["src_channels"]), (44100, 1))  # listening rate, not the 16 kHz analyze path
         self.assertEqual(call["cwd"], "/")
         self.assertTrue({"HOME", "LANG", "PATH", "TMPDIR"} <= set(call["env_keys"]))  # the /usr/bin/python3 shim adds its own
@@ -138,6 +139,8 @@ class EarcheckRouteTest(EarcheckBase):
         self.assertNotIn(b["audio_base64"][:64], log)
         ev = [e for e in self.env.log_events() if e.get("event") == "earcheck_exit"]
         self.assertEqual((len(ev), ev[0]["rc"], ev[0]["result_id"]), (1, 0, RID64))
+        ev = [e for e in self.env.log_events() if e.get("event") == "earcheck_start"]
+        self.assertEqual((len(ev), ev[0]["op"]), (1, call["argv"][3].split("/")[-2]))
 
     def test_default_layers_and_max_span_fits(self):
         self.store()
@@ -153,7 +156,7 @@ class EarcheckRouteTest(EarcheckBase):
         self.store()
         for t in (target("0", "30.5"), target("-1", "2"), target("2", "2"), target("3", "2"), target("0", "1", "bass,piano"),
                   target("0", "1", "bass,bass"), target("0", "1", ""), target(extra="&x=1"), target(extra="&start=0"),
-                  target("1e1", "2"), "/earcheck/%s?end=2" % RID64, "/earcheck/%s" % RID64):
+                  target("1e1", "2"), target("-0", "2"), target("-0.0", "2"), target("0", "-0"), "/earcheck/%s?end=2" % RID64, "/earcheck/%s" % RID64):
             st, b = self.post(t)
             self.assertEqual((st, b["error"]["code"]), (400, "bad_request"), t)
         self.assertEqual(self.fp.calls(), [])
@@ -213,6 +216,42 @@ class EarcheckRouteTest(EarcheckBase):
         self.assertEqual(self.fp.calls(), [])
         self.assert_clean()
 
+    def test_flock_taken_after_upload(self):
+        self.store()
+        seen = []
+        orig = self.h.app.convert
+
+        def convert(*a, **kw):  # the flock is held while converting
+            fd = os.open(self.h.app.team_lock, os.O_RDWR)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                seen.append("free")
+            except BlockingIOError:
+                seen.append("held")
+            finally:
+                os.close(fd)
+            return orig(*a, **kw)
+        self.h.app.convert = convert
+        orig_stage = server.Handler.stage
+
+        def stage(handler, *a):  # ... but not while the body is received
+            fd = os.open(self.h.app.team_lock, os.O_CREAT | os.O_RDWR, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                seen.append("free")
+            except BlockingIOError:
+                seen.append("held")
+            finally:
+                os.close(fd)
+            return orig_stage(handler, *a)
+        server.Handler.stage = stage
+        try:
+            st, b = self.post(target())
+        finally:
+            server.Handler.stage = orig_stage
+        self.assertEqual((st, seen), (200, ["free", "held"]))
+        self.assert_clean()
+
     def test_expect_continue(self):
         self.store()
         st, b = self.post(target(), extra=[("Expect", "100-continue")])
@@ -239,6 +278,25 @@ class EarcheckTimeoutTest(EarcheckBase):
         with self.assertRaises(ProcessLookupError):
             os.kill(pid, 0)
         self.assert_clean()
+
+
+class EarcheckLeftoverTest(Base):
+    def test_startup_removes_only_earcheck_dirs(self):
+        up = os.path.join(self.env.root, "uploads")
+        ec, other = os.path.join(up, "ec-" + "a" * 32), os.path.join(up, "b" * 32)
+        for d in (ec, other):
+            os.mkdir(d, 0o700)
+            for n in ("upload.wav", "listen.wav", "earcheck.wav"):
+                with open(os.path.join(d, n), "wb") as f:
+                    f.write(b"RIFF")
+        self.restart()
+        self.assertEqual(self.env.uploads_entries(), ["b" * 32])
+        self.assertEqual(sorted(os.listdir(other)), ["earcheck.wav", "listen.wav", "upload.wav"])
+        ev = [e for e in self.env.log_events() if e.get("event") == "earcheck_leftovers_removed"]
+        self.assertEqual([e["count"] for e in ev], [1])
+        for n in os.listdir(other):
+            os.unlink(os.path.join(other, n))
+        os.rmdir(other)
 
 
 class EarcheckUnconfiguredTest(Base):
