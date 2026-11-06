@@ -21,7 +21,7 @@ Nothing here is installed. No LaunchAgent, firewall rule, certificate or key is 
 | `adtof_model.py` | Optional drum layer: ADTOF Frame_RNN inference on CPU, run by `rhythm_worker.py` as its own process (separate implementation, reads the official checkpoint) |
 | `limit_exec.py` | Sets RLIMIT_CPU 60 s / FSIZE 24 MiB / NOFILE 32, then `execv /usr/bin/afconvert -f WAVE -d LEI16@16000 -c 1 src dst`. Two more fixed modes for the ear check: `--listen SRC DST` (`-d LEI16@44100 -c 1`, FSIZE 56 MiB) and `--earcheck PYTHON SCRIPT RESULT SRC START END OUT LAYERS` (FSIZE 16 MiB, NOFILE 64, `execv PYTHON -I SCRIPT ...`) |
 | `sign.py` | Shared canonical-string and HMAC helper (server, tests, Python clients) |
-| `sheet.py` | LLM sheet: compact section-indexed text/JSON of a stored rhythm result, served at `/sheet/<id>` (stdlib only) |
+| `sheet.py` | LLM sheet: compact section-indexed text/JSON of a stored rhythm result, served at `/sheet/<id>`, with a bar-by-bar zoom (stdlib only) |
 | `ear_check.py` | Ear check for a person: left ear the original, right ear a synth replay of a stored result, loudness following the original (local tool, and run by the server for `POST /earcheck/<id>` under the rhythm python; needs numpy) |
 | `sign_vector.mjs` | Reference Node signer; prints or checks the fixed vector (`tests/vectors.json`) |
 | `examples/api.example.json` | Example production config (`~/.music-lens/api.json`, mode 0600) |
@@ -224,6 +224,14 @@ API:
   timed with N.C., melody, parts, drum coverage and groove ID), each layer marked detected / empty / unavailable /
   failed. Give an LLM the sheet first and let it drill down with `/timeline` for exact rows. No stored file: 404
   `rhythm_not_found`; a damaged one: `invalid_result`. Question-test results: [docs/sheet-eval.md](docs/sheet-eval.md).
+- `GET /sheet/<id>?start=<s>&end=<s>[&format=text|json]` zooms into at most 30 s (the same span as one `/earcheck`
+  clip): one block per bar overlapping the span (number as in the sheet, times, section, chord with scale and degree,
+  kick/snare 16-step pattern, other drum hits counted, melody and bass as `name@step+length` on that bar's 16-step
+  grid, other notes as count and range). Rows belong to the bar holding their onset (the last half step rounds to
+  the next bar's step 0, as in the kick/snare grid); rows starting outside the span are left out; a skipped layer is
+  unavailable, not empty; bars without chords (chord model off) list the timed chords instead; rows in no bar, and every row of a result without bars, are listed by time. JSON:
+  `{"result_id", "zoom"}` (format `music-lens-sheet-zoom/1`). Both or neither of `start`/`end`; a span over 30 s, an
+  empty span or a start at or past the song's end: 400 `bad_request`.
 - `POST /earcheck/<id>?start=<s>&end=<s>[&layers=<csv>]`, body = the song's audio again (WAV, MP3 or M4A; the server
   deletes uploads after every job, so the client re-uploads). Returns an ear-check file for a person: left ear the
   original, right ear `ear_check.py`'s synth replay of the stored result, as `{"result_id", "start", "end", "layers",

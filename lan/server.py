@@ -3266,15 +3266,30 @@ class Handler(BaseHTTPRequestHandler):
         m = ROUTE_SHEET.match(path)
         if m:
             self.info["route"] = "/sheet/:id"
-            q = parse_query(query, ("format",))
+            q = parse_query(query, ("format", "start", "end"))
             fmt = q.get("format", "text")
-            if fmt not in ("text", "json"):
+            if fmt not in ("text", "json") or ("start" in q) != ("end" in q):
                 raise HttpError("bad_request")
+            span = None
+            if "start" in q:  # zoom: bar-by-bar reading of at most sheet.ZOOM_MAX s
+                for k in ("start", "end"):
+                    if not RE_NUM.match(q[k]) or q[k].startswith("-"):  # also "-0"
+                        raise HttpError("bad_request")
+                span = float(q["start"]), float(q["end"])
+                if not 0 < round(span[1] - span[0], 6) <= sheet.ZOOM_MAX:  # round: 2.2 to 32.2 is 30 s
+                    raise HttpError("bad_request")
             st, v = app.load_rhythm(m.group(1))
             if st == "missing":
                 raise HttpError("rhythm_not_found")
             if st != "ok":
                 raise HttpError("invalid_result")
+            if span is not None:
+                if span[0] >= v["duration"]:
+                    raise HttpError("bad_request")
+                z = json.loads(json.dumps(sheet.zoom(v, span[0], span[1], m.group(1))))
+                if fmt == "json":
+                    return self.send_json(200, {"result_id": m.group(1), "zoom": z})
+                return self.send_json(200, {"result_id": m.group(1), "format": z["format"], "text": sheet.render_zoom(z)})
             sh = json.loads(json.dumps(sheet.build(v, m.group(1))))  # the text is rendered from the JSON form only
             if fmt == "json":
                 return self.send_json(200, {"result_id": m.group(1), "sheet": sh})
@@ -3433,7 +3448,7 @@ class Handler(BaseHTTPRequestHandler):
             if not RE_NUM.match(q[k]) or q[k].startswith("-"):  # also "-0"
                 raise HttpError("bad_request")
         start, end = float(q["start"]), float(q["end"])
-        if start < 0 or not 0 < end - start <= EARCHECK_MAX_SPAN:
+        if start < 0 or not 0 < round(end - start, 6) <= EARCHECK_MAX_SPAN:  # round: 2.2 to 32.2 is 30 s
             raise HttpError("bad_request")
         layers = EARCHECK_DEFAULT
         if "layers" in q:
