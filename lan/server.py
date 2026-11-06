@@ -40,6 +40,7 @@ from socketserver import TCPServer
 HERE = os.path.dirname(os.path.realpath(__file__))
 if HERE not in sys.path:  # -I drops the script directory from sys.path; this directory is the trusted install dir
     sys.path.insert(0, HERE)
+import sheet  # noqa: E402
 import sign  # noqa: E402
 
 HOME = os.path.expanduser("~")
@@ -124,6 +125,7 @@ RE_LIMIT = re.compile(r"\A[1-9][0-9]{0,2}\Z")
 RE_CURSOR = re.compile(r"\A(0|[1-9][0-9]{0,5})\Z")
 ROUTE_REPORT = re.compile(r"\A/report/([0-9a-f]{64})\Z")
 ROUTE_TIMELINE = re.compile(r"\A/timeline/([0-9a-f]{64})\Z")
+ROUTE_SHEET = re.compile(r"\A/sheet/([0-9a-f]{64})\Z")
 ROUTE_RECEIPT = re.compile(r"\A/receipt/([0-9a-f]{32})\Z")
 M4A_BRANDS = (b"M4A ", b"M4B ", b"mp42", b"mp41", b"isom", b"iso2")
 PCM_GUID = b"\x01\x00\x00\x00\x00\x00\x10\x00\x80\x00\x00\xaa\x00\x38\x9b\x71"
@@ -3217,6 +3219,22 @@ class Handler(BaseHTTPRequestHandler):
                     raise HttpError("bad_request")
                 args.append("--cursor=" + q["cursor"])
             return self.read_call(app, args)
+        m = ROUTE_SHEET.match(path)
+        if m:
+            self.info["route"] = "/sheet/:id"
+            q = parse_query(query, ("format",))
+            fmt = q.get("format", "text")
+            if fmt not in ("text", "json"):
+                raise HttpError("bad_request")
+            st, v = app.load_rhythm(m.group(1))
+            if st == "missing":
+                raise HttpError("rhythm_not_found")
+            if st != "ok":
+                raise HttpError("invalid_result")
+            sh = json.loads(json.dumps(sheet.build(v, m.group(1))))  # the text is rendered from the JSON form only
+            if fmt == "json":
+                return self.send_json(200, {"result_id": m.group(1), "sheet": sh})
+            return self.send_json(200, {"result_id": m.group(1), "format": sh["format"], "text": sheet.render(sh)})
         m = ROUTE_RECEIPT.match(path)
         if m:
             self.info["route"] = "/receipt/:id"

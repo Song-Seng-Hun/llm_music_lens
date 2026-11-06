@@ -21,6 +21,7 @@ Nothing here is installed. No LaunchAgent, firewall rule, certificate or key is 
 | `adtof_model.py` | Optional drum layer: ADTOF Frame_RNN inference on CPU, run by `rhythm_worker.py` as its own process (separate implementation, reads the official checkpoint) |
 | `limit_exec.py` | Sets RLIMIT_CPU 60 s / FSIZE 24 MiB / NOFILE 32, then `execv /usr/bin/afconvert -f WAVE -d LEI16@16000 -c 1 src dst` |
 | `sign.py` | Shared canonical-string and HMAC helper (server, tests, Python clients) |
+| `sheet.py` | LLM sheet: compact section-indexed text/JSON of a stored rhythm result, served at `/sheet/<id>` (stdlib only) |
 | `sign_vector.mjs` | Reference Node signer; prints or checks the fixed vector (`tests/vectors.json`) |
 | `examples/api.example.json` | Example production config (`~/.music-lens/api.json`, mode 0600) |
 | `examples/com.music-lens.lan-api.plist.template` | LaunchAgent **template** |
@@ -62,7 +63,7 @@ Do these only after approving an always-on listener (RunAtLoad + KeepAlive, en0/
 
 1. Copy the code:
    ```sh
-   mkdir -p ~/tools/music-lens/api && cp ~/dev/music-lens-lan/{server.py,limit_exec.py,sign.py} ~/tools/music-lens/api/
+   mkdir -p ~/tools/music-lens/api && cp ~/dev/llm_music_lens/lan/{server.py,limit_exec.py,sign.py,sheet.py} ~/tools/music-lens/api/
    chmod 700 ~/tools/music-lens/api
    ```
 2. Create the TLS certificate and key by hand. They must have a DNS SAN and **named-curve** P-256 parameters.
@@ -191,6 +192,12 @@ API:
   new `rhythm=1` analyze recomputes it (the worker hash changed); `invalid_argument` would wrongly blame the
   request. `layer=melody` on a file stored before worker 0.4.0 and `layer=genre` before 0.5.0 give the same 404. Sections are in the summary only (at most 40 rows), not a timeline layer.
   `words`/`emotion` still go to `ml timeline` unchanged.
+- `GET /sheet/<id>?format=text|json` (default `text`) builds the LLM sheet (`sheet.py`, format `music-lens-sheet/1`) from the
+  stored file: `{"result_id", "format", "text"}`, or `{"result_id", "sheet"}` with the JSON the text is rendered from.
+  One block per source section (ID, times, bars, key estimate and in-section key changes, level, chords per bar or
+  timed with N.C., melody, parts, drum coverage and groove ID), each layer marked detected / empty / unavailable /
+  failed. Give an LLM the sheet first and let it drill down with `/timeline` for exact rows. No stored file: 404
+  `rhythm_not_found`; a damaged one: `invalid_result`. Question-test results: [docs/sheet-eval.md](docs/sheet-eval.md).
 - `GET /status`: when the layer is configured, adds `rhythm: {configured, python_present, worker_present,
   worker_sha256}` (file checks only, Essentia is not run; `worker_sha256` is the start-time hash, null if unreadable). Not configured: native bytes unchanged (no `rhythm` key means unavailable).
 
@@ -1224,7 +1231,7 @@ cleanup, so it alone does not prove the pipeline is idle).
 6. An address on a bind interface that falls outside `allow` is skipped and logged. The server exits (code 1) only
    when no address remains. A production `allow` must be a private /24 or narrower.
 7. Bind addresses are read once at start. An address change needs a restart (KeepAlive does not detect it).
-8. `server.py` adds its own directory to `sys.path` because `-I` drops it. It needs this to import `sign.py`.
+8. `server.py` adds its own directory to `sys.path` because `-I` drops it. It needs this to import `sign.py` and `sheet.py`.
 9. After an early error reply, the server reads at most 1 MiB or 0.5 s of unread body before it closes, so the
    reply is not lost to a TCP reset. A large body that keeps streaming after a `busy` reply can still reset the
    connection, and the client then reports outcome unknown and reads `/receipt`. A 404 there means only that no
