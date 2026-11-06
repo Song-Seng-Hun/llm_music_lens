@@ -1,6 +1,7 @@
 """Ear check: hear whether a stored rhythm result matches the song. Left ear = the original audio, right ear = a synth
 replay built only from the result's rows, its loudness following the original. A person listens to both at once.
-Local tool for a person; not served by server.py. Needs numpy.
+Local tool for a person, also run by server.py for POST /earcheck (via limit_exec.py --earcheck, spans <= 30 s).
+Needs numpy.
 
 Usage: python -I ear_check.py RESULT.json SOURCE.wav START END OUT.wav [LAYERS]
   RESULT.json: the stored worker file (<root>/results-rhythm/<result_id>.json); API responses carry no note rows.

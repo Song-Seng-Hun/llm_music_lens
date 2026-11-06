@@ -150,5 +150,35 @@ class WavTest(unittest.TestCase):
         self.assertRaises(ValueError, E.render, V, src, 5.0, 6.0, out)    # past the end of the source
 
 
+@unittest.skipUnless(np is not None, "numpy missing")
+class ServedTest(unittest.TestCase):
+    """POST /earcheck runs this file with the rhythm python under limit_exec.py --earcheck; check it works there."""
+
+    def test_server_constants_match(self):
+        import server
+        self.assertEqual((server.EARCHECK_LAYERS, server.EARCHECK_DEFAULT), (E.LAYERS, E.DEFAULT))
+        self.assertLessEqual(server.EARCHECK_MAX_SPAN, E.MAX_SPAN)
+        self.assertEqual(server.LISTEN_RATE, E.SR)
+
+    def test_runs_under_limit_exec(self):
+        import json
+        import subprocess
+        import server
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with tempfile.TemporaryDirectory() as d:
+            src, res, out = os.path.join(d, "listen.wav"), os.path.join(d, "r.json"), os.path.join(d, "o.wav")
+            t = np.arange(3 * E.SR) / E.SR
+            E.write_wav(src, (np.sin(2 * np.pi * 220 * t) * 0.3).astype(np.float32), np.zeros(len(t), np.float32))
+            with open(res, "w") as f:
+                json.dump(V, f)
+            p = subprocess.run(["/usr/bin/python3", "-I", os.path.join(here, "limit_exec.py"), "--earcheck",
+                                sys.executable, os.path.join(here, "ear_check.py"), res, src, "0.500000", "2.500000",
+                                out, "melody,bass,clicks"], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                               cwd="/", timeout=120)
+            self.assertEqual(p.returncode, 0, p.stderr[-2000:])
+            n = server.pcm16_wav_data(out, 16 * 1024 * 1024, 44100, 2)
+            self.assertEqual(n, 2 * E.SR * 4)
+
+
 if __name__ == "__main__":
     unittest.main()

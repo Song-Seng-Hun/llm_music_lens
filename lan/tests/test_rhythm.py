@@ -1228,7 +1228,8 @@ class RhythmReadTest(RhythmBase):
     def test_status_reports_availability(self):
         st, b = self.c.json("GET", "/status")
         self.assertEqual(b["rhythm"], {"configured": True, "python_present": True, "worker_present": True,
-                                       "worker_sha256": self.worker_sha(), "separation_configured": False, "chord_model_configured": False, "bass_configured": False, "drums_configured": False, "sections_configured": False, "singing_configured": False})
+                                       "worker_sha256": self.worker_sha(), "separation_configured": False, "chord_model_configured": False, "bass_configured": False, "drums_configured": False, "sections_configured": False, "singing_configured": False,
+                                       "earcheck_available": True})
         self.assertEqual(b["tool_version"], "fake")
 
     def test_timeline_beats_paging(self):

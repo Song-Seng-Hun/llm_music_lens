@@ -7,6 +7,7 @@ The listener loads no model; models load only inside each `ml analyze` job's sub
 Usage: server.py [--config PATH]   (default ~/.music-lens/api.json, mode 0600)
 """
 import argparse
+import base64
 import bisect
 import errno
 import fcntl
@@ -52,6 +53,7 @@ DEFAULT_LIMITS = {
     "read_timeout": 30.0, "max_body": 64 * MiB, "disk_floor": 2 * 1024 * MiB, "ml_stdout": 8 * MiB,
     "response_max": 8 * MiB, "stderr_line": 4096, "convert_output": 4096, "log_bytes": 5 * MiB, "log_files": 3,
     "send_timeout": 30.0, "stop_grace": 630.0, "rhythm_timeout": 300.0, "rhythm_output": 4 * MiB,
+    "earcheck_timeout": 60.0,
 }
 CONFIG_KEYS = {"bind", "port", "allow", "clients", "cert", "key", "ml", "root", "inbox", "limit_exec",
                "launchd_logs", "test_mode", "limits", "test_ready_file", "rhythm"}
@@ -97,6 +99,7 @@ ERRORS = {
     "server_misconfigured": (500, "Server is misconfigured"),
     "invalid_output": (500, "Analyzer returned invalid output"),
     "invalid_result": (500, "Stored result is invalid"),
+    "earcheck_failed": (500, "Ear check synth failed"),
     "empty_output": (500, "Analyzer returned no output"),
     "cancelled": (500, "Analysis was cancelled"),
     "nonce_store_full": (503, "Nonce store full; retry later"),
@@ -106,6 +109,7 @@ ERRORS = {
     "outcome_unknown": (503, "Analysis may have run but its outcome could not be stored; "
                              "read /receipt later and do not retry"),
     "shutting_down": (503, "Server is stopping; nothing launched"),
+    "earcheck_unavailable": (503, "Ear check is not available on this server"),
     "timeout": (504, "Operation timed out"),
 }
 ML_400 = ("invalid_audio", "invalid_path", "invalid_id", "invalid_argument")
@@ -127,9 +131,16 @@ ROUTE_REPORT = re.compile(r"\A/report/([0-9a-f]{64})\Z")
 ROUTE_TIMELINE = re.compile(r"\A/timeline/([0-9a-f]{64})\Z")
 ROUTE_SHEET = re.compile(r"\A/sheet/([0-9a-f]{64})\Z")
 ROUTE_RECEIPT = re.compile(r"\A/receipt/([0-9a-f]{32})\Z")
+ROUTE_EARCHECK = re.compile(r"\A/earcheck/([0-9a-f]{64})\Z")
 M4A_BRANDS = (b"M4A ", b"M4B ", b"mp42", b"mp41", b"isom", b"iso2")
 PCM_GUID = b"\x01\x00\x00\x00\x00\x00\x10\x00\x80\x00\x00\xaa\x00\x38\x9b\x71"
-UPLOAD_NAMES = ("upload.part", "upload.wav", "upload.mp3", "upload.m4a", "converted.wav")
+UPLOAD_NAMES = ("upload.part", "upload.wav", "upload.mp3", "upload.m4a", "converted.wav", "listen.wav", "earcheck.wav")
+EAR_CHECK = os.path.join(HERE, "ear_check.py")  # run by the rhythm python (numpy); never imported here
+EARCHECK_LAYERS = ("melody", "bass", "other", "chords", "drums", "clicks")  # ear_check.LAYERS
+EARCHECK_DEFAULT = ("melody", "bass", "other", "chords", "drums")  # ear_check.DEFAULT
+EARCHECK_MAX_SPAN = 30.0  # s; 30 s stereo s16 44.1 kHz = 5,292,044 bytes, base64 7.06 MB < response_max 8 MiB
+LISTEN_RATE = 44100
+LISTEN_MAX_BYTES = 56 * MiB  # limit_exec.LISTEN_FSIZE_BYTES
 
 
 class ConfigError(Exception):
@@ -725,44 +736,51 @@ def sniff(head):
 
 def strict_wav_check(path, max_bytes=64 * MiB):
     """RIFF/WAVE, PCM (plain or EXTENSIBLE-PCM), mono, 16 kHz, s16, chunks tile the file exactly, 0 < duration <= 600 s."""
+    data = pcm16_wav_data(path, max_bytes, 16000, 1)
+    return data is not None and 0 < data / 32000.0 <= 600
+
+
+def pcm16_wav_data(path, max_bytes, rate, channels):
+    """Data bytes of a strict RIFF/WAVE s16 PCM file (plain or EXTENSIBLE-PCM) at exactly `rate` and `channels`,
+    chunks tiling the file exactly; None otherwise."""
     size = os.path.getsize(path)
     if size < 44 or size > max_bytes:
-        return False
+        return None
     with open(path, "rb") as f:
         hdr = f.read(12)
         if hdr[0:4] != b"RIFF" or hdr[8:12] != b"WAVE" or struct.unpack("<I", hdr[4:8])[0] + 8 != size:
-            return False
+            return None
         pos, fmt, data, chunks = 12, None, None, 0
         while pos < size:
             chunks += 1
             if chunks > 64 or pos + 8 > size:
-                return False
+                return None
             f.seek(pos)
             cid, csz = struct.unpack("<4sI", f.read(8))
             end = pos + 8 + csz
             if end > size:
-                return False
+                return None
             if cid == b"fmt ":
                 if fmt is not None or data is not None or csz < 16:
-                    return False
+                    return None
                 fmt = struct.unpack("<HHIIHH", f.read(16))
                 if fmt[0] == 0xFFFE:  # WAVE_FORMAT_EXTENSIBLE (afconvert writes it): accept only plain 16-bit PCM
                     if csz < 40:
-                        return False
+                        return None
                     cb, valid, mask, guid = struct.unpack("<HHI16s", f.read(24))
-                    if cb != 22 or valid != 16 or mask not in (0, 4) or guid != PCM_GUID:
-                        return False
+                    if cb != 22 or valid != 16 or mask not in (0, 4 if channels == 1 else 3) or guid != PCM_GUID:
+                        return None
                     fmt = (1,) + fmt[1:]
             elif cid == b"data":
                 if data is not None or fmt is None:
-                    return False
+                    return None
                 data = csz
             pos = end + (csz & 1)
         if pos != size or fmt is None or data is None:
-            return False
-        if fmt != (1, 1, 16000, 32000, 2, 16) or data % 2:
-            return False
-        return 0 < data / 32000.0 <= 600
+            return None
+        if fmt != (1, channels, rate, rate * 2 * channels, 2 * channels, 16) or data % (2 * channels):
+            return None
+        return data
 
 
 # ---------------------------------------------------------------- query parsing
@@ -2571,7 +2589,8 @@ class App:
                 "worker_present": os.path.isfile(rh["worker"]), "worker_sha256": self.rhythm_worker_sha256,
                 "separation_configured": "demucs" in rh, "chord_model_configured": "chord_model" in rh,
                 "bass_configured": "basic_pitch_python" in rh, "drums_configured": "drum_model" in rh,
-                "sections_configured": "allin1_model" in rh, "singing_configured": "yourmt3_python" in rh}
+                "sections_configured": "allin1_model" in rh, "singing_configured": "yourmt3_python" in rh,
+                "earcheck_available": os.path.isfile(EAR_CHECK)}
 
     def lyric_words(self, rid):
         """(--words-stdin bytes, their SHA-256) from the ml result file <root>/results/<rid>.json (read-only)."""
@@ -2818,9 +2837,20 @@ class App:
                 return False, None, "invalid_output"
             return True, data, None
 
-    def convert(self, src, dst):
-        """afconvert under limit_exec.py; returns (returncode or None on timeout)."""
-        argv = [PYTHON, "-I", self.cfg["limit_exec"], src, dst]
+    def convert(self, src, dst, listen=False):
+        """afconvert under limit_exec.py (listen: 44.1 kHz for the ear check); returns (returncode or None on timeout)."""
+        argv = [PYTHON, "-I", self.cfg["limit_exec"]] + (["--listen"] if listen else []) + [src, dst]
+        return self._run_capped(argv, self.limits["convert_timeout"])
+
+    def earcheck_synth(self, result, src, start, end, out, layers):
+        """ear_check.py under limit_exec.py --earcheck with the rhythm python (numpy); returns rc or None on timeout."""
+        argv = [PYTHON, "-I", self.cfg["limit_exec"], "--earcheck", self.cfg["rhythm"]["python"], EAR_CHECK, result,
+                src, "%.6f" % start, "%.6f" % end, out, ",".join(layers)]
+        return self._run_capped(argv, self.limits["earcheck_timeout"])
+
+    def _run_capped(self, argv, timeout):
+        """Run argv in its own session (cwd /, child env); stdout+stderr kept only up to convert_output and dropped;
+        process group killed on timeout. Returns returncode, or None on timeout."""
         p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                              env=self.child_env(), cwd="/", close_fds=True, start_new_session=True)
         cap, kept = self.limits["convert_output"], []
@@ -2837,7 +2867,7 @@ class App:
         t = threading.Thread(target=drain, daemon=True)
         t.start()
         try:
-            p.wait(self.limits["convert_timeout"])
+            p.wait(timeout)
             rc = p.returncode
         except subprocess.TimeoutExpired:
             try:
@@ -3175,6 +3205,12 @@ class Handler(BaseHTTPRequestHandler):
             if method != "POST":
                 raise HttpError("method_not_allowed")
             return self.do_analyze(app, client, nonce, query, cl, rest, vals["x-ml-body-sha256"], expect_continue)
+        m = ROUTE_EARCHECK.match(path)
+        if m:
+            self.info["route"] = "/earcheck/:id"
+            if method != "POST":
+                raise HttpError("method_not_allowed")
+            return self.do_earcheck(app, m.group(1), nonce, query, cl, rest, vals["x-ml-body-sha256"], expect_continue)
         if method != "GET":
             raise HttpError("method_not_allowed")
         if path == "/status":
@@ -3377,6 +3413,85 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(job.status, job.body)
         else:
             self.send_json(504, {"request_id": rid, "state": "running"})
+
+    def do_earcheck(self, app, result_id, rid, query, cl, rest, body_sha, expect_continue):
+        """Synchronous, no receipt: nothing is stored and nothing runs after the reply, so a retry with a new nonce is
+        always safe. Holds the API gate and the team flock, so it never runs beside an analysis."""
+        lim = app.limits
+        q = parse_query(query, ("start", "end", "layers"))
+        if "start" not in q or "end" not in q or not RE_NUM.match(q["start"]) or not RE_NUM.match(q["end"]):
+            raise HttpError("bad_request")
+        start, end = float(q["start"]), float(q["end"])
+        if start < 0 or not 0 < end - start <= EARCHECK_MAX_SPAN:
+            raise HttpError("bad_request")
+        layers = EARCHECK_DEFAULT
+        if "layers" in q:
+            layers = tuple(q["layers"].split(","))
+            if not all(x in EARCHECK_LAYERS for x in layers) or len(set(layers)) != len(layers):
+                raise HttpError("bad_request")
+        if not app.cfg.get("rhythm") or not os.path.isfile(EAR_CHECK):
+            raise HttpError("earcheck_unavailable")
+        if cl > lim["max_body"]:
+            raise HttpError("payload_too_large")
+        st, _ = app.load_rhythm(result_id)  # refused before any byte of the upload is read
+        if st == "missing":
+            raise HttpError("rhythm_not_found")
+        if st != "ok":
+            raise HttpError("invalid_result")
+        if not app.gate.acquire(blocking=False):
+            raise HttpError("busy")
+        op, lfd = secrets.token_hex(16), None
+        t0 = time.monotonic()
+        try:
+            with app.job_lock:
+                if app.stopping:
+                    raise HttpError("shutting_down")
+            if shutil.disk_usage(app.cfg["root"]).free < lim["disk_floor"]:
+                raise HttpError("insufficient_storage")
+            try:
+                lfd = os.open(app.team_lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+                fcntl.flock(lfd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # a Mac-side `ml analyze` holds it: busy, as /analyze gets
+            except BlockingIOError:
+                raise HttpError("busy")
+            except OSError:
+                raise HttpError("storage_error")
+            if expect_continue:
+                self.sock.settimeout(lim["send_timeout"])
+                self.sock.sendall(b"HTTP/1.1 100 Continue\r\n\r\n")
+            code, kind, _ = self.stage(app, op, cl, rest, body_sha)
+            if code is not None:
+                raise HttpError(code)
+            d = app.uploads + "/" + op
+            listen, out = d + "/listen.wav", d + "/earcheck.wav"
+            rc = app.convert(d + "/upload." + kind, listen, listen=True)
+            app.log.event("convert_exit", id=rid, rc=rc)
+            if rc is None:
+                raise HttpError("timeout")
+            data = pcm16_wav_data(listen, LISTEN_MAX_BYTES, LISTEN_RATE, 1) if rc == 0 and os.path.isfile(listen) else None
+            duration = data / (2.0 * LISTEN_RATE) if data else 0.0
+            if not 0 < duration <= 600:
+                raise HttpError("invalid_audio")
+            if start >= duration:
+                raise HttpError("invalid_argument")  # the span starts after the uploaded audio ends
+            rc = app.earcheck_synth(app.rhythm_path(result_id), listen, start, end, out, layers)
+            app.log.event("earcheck_exit", id=rid, result_id=result_id, rc=rc, seconds=round(time.monotonic() - t0, 3))
+            if rc is None:
+                raise HttpError("timeout")
+            frames = int((end - start) * LISTEN_RATE) + 1
+            data = pcm16_wav_data(out, 44 + frames * 4 + 64, LISTEN_RATE, 2) if rc == 0 and os.path.isfile(out) else None
+            if not data or data > frames * 4:
+                raise HttpError("earcheck_failed")
+            with open(out, "rb") as f:
+                wav = f.read()
+        finally:
+            if lfd is not None:
+                os.close(lfd)
+            app.cleanup(op, False)
+            app.gate.release()
+        self.send_json(200, {"result_id": result_id, "start": start, "end": end, "layers": list(layers),
+                             "format": "wav", "sample_rate": LISTEN_RATE, "channels": 2, "bytes": len(wav),
+                             "sha256": hashlib.sha256(wav).hexdigest(),
+                             "audio_base64": base64.b64encode(wav).decode("ascii")})
 
     def _prelaunch_fail(self, app, client, rid, op, code):
         status, body = error_body(code, request_id=rid)
