@@ -501,6 +501,8 @@ class RhythmAnalyzeTest(RhythmBase):
         r = b["rhythm"]
         self.assertEqual((r["status"], r["cache_hit"], r["stored"]), ("done", False, True))
         self.assertEqual((r["bpm"], r["key"]["tonic"], r["beat_count"], r["chord_segment_count"]), (120.0, "C", 7, 3))
+        self.assertEqual(r["read_next"]["sheet"], "GET /sheet/" + RID64)  # stored, rhythm configured: ear check offered
+        self.assertTrue(r["read_next"]["earcheck"].startswith("POST /earcheck/%s?start=<s>&end=<s>" % RID64))
         self.assertEqual((r["bpm_confidence_band"], r["bpm_estimates"]), ("excellent", RHYTHM_OUT["bpm_estimates"]))
         self.assertNotIn("beats", r)  # rows only via /timeline
         self.assertNotIn("chords", r)
@@ -542,6 +544,7 @@ class RhythmAnalyzeTest(RhythmBase):
         st, b = self.c.json("POST", AR, WAV)
         self.assertEqual(st, 200)
         self.assertEqual((b["cache_hit"], b["rhythm"]["status"], b["rhythm"]["cache_hit"]), (True, "done", True))
+        self.assertEqual(b["rhythm"]["read_next"]["sheet"], "GET /sheet/" + RID64)
         self.assertEqual(b["rhythm"]["bpm"], 120.0)
         self.assertNotIn("beats", b["rhythm"])
         self.assertEqual(len(self.fw.calls()), 1)  # not recomputed
@@ -1153,6 +1156,14 @@ class RhythmReadTest(RhythmBase):
         self.assertEqual(r["key"]["tonic"], "C")
         self.assertEqual(r["downbeats"], {"status": "not_provided"})
         self.assertNotIn("beats", r)
+        self.assertEqual(set(r["read_next"]), {"sheet", "zoom", "earcheck", "note"})  # the harness configures rhythm
+        self.assertEqual(r["read_next"]["zoom"], "GET /sheet/%s?start=<s>&end=<s> (at most 30 s, bar by bar)" % RID64)
+        cfg = self.h.app.cfg
+        self.h.app.cfg = dict(cfg, rhythm=None)  # no rhythm config: /earcheck is unavailable, so not offered
+        try:
+            self.assertNotIn("earcheck", self.c.json("GET", "/report/" + RID64)[1]["rhythm"]["read_next"])
+        finally:
+            self.h.app.cfg = cfg
         # another result id without a stored file: native bytes unchanged
         other = "cd" * 32
         st, h, raw = self.c.send("GET", "/report/" + other)
