@@ -20,7 +20,8 @@ V = {"melody_notes": [{"start": 0.5, "end": 1.0, "midi": 69}],
                      {"start": 1.5, "end": 2.0, "midi": 100}],
      "chords": [{"start": 0.0, "end": 0.5, "label": "Am"}, {"start": 2.0, "end": 3.0, "label": "N"}],
      "drum_hits": [{"time": 2.5, "class": "kick"}],
-     "downbeats": [2.75]}
+     "downbeats": {"status": "done", "method": "m", "reliability": "low_reference", "count": 2},  # stored shape: status only
+     "bars": {"status": "done", "rows": [{"start": 0.0, "end": 2.75, "chord": "Am", "kick": [], "snare": []}]}}
 
 
 def energy(x, a, b):
@@ -55,6 +56,13 @@ class SynthTest(unittest.TestCase):
         self.assertEqual(E.chord_pcs("Bb"), [10, 2, 5])
         self.assertIsNone(E.chord_pcs(None))
 
+    def test_clicks_from_bar_rows(self):
+        x = E.synth(V, 0.0, 3.0, ("clicks",))
+        self.assertGreater(energy(x, 0.0, 0.02), 0.5)    # bar start
+        self.assertGreater(energy(x, 2.75, 2.77), 0.5)   # last bar end
+        self.assertEqual(energy(x, 0.05, 2.7), 0.0)
+        self.assertEqual(energy(E.synth({"downbeats": V["downbeats"]}, 0.0, 3.0, ("clicks",)), 0.0, 3.0), 0.0)  # no bars: silent
+
     def test_missing_layers_silent(self):
         self.assertEqual(energy(E.synth({}, 0.0, 1.0), 0.0, 1.0), 0.0)
 
@@ -69,6 +77,14 @@ class FollowTest(unittest.TestCase):
         seg = lambda x, a, b: E.rms(x[int(a * E.SR):int(b * E.SR)])
         self.assertAlmostEqual(seg(r, 4.4, 5.2) / seg(r, 0.8, 1.6), 10.0, delta=1.0)
         self.assertAlmostEqual(seg(r, 4.4, 5.2), seg(left, 4.4, 5.2), delta=0.03)
+
+    def test_no_fade_at_the_ends(self):
+        t = np.arange(2 * E.SR) / E.SR
+        left = (np.sin(2 * np.pi * 220 * t) * 0.5).astype(np.float32)
+        r = E.follow(left, (np.sin(2 * np.pi * 330 * t) * 0.1).astype(np.float32))
+        seg = lambda x, a, b: E.rms(x[int(a * E.SR):int(b * E.SR)])
+        self.assertAlmostEqual(seg(r, 0.0, 0.2) / seg(r, 0.8, 1.2), 1.0, delta=0.05)
+        self.assertAlmostEqual(seg(r, 1.8, 2.0) / seg(r, 0.8, 1.2), 1.0, delta=0.05)
 
     def test_silent_synth_stays_silent(self):
         z = np.zeros(E.SR, np.float32)
@@ -100,6 +116,14 @@ class WavTest(unittest.TestCase):
         p = self.wav(np.full(22050, 0.25, "<f4").tobytes(), ch=1, bits=32, tag=3)
         self.assertEqual(len(E.read_wav(p, 0.5, 5.0)), E.SR // 2)
 
+    def test_truncated_file_reads_whole_frames(self):
+        p = self.wav(np.full((22050, 2), 1000, "<i2").tobytes())
+        with open(p, "r+b") as f:
+            f.truncate(os.path.getsize(p) - 3)  # data header still claims the full size
+        y = E.read_wav(p, 0.5, 1.0)
+        self.assertGreater(len(y), 0)
+        self.assertLess(len(y), E.SR // 2 + 1)
+
     def test_not_wav(self):
         p = os.path.join(self.d.name, "x.wav")
         with open(p, "wb") as f:
@@ -122,6 +146,8 @@ class WavTest(unittest.TestCase):
         out = os.path.join(self.d.name, "out.wav")
         self.assertRaises(ValueError, E.render, V, src, 0.0, 61.0, out)
         self.assertRaises(ValueError, E.render, V, src, 0.0, 1.0, out, ("melody", "vocals"))
+        self.assertRaises(ValueError, E.render, V, src, -0.5, 0.5, out)   # negative start
+        self.assertRaises(ValueError, E.render, V, src, 5.0, 6.0, out)    # past the end of the source
 
 
 if __name__ == "__main__":

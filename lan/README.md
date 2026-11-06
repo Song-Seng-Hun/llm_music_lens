@@ -46,7 +46,7 @@ Tests bind 127.0.0.1 only through the test-only `"test_mode": true` config flag.
 ## Ear check (local, for a person)
 
 Hear whether a stored rhythm result matches the song: the left ear plays the original, the right ear a synth built
-only from the result's rows (melody, bass, accompaniment, chord pad, drums; downbeat clicks on request). The right
+only from the result's rows (melody, bass, accompaniment, chord pad, drums; clicks at bar starts on request). The right
 ear's loudness follows the original over 0.4 s windows, so both sides sit at the same level. Notes play at their
 detected pitch. Run it with a python that has numpy (for example the Essentia or emotion runtime):
 
@@ -56,7 +56,8 @@ python -I ear_check.py RESULT.json SOURCE.wav 30 50 check.wav bass,drums,clicks 
 afconvert -f m4af -d aac -b 192000 check.wav check.m4a                         # optional, smaller file
 ```
 
-`SOURCE.wav` is any PCM 16/24/32-bit or float WAV of the same audio. Limits: the accompaniment layer has many notes
+`RESULT.json` is the stored worker file (`<root>/results-rhythm/<result_id>.json`); an API response has no note
+rows and would leave the right ear silent. `SOURCE.wav` is any PCM 16/24/32-bit or float WAV of the same audio. Limits: the accompaniment layer has many notes
 and plays quietly; a note an octave above another note sounding at the same time may be a real note or an overtone,
 and the result cannot tell them apart. A filter that dropped such notes was tried and rejected: on a song with real
 octave jumps it cut the played high octave. Tests: `tests/test_ear_check.py` (skipped without numpy).

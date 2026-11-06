@@ -3,9 +3,10 @@ replay built only from the result's rows, its loudness following the original. A
 Local tool for a person; not served by server.py. Needs numpy.
 
 Usage: python -I ear_check.py RESULT.json SOURCE.wav START END OUT.wav [LAYERS]
+  RESULT.json: the stored worker file (<root>/results-rhythm/<result_id>.json); API responses carry no note rows.
   LAYERS: comma list of melody,bass,other,chords,drums,clicks (default melody,bass,other,chords,drums); at most 60 s.
 Synth layers: melody_notes (bright triangle), bass_notes (sine + octave), other_notes (quiet pluck, E2-C6, 0.12 s or
-longer), chords (soft pad from the labels; N = silence), drum_hits (kick, snare, hihat, cymbal, tom), downbeat clicks.
+longer), chords (soft pad from the labels; N = silence), drum_hits (kick, snare, hihat, cymbal, tom), clicks at bar starts (bars rows).
 Every note plays at the detected pitch; no octave is moved. The original is never mixed into the right ear.
 Limits: a note an octave above another note sounding at the same time may be a real note or an overtone; the result
 cannot tell them apart, and a filter that dropped such notes was rejected because it cut played octave jumps."""
@@ -56,6 +57,7 @@ def read_wav(path, a, b):
                 s0, s1 = int(a * sr), min(int(b * sr), n // (ch * w))
                 f.seek(s0 * ch * w, 1)
                 raw = f.read(max(0, s1 - s0) * ch * w)
+                raw = raw[:len(raw) // (ch * w) * (ch * w)]  # a truncated file: whole frames only
                 break
             else:
                 f.seek(n + (n & 1), 1)
@@ -187,7 +189,8 @@ def synth(v, a, b, layers=DEFAULT):
     if 'clicks' in layers:
         n = int(0.02 * SR)
         cl = (np.sin(2 * np.pi * 1500 * np.arange(n) / SR) * env(n, 0.001, 0.015) * 0.3).astype(np.float32)
-        for t in v.get('downbeats') or []:
+        rows = (v.get('bars') or {}).get('rows') or []  # bar starts; the stored downbeats field is only a status
+        for t in [r['start'] for r in rows] + [rows[-1]['end']] if rows else []:
             if a <= t < b:
                 put(out, t - a, cl)
     return out
@@ -209,21 +212,23 @@ def follow(left, right, win=0.4, cap=8.0):
     rr = np.array([rms(right[i * w:(i + 1) * w]) for i in range(n)])
     base = rms(left) / rms(right)
     g = np.clip(np.where(rr > 1e-6, lr / np.maximum(rr, 1e-9), base), 0, base * cap)
-    g = np.convolve(g, np.ones(3) / 3, mode='same')
+    g = np.convolve(np.pad(g, 1, mode='edge'), np.ones(3) / 3, mode='valid')  # edge padding: no fade at the ends
     t = (np.arange(n) + 0.5) * w
     return right * np.interp(np.arange(len(right)), t, g).astype(np.float32)
 
 
 def render(v, src, a, b, out, layers=DEFAULT):
     """Write the stereo check file; returns (seconds, rms left, rms right)."""
-    if not 0 < b - a <= MAX_SPAN:
-        raise ValueError('span must be 0-%d s' % MAX_SPAN)
+    if a < 0 or not 0 < b - a <= MAX_SPAN:
+        raise ValueError('START must be >= 0 and the span 0-%d s' % MAX_SPAN)
     bad = set(layers) - set(LAYERS)
     if bad:
         raise ValueError('unknown layers: ' + ','.join(sorted(bad)))
     left = read_wav(src, a, b)
     right = synth(v, a, b, layers)
     n = min(len(left), len(right))
+    if n == 0:
+        raise ValueError('no audio in the source between %.2f and %.2f s' % (a, b))
     left, right = left[:n], follow(left[:n], right[:n])
     write_wav(out, left, right)
     return n / SR, rms(left), rms(right)
