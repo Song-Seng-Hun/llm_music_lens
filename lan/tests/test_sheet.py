@@ -120,6 +120,100 @@ class SectionTest(unittest.TestCase):
         self.assertNotIn("crossed_50_up", s[2]["parts"])  # S02 had no row, so no comparison across the gap
 
 
+def zbar(s, e, chord, kick=(0, 8), snare=(4, 12), split=None):
+    """A bar row in the stored shape (worker 0.19+)."""
+    return {"start": s, "end": e, "chord": chord, "split": split, "scale": "C", "degree": "1",
+            "kick": None if kick is None else list(kick), "snare": None if snare is None else list(snare)}
+
+
+def zn(s, e, m, name):
+    return {"start": s, "end": e, "midi": m, "note": name}
+
+
+class ZoomTest(unittest.TestCase):
+    def v(self, **kw):
+        rows = [zbar(0.0, 2.0, "C"), zbar(2.0, 4.0, "G", split=["G", "Am"]), zbar(5.0, 6.0, "F", None, None)]  # 4-5 s: gap
+        return base(**dict({"bars": {"status": "done", "reliability": "low_reference", "rows": rows},
+                            "melody_notes": [zn(0.0, 0.5, 60, "C4"), zn(0.5, 1.0, 62, "D4"), zn(2.25, 2.5, 67, "G4"), zn(4.2, 4.6, 64, "E4")],
+                            "bass_notes": [zn(0.0, 1.0, 36, "C2")],
+                            "other_notes": [zn(0.0, 1.0, 48, "C3"), zn(0.5, 1.0, 55, "G3")],
+                            "drum_hits": [{"time": 0.0, "class": "kick"}, {"time": 0.5, "class": "hihat"},
+                                          {"time": 5.5, "class": "kick"}, {"time": 4.5, "class": "tom"}]}, **kw))
+
+    def test_bars_steps_and_layers(self):
+        z = json.loads(json.dumps(sheet.zoom(self.v(), 0.0, 6.0, RID64)))
+        b = z["bars"]
+        self.assertEqual([x["n"] for x in b], [1, 2, 3])
+        self.assertEqual(b[0]["melody"], [["C4", 0, 4], ["D4", 4, 4]])   # 0.5 s of a 2 s bar = 4 steps
+        self.assertEqual(b[1]["melody"], [["G4", 2, 2]])
+        self.assertEqual((b[0]["bass"], b[0]["other"]), ([["C2", 0, 8]], {"count": 2, "low": "C3", "high": "G3"}))
+        self.assertEqual(b[0]["hits"], {"hihat": 1})           # kick and snare come from the bar row
+        self.assertEqual(b[2]["hits"], {"kick": 1})            # bar without kick/snare data counts every class
+        self.assertEqual(b[0]["section"], "S01")
+        o = z["outside_bars"]
+        self.assertEqual((o["spans"], o["melody"], o["hits"]), ([[4.0, 5.0]], [["E4", 4.2, 0.4]], {"tom": 1}))
+        t = sheet.render_zoom(z)
+        self.assertIn("bar 2 | 0:02.00-0:04.00 | S02 | G>Am (scale C, degree 1)", t)
+        self.assertIn("  drums  kick x.......x....... snare ....o.......o...; other hits hihat 1", t)
+        self.assertIn("  melody C4@0+4 D4@4+4", t)
+        self.assertIn("  drums  kick/snare not measured; hits kick 1", t)
+        self.assertIn("outside the bar grid, gaps 0:04.00-0:05.00 (onset", t)
+        self.assertIn("  melody E4 0:04.20+0.40", t)
+
+    def test_span_edges(self):
+        z = sheet.zoom(self.v(), 0.4, 2.3)
+        self.assertEqual([(x["n"], x["partial"]) for x in z["bars"]], [(1, True), (2, True)])
+        self.assertEqual(z["bars"][0]["melody"], [["D4", 4, 4]])   # C4 starts before the span
+        self.assertEqual(z["bars"][1]["melody"], [["G4", 2, 2]])
+
+    def test_old_worker_rows_by_time(self):
+        z = json.loads(json.dumps(sheet.zoom(base(), 0.0, 6.0)))  # worker 0.4.x: no bars, bass, other or drums
+        self.assertIsNone(z["bars"])
+        self.assertEqual((z["layers"]["bass"], z["layers"]["hits"], z["layers"]["melody"]), ("unavailable", "unavailable", "detected"))
+        self.assertEqual(z["outside_bars"]["spans"], [[0.0, 6.0]])
+        self.assertNotIn("bass", z["outside_bars"])
+        t = sheet.render_zoom(z)
+        self.assertIn("bars    unavailable in this result", t)
+        self.assertIn("rows by time (onset time+duration s):", t)
+        self.assertIn("  chords 0:00.00 C", t)
+
+    def test_failed_melody_not_empty(self):
+        z = sheet.zoom(self.v(melody={"status": "failed", "code": "analysis_error"}, melody_notes=[]), 0.0, 6.0)
+        self.assertEqual(z["layers"]["melody"], "failed")
+        self.assertNotIn("melody", z["bars"][0])
+
+    def test_skipped_layers_unavailable(self):
+        z = sheet.zoom(self.v(bass={"status": "skipped", "reason": "x"}, bass_notes=[],
+                              drums={"status": "skipped", "reason": "x"}, drum_hits=[]), 0.0, 6.0)
+        self.assertEqual((z["layers"]["bass"], z["layers"]["hits"], z["layers"]["other"]), ("unavailable", "unavailable", "detected"))
+        self.assertNotIn("bass", z["bars"][0])
+        self.assertNotIn("hits", z["bars"][0])
+
+    def test_last_half_step_goes_to_next_bar(self):
+        v = self.v(melody_notes=[zn(1.97, 2.2, 60, "C4"), zn(3.97, 4.1, 62, "D4")])  # bar 2 ends at a gap
+        z = sheet.zoom(v, 0.0, 6.0)
+        self.assertEqual((z["bars"][0]["melody"], z["bars"][1]["melody"]), ([], [["C4", 0, 2]]))
+        self.assertEqual(z["outside_bars"]["melody"], [["D4", 3.97, 0.13]])
+
+    def test_bars_without_chords_get_timed_chords(self):
+        v = self.v()
+        for r in v["bars"]["rows"]:
+            r["chord"] = None
+        z = sheet.zoom(v, 0.0, 6.0)
+        self.assertEqual(z["bars"][0]["chords_timed"], [[0.0, "C"]])
+        self.assertIn("| S01 | chords (timed, no bar chords) 0:00.00 C", sheet.render_zoom(z))
+
+    def test_short_gap_chords_listed(self):
+        v = self.v()
+        v["bars"]["rows"][2]["start"] = 4.5  # a 0.5 s gap, under GAP
+        z = sheet.zoom(v, 0.0, 6.0)
+        self.assertEqual(z["outside_bars"]["spans"], [])
+        self.assertEqual(z["outside_bars"]["chords"], [[4.0, "F"]])
+
+    def test_sheet_points_at_zoom(self):
+        self.assertIn("zoom: GET /sheet/%s?start=<s>&end=<s>" % RID64, sheet.render(sheet.build(base(), RID64)))
+
+
 class SheetRouteTest(RhythmBase):
     def store(self, raw=None):
         os.makedirs(os.path.dirname(self.rhythm_file()), 0o700, exist_ok=True)
@@ -142,6 +236,23 @@ class SheetRouteTest(RhythmBase):
         self.store("{")
         st, b = self.c.json("GET", "/sheet/" + RID64)
         self.assertEqual((st, b["error"]["code"]), (500, "invalid_result"))
+
+    def test_zoom(self):
+        self.store()
+        st, b = self.c.json("GET", "/sheet/%s?start=0&end=3.5" % RID64)
+        self.assertEqual((st, b["format"]), (200, "music-lens-sheet-zoom/1"))
+        self.assertTrue(b["text"].startswith("MUSIC LENS SHEET ZOOM"))
+        st, b = self.c.json("GET", "/sheet/%s?start=1&end=2&format=json" % RID64)
+        self.assertEqual((st, b["zoom"]["span"]), (200, [1.0, 2.0]))
+
+    def test_zoom_bad_spans(self):
+        self.store()
+        for q in ("start=0", "end=3", "start=0&end=30.5", "start=2&end=2", "start=3&end=2", "start=-0&end=1",
+                  "start=6&end=7", "start=1e1&end=12", "start=0&end=1&start=0"):
+            st, b = self.c.json("GET", "/sheet/%s?%s" % (RID64, q))
+            self.assertEqual((st, b["error"]["code"]), (400, "bad_request"), q)
+        self.assertEqual(self.c.json("GET", "/sheet/%s?start=0&end=30" % RID64)[0], 200)
+        self.assertEqual(self.c.json("GET", "/sheet/%s?start=2.2&end=32.2" % RID64)[0], 200)  # 30 s despite float error
 
 
 if __name__ == "__main__":

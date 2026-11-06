@@ -8,8 +8,9 @@ Repeated chord rows point at the first section that had them; drum grooves are s
 part changes are compared only with the previous measured section; no-chord intervals stay as N.C.
 On 45 frozen questions over four stored results (workers 0.4.3-0.21.0) an LLM reading this sheet answered more
 correctly than one reading the /report JSON, with no claims about unmeasured layers (see docs/sheet-eval.md).
-CLI: python3 -I sheet.py RESULT.json OUT.json OUT.txt"""
-import collections, itertools, json, os, re, sys
+GET /sheet/<result_id>?start=&end= serves zoom() instead: a bar-by-bar reading of up to ZOOM_MAX seconds.
+CLI: python3 -I sheet.py RESULT.json OUT.json OUT.txt [START END]"""
+import bisect, collections, itertools, json, os, re, sys
 
 LBL = {'reference_candidate': 'cand', 'low_reference': 'low'}
 NAMES = 'C C# D D# E F F# G G# A A# B'.split()
@@ -19,6 +20,9 @@ EPS = 0.02      # interval join tolerance, s (source times have 2 decimals)
 STRADDLE = 0.1  # a bar straddles when more than this share of it lies outside its section
 GAP = 1.0       # uncovered spans shorter than this, s, are not listed
 KEY_MIN = 2.0   # key segments overlapping a section by less than this, s, are not listed as changes
+ZOOM_MAX = 30.0  # s; the same span as one POST /earcheck clip
+STEPS = 16      # steps per bar in the zoom view
+NOTE_LAYERS = (('melody', 'melody_notes', 'melody'), ('bass', 'bass_notes', 'bass'), ('other', 'other_notes', 'other'))
 
 
 def rel(x):
@@ -202,7 +206,8 @@ def build(v, rid=None):
                  'melody_source': melody_source(done(v, 'melody'))},
         'sections': out_secs,
         'drill_down': {'request': 'GET /timeline/%s?layer=<layer>&start=<s>&end=<s>&limit=<1-200>&cursor=<n>' % (rid or '<result_id>'),
-                       'layers': LAYERS, 'range': '0-600 s; rows overlapping [start, end]', 'paging': 'follow continuation as the next cursor'}}
+                       'layers': LAYERS, 'range': '0-600 s; rows overlapping [start, end]', 'paging': 'follow continuation as the next cursor',
+                       'zoom': 'GET /sheet/%s?start=<s>&end=<s> for a bar-by-bar reading of up to %.0f s' % (rid or '<result_id>', ZOOM_MAX)}}
 
 
 def render(sh):
@@ -279,11 +284,177 @@ def render(sh):
                            '; %d other pattern%s' % (dr['other_patterns'], 's' * (dr['other_patterns'] > 1)) if dr['other_patterns'] else '',
                            '; %d empty bar%s' % (dr['empty_bars'], 's' * (dr['empty_bars'] > 1)) if dr['empty_bars'] else ''))
     dd = sh['drill_down']
-    return '\n'.join(out + ['', 'drill down: %s (layer %s; %s; %s)' % (dd['request'], dd['layers'], dd['range'], dd['paging'])]) + '\n'
+    return '\n'.join(out + ['', 'zoom: ' + dd['zoom'],
+                             'drill down: %s (layer %s; %s; %s)' % (dd['request'], dd['layers'], dd['range'], dd['paging'])]) + '\n'
+
+
+def zoom_layers(v):
+    """Per note layer: the row list, or a status string when the layer was not measured."""
+    out = {}
+    for name, k, lk in NOTE_LAYERS + (('hits', 'drum_hits', 'drums'),):
+        st = layer_state(v, name if name != 'hits' else lk)[0]
+        if st not in ('done', 'absent'):  # a skipped layer stores an empty row list: not measured, not empty
+            out[name] = 'failed' if st == 'failed' else 'unavailable'
+        else:
+            out[name] = v[k] if isinstance(v.get(k), list) else 'unavailable'
+    return out
+
+
+def gaps_of(a, b, spans):
+    """Every interval of [a, b) that no span covers (longer than EPS)."""
+    out, t = [], a
+    for s, e in sorted(spans):
+        if min(s, b) - t > EPS:
+            out.append([t, min(s, b)])
+        t = max(t, e)
+    if b - t > EPS:
+        out.append([t, b])
+    return out
+
+
+def pitch_summary(rows):
+    return {'count': len(rows), 'low': note(min(r['midi'] for r in rows)) if rows else None,
+            'high': note(max(r['midi'] for r in rows)) if rows else None}
+
+
+def hit_counts(rows, skip=()):
+    return dict(sorted(collections.Counter(r['class'] for r in rows if r['class'] not in skip).items()))
+
+
+def zoom(v, a, b, rid=None):
+    """Bar-by-bar reading of [a, b). A note or hit belongs to the bar holding its onset; rows starting outside the
+    span are left out. Notes sit on a 16-step grid per bar (each bar's own length), so tempo drift does not move them."""
+    secs = [dict(id='S%02d' % n, label=s['label'], function=s.get('function'), start=s['start'], end=s['end'])
+            for n, s in enumerate(v.get('sections') or [], 1)]
+    bars = (done(v, 'bars') or {}).get('rows')
+    lay = zoom_layers(v)
+    rows = {k: sorted((r for r in x if a <= r['time' if k == 'hits' else 'start'] < b),
+                      key=lambda r: r['time' if k == 'hits' else 'start']) if isinstance(x, list) else x
+            for k, x in lay.items()}
+    status = {k: x if isinstance(x, str) else ('detected' if x else 'empty') for k, x in rows.items()}
+    sec_of = lambda t: next((s['id'] for s in secs if s['start'] <= t < s['end']), None)
+    zb, outside = [], {k: [] for k in rows}
+    sel = [(i, r) for i, r in enumerate(bars or []) if r['start'] < b and r['end'] > a]
+    starts = [r['start'] for _, r in sel]
+    for i, r in sel:
+        zb.append({'n': i + 1, 'start': r['start'], 'end': r['end'], 'section': sec_of((r['start'] + r['end']) / 2),
+                   'partial': r['start'] < a or r['end'] > b, 'chord': r['split'] if r.get('split') else r.get('chord'),
+                   'scale': r.get('scale'), 'degree': r.get('degree'), 'kick': r.get('kick'), 'snare': r.get('snare'),
+                   **{k: [] for k in rows if not isinstance(rows[k], str)}})
+    for k, x in rows.items():
+        if isinstance(x, str):
+            continue
+        for r in x:
+            t = r['time' if k == 'hits' else 'start']
+            j = bisect.bisect_right(starts, t) - 1
+            if j >= 0 and t < zb[j]['end'] and round((t - zb[j]['start']) / (zb[j]['end'] - zb[j]['start']) * STEPS) >= STEPS:
+                j = j + 1 if j + 1 < len(zb) and abs(zb[j + 1]['start'] - zb[j]['end']) <= EPS else -1  # next bar's step 0
+                if j >= 0:
+                    zb[j][k].append(r)
+                    continue
+            (zb[j][k] if j >= 0 and t < zb[j]['end'] else outside[k]).append(r)
+    if bars and not any(r.get('chord') is not None for r in bars) and v.get('chords'):
+        for z in zb:
+            z['chords_timed'] = timed(v['chords'], max(z['start'], a), min(z['end'], b))
+    for z in zb:
+        ln = z['end'] - z['start']
+        step = lambda t: min(STEPS - 1, max(0, int(round((t - z['start']) / ln * STEPS))))
+        for k in ('melody', 'bass'):
+            if k in z:
+                z[k] = [[r.get('note') or note(r['midi']), step(r['start']), max(1, int(round((r['end'] - r['start']) / ln * STEPS)))] for r in z[k]]
+        if 'other' in z:
+            z['other'] = pitch_summary(z['other'])
+        if 'hits' in z:
+            z['hits'] = hit_counts(z['hits'], ('kick', 'snare') if z['kick'] is not None else ())
+    spans = uncovered(a, b, [(r['start'], r['end']) for _, r in sel]) if bars is not None else [[a, b]]
+    gaps = gaps_of(a, b, [(r['start'], r['end']) for _, r in sel]) if bars is not None else [[a, b]]
+    out = {'spans': spans, 'chords': [c for u in gaps for c in timed(v.get('chords') or [], u[0], u[1])]}
+    for k, x in outside.items():
+        if isinstance(rows[k], str):
+            continue
+        if k == 'other':
+            out[k] = pitch_summary(x)
+        elif k == 'hits':
+            out[k] = hit_counts(x)
+        else:
+            out[k] = [[r.get('note') or note(r['midi']), round(r['start'], 2), round(r['end'] - r['start'], 2)] for r in x]
+    bst = layer_state(v, 'bars')
+    return {'format': 'music-lens-sheet-zoom/1', 'result_id': rid, 'worker': (v.get('tool') or {}).get('version'),
+            'duration': v['duration'], 'span': [a, b],
+            'conventions': {
+                'bars': 'bars overlapping the span, numbered as in the full sheet; partial = the bar reaches outside the span',
+                'notes': 'a note belongs to the bar holding its onset (an onset in a bar\'s last half step goes to step 0 of the next bar, as in the kick/snare grid): [name, step, length], %d steps per bar of that bar\'s own length; rows starting outside the span are left out' % STEPS,
+                'drums': 'kick and snare are the bar row\'s 16-step pattern; hits counts the other drum classes in the bar',
+                'outside_bars': 'rows whose onset lies in no bar: notes [name, start s, duration s]; spans = gaps of %.0f s or more' % GAP,
+                'status': 'detected = rows in the span; empty = measured, none in the span; unavailable = not measured; failed = the layer failed'},
+            'layers': dict(status, bars={'status': bst[0], 'reliability': bst[1]},
+                           chords={'status': 'done' if v.get('chords') else 'absent', 'reliability': rel(v.get('chords_reliability')) if v.get('chords') else 'unknown'}),
+            'melody_source': melody_source(done(v, 'melody')),
+            'sections': [s for s in secs if s['start'] < b and s['end'] > a],
+            'bars': zb if bars is not None else None, 'outside_bars': out}
+
+
+def render_zoom(z):
+    mm = lambda t: '%d:%05.2f' % (t // 60, t % 60)
+    grid = lambda steps, ch: ''.join(ch if i in steps else '.' for i in range(STEPS))
+    notes = lambda xs: ' '.join('%s@%d+%d' % tuple(x) for x in xs) or 'none'
+    pitch = lambda p: '%d note%s, %s-%s' % (p['count'], 's' * (p['count'] > 1), p['low'], p['high']) if p['count'] else 'none'
+    hits = lambda h: ', '.join('%s %d' % kv for kv in h.items()) or 'none'
+    L, c = z['layers'], z['conventions']
+    a, b = z['span']
+    out = ['MUSIC LENS SHEET ZOOM (%s) | result %s | %s-%s of %s | worker %s' % (z['format'], (z['result_id'] or 'unknown')[:12], mm(a), mm(b), mm(z['duration']), z['worker']),
+           'notes   ' + c['notes'] + '.',
+           'drums   ' + c['drums'] + '.',
+           'status: ' + c['status'] + '.',
+           'layers  ' + ', '.join('%s %s' % (k, L[k]) for k in ('melody', 'bass', 'other', 'hits'))
+           + '; bars %s/%s; chords %s/%s' % (L['bars']['status'], L['bars']['reliability'], L['chords']['status'], L['chords']['reliability'])
+           + '; melody = ' + z['melody_source'],
+           'sections ' + ('; '.join('%s label %s%s %s-%s' % (s['id'], s['label'], ' (role %s)' % s['function'] if s['function'] else '', mm(s['start']), mm(s['end'])) for s in z['sections']) or 'none in the span')]
+    if z['bars'] is None:
+        out.append('bars    unavailable in this result')
+    for r in z['bars'] or []:
+        ch = r['chord']
+        ch = '>'.join(ch) if isinstance(ch, list) else (ch or '?')
+        if 'chords_timed' in r:
+            ch = 'chords (timed, no bar chords) ' + (' '.join('%s %s' % (mm(t), x) for t, x in r['chords_timed']) or 'none')
+        extra = ', '.join(x for x in ('scale %s' % r['scale'] if r.get('scale') else '', 'degree %s' % r['degree'] if r.get('degree') else '') if x)
+        out += ['', 'bar %d%s | %s-%s | %s | %s%s' % (r['n'], ' (partial)' if r['partial'] else '', mm(r['start']), mm(r['end']), r['section'] or 'no section', ch, ' (%s)' % extra if extra else '')]
+        if r['kick'] is None or r['snare'] is None:
+            dr = 'kick/snare not measured'
+        else:
+            dr = 'kick %s snare %s' % (grid(r['kick'], 'x'), grid(r['snare'], 'o'))
+        if 'hits' in r:
+            dr += '; %s %s' % ('other hits' if r['kick'] is not None else 'hits', hits(r['hits']))
+        out.append('  drums  ' + dr)
+        for k in ('melody', 'bass'):
+            if k in r:
+                out.append('  %-6s %s' % (k, notes(r[k])))
+        if 'other' in r:
+            out.append('  other  ' + pitch(r['other']))
+    o = z['outside_bars']
+    has = o['chords'] or any(o.get(k) for k in ('melody', 'bass', 'hits')) or (o.get('other') or {}).get('count')
+    if has:
+        if z['bars'] is None:
+            out += ['', 'rows by time (onset time+duration s):']
+        else:
+            out += ['', 'outside the bar grid%s (onset time+duration s):' % (', gaps %s' % ', '.join('%s-%s' % (mm(u[0]), mm(u[1])) for u in o['spans']) if o['spans'] else '')]
+        if o['chords']:
+            out.append('  chords ' + ' '.join('%s %s' % (mm(t), x) for t, x in o['chords']))
+        for k in ('melody', 'bass'):
+            if o.get(k):
+                out.append('  %-6s %s' % (k, ' '.join('%s %s+%.2f' % (n, mm(t), d) for n, t, d in o[k])))
+        if (o.get('other') or {}).get('count'):
+            out.append('  other  ' + pitch(o['other']))
+        if o.get('hits'):
+            out.append('  hits   ' + hits(o['hits']))
+    return '\n'.join(out) + '\n'
 
 
 if __name__ == '__main__':
     stem = os.path.basename(sys.argv[1])[:-5]
-    sh = build(json.load(open(sys.argv[1])), stem if re.fullmatch('[0-9a-f]{64}', stem) else None)
+    rid = stem if re.fullmatch('[0-9a-f]{64}', stem) else None
+    v = json.load(open(sys.argv[1]))
+    sh = zoom(v, float(sys.argv[4]), float(sys.argv[5]), rid) if len(sys.argv) > 4 else build(v, rid)
     json.dump(sh, open(sys.argv[2], 'w'), separators=(',', ':'))
-    open(sys.argv[3], 'w').write(render(json.load(open(sys.argv[2]))))
+    sh = json.load(open(sys.argv[2]))
+    open(sys.argv[3], 'w').write(render_zoom(sh) if len(sys.argv) > 4 else render(sh))
