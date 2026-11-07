@@ -235,13 +235,15 @@ API:
   the next bar's step 0, as in the kick/snare grid); rows starting outside the span are left out; a skipped layer is
   unavailable, not empty; bars without chords (chord model off) list the timed chords instead; rows in no bar, and every row of a result without bars, are listed by time. JSON:
   `{"result_id", "zoom"}` (format `music-lens-sheet-zoom/1`). Both or neither of `start`/`end`; a span over 30 s, an
-  empty span or a start at or past the song's end: 400 `bad_request`.
+  empty span or a start at or past the song's end: 400 `bad_request` (a span over 30 s or an empty span adds
+  `error.detail` naming the limit).
 - `POST /earcheck/<id>?start=<s>&end=<s>[&layers=<csv>]`, body = the song's audio again (WAV, MP3 or M4A; the server
   deletes uploads after every job, so the client re-uploads). Returns an ear-check file for a person: left ear the
   original, right ear `ear_check.py`'s synth replay of the stored result, as `{"result_id", "start", "end", "layers",
   "format": "wav", "sample_rate": 44100, "channels": 2, "bytes", "sha256", "audio_base64"}`. `start >= 0`,
   `0 < end - start <= 30` (numbers as in `/timeline`), `layers` a subset of `melody,bass,other,chords,drums,clicks`
-  (default all but `clicks`); anything else, unknown or repeated keys: 400 `bad_request`. Same signing, framing, size
+  (default all but `clicks`); anything else, unknown or repeated keys: 400 `bad_request` (a bad span adds `error.detail`
+  naming the 30 s limit). Same signing, framing, size
   limit, formats, staging and `Expect: 100-continue` as `/analyze`. The stored file is checked before the body is
   read: 404 `rhythm_not_found`, 500 `invalid_result`. No `rhythm` config or no `ear_check.py` next to `server.py`:
   503 `earcheck_unavailable`. It holds the API gate, and after the upload the team flock, so it never runs beside an

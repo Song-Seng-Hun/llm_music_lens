@@ -21,7 +21,12 @@ $c = 'E:\tools\music-lens-client\music-lens-client.mjs'
 & node $c report 'RESULT_ID'
 & node $c timeline 'RESULT_ID' --layer words --start 0 --end 30 --limit 100 --cursor 0
 & node $c receipt 'REQUEST_ID'
+& node $c sheet 'RESULT_ID' --format text
+& node $c sheet 'RESULT_ID' --start 50 --end 75
+& node $c earcheck 'RESULT_ID' 'C:\path\song.m4a' --start 50 --end 75 --out 'C:\path\ear.wav'
 ```
+- `sheet`: the LLM sheet of a stored rhythm result; read it before `timeline`. With `--start/--end` (at most 30 s) it zooms bar by bar. `report` lists both under `rhythm.read_next`.
+- `earcheck`: re-uploads the same audio (needs the same approval as analyze) and saves a 2-channel WAV for a person: left ear the original, right ear a synth of the result. At most 30 s; `--layers` a subset of melody,bass,other,chords,drums,clicks. A 400 with `detail` names the broken limit.
 - `--language` en, ko, ja or auto (default auto); `--emotion` voice, music or none (default voice); `--layer` words, emotion, beats, chords, energy, melody, genre, bass, other, drums or bars (energy, melody, genre, bass, other, drums and bars need the client's layer list to include them; owner Claude-Window). `--rhythm` takes no value: adds beat, BPM, key and chord analysis after ASR (up to +300 s; Mac 2026-10-26). Choose one value; the lists are prose, not literal pipes. Each flag once; unknown flag = usage error.
 - `--name` <=120 UTF-8 bytes, no control characters. result_id = 64 hex, request_id = 32 hex.
 - timeline: 1-200 rows; keep the same range and layer and pass the returned continuation as `--cursor`.
