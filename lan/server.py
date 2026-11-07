@@ -2493,12 +2493,16 @@ class Job:
         self.status, self.body, self.raw = 500, None, None
 
 
-class App:
-    def __init__(self, cfg, clock=time.time):
+class Engine:
+    """The analyze pipeline and the rhythm layer without TLS, network, nonces or receipts. App (the LAN server)
+    builds on it; local_cli.py uses it directly on this Mac (same OS user, like the `ml` wrapper)."""
+
+    def __init__(self, cfg, log_name, clock=time.time):
+        """For local_cli.py. App sets the same attributes in its own __init__ (TLS, journals, gate)."""
         self.cfg, self.limits, self.clock = cfg, cfg["limits"], clock
         root = cfg["root"]
-        self.api_dir, self.uploads, self.logs = root + "/api", root + "/uploads", root + "/logs"
-        for d in (self.api_dir, self.uploads, self.logs):
+        self.uploads, self.logs = root + "/uploads", root + "/logs"
+        for d in (self.uploads, self.logs):
             if not os.path.isdir(d):
                 os.mkdir(d, 0o700)
             st = os.lstat(d)
@@ -2506,43 +2510,18 @@ class App:
                 raise ConfigError(d + " must be a 0700 directory owned by this user")
         if os.stat(self.uploads).st_dev != os.stat(cfg["inbox"]).st_dev:
             raise ConfigError("uploads and inbox must be on the same filesystem (hard-link promotion)")
-        lim = self.limits
-        for p in cfg["launchd_logs"]:
-            rotate_file(p, lim["log_bytes"], lim["log_files"])
-        self.log = JsonLog(self.logs + "/api.log", lim["log_bytes"], lim["log_files"])
-        now = self.clock()
-        self.nonces = NonceStore(self.api_dir + "/nonces.log", lim["nonce_cap"], now)
-        self.receipts = ReceiptStore(self.api_dir + "/receipts.log", lim["receipt_cap"], lim["receipt_days"], now)
-        for name, st in (("nonces", self.nonces), ("receipts", self.receipts)):
-            if st.torn_tail:
-                self.log.event("journal_tail_truncated", journal=name)
-        for r in self.receipts.recovered:
-            # Crash leftover: outcome unknown; paths kept until the owner verifies the job and descendants ended.
-            self.log.event("receipt_unknown", id=r["request_id"], client=r["client"],
-                           paths=[self.uploads + "/" + str(r["op"]) + "/", cfg["inbox"] + "/api-" + str(r["op"]) + ".wav"])
-        self.gate = threading.Lock()
-        self.conn_lock, self.conns = threading.Lock(), 0
-        swept = 0
-        for name in os.listdir(self.uploads):  # ear-check crash leftovers: no receipt can own them
-            if RE_EARCHECK_OP.match(name) and stat.S_ISDIR(os.lstat(self.uploads + "/" + name).st_mode):
-                self.cleanup(name, False)
-                swept += 1
-        if swept:
-            self.log.event("earcheck_leftovers_removed", count=swept)
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-        ctx.options |= getattr(ssl, "OP_NO_COMPRESSION", 0) | getattr(ssl, "OP_NO_RENEGOTIATION", 0)
-        ctx.load_cert_chain(cfg["cert"], cfg["key"])
-        self.ssl_ctx = ctx
-        self.allow_net = cfg["allow"]
-        self.jobs = []
-        self.job_lock, self.stopping = threading.Lock(), False
+        self.log = JsonLog(self.logs + "/" + log_name, self.limits["log_bytes"], self.limits["log_files"])
+        self.stopping = False
+        self._rhythm_init()
+
+    def _rhythm_init(self):
+        root = self.cfg["root"]
         self.rhythm_dir = root + "/" + RHYTHM_DIR
         self.team_lock = root + "/.analyze.lock"  # the same flock the `ml` wrapper takes for analyze
         self.rhythm_worker_sha256 = None  # identity of the configured worker file, hashed once at start
-        if cfg.get("rhythm"):
+        if self.cfg.get("rhythm"):
             self._rhythm_dir_ok(create=True)
-            self.rhythm_worker_sha256 = file_sha256(cfg["rhythm"]["worker"])
+            self.rhythm_worker_sha256 = file_sha256(self.cfg["rhythm"]["worker"])
 
     # rhythm layer
     def _rhythm_dir_ok(self, create=False):
@@ -2781,51 +2760,135 @@ class App:
                 v.pop(k, None)
             return {"status": "done", "_data": v}
 
-    # connections
-    def peer_allowed(self, ip):
+    def attach_rhythm(self, job, body, result_id):
+        """body["rhythm"] after a successful analyze (the rhythm layer is an add-on on the same WAV)."""
         try:
-            return ipaddress.ip_address(ip) in self.allow_net
-        except ValueError:
-            return False
+            body["rhythm"] = self.run_rhythm(job, result_id, self.cfg["inbox"] + "/api-" + job.op + ".wav")
+        except Exception as e:
+            self.log.event("rhythm_error", id=job.rid, kind=type(e).__name__)
+            body["rhythm"] = {"status": "failed", "code": "internal_error"}
 
-    def acquire_conn(self):
-        with self.conn_lock:
-            if self.conns >= self.limits["max_conns"]:
-                return False
-            self.conns += 1
-            return True
+    # reads (GET /report, /timeline, /sheet); raise HttpError
+    def report_extra(self, rid):
+        """The ("rhythm", summary) merged into `ml report`, or None when nothing is stored."""
+        st, v = self.load_rhythm(rid)
+        extra = None
+        if st == "ok":
+            extra = ("rhythm", dict(rhythm_summary(v, self.rhythm_overview(rid, v)), read_next=self.read_next(rid)))
+        elif st == "invalid":
+            extra = ("rhythm", {"status": "failed", "code": "invalid_result"})
+        return extra
 
-    def release_conn(self):
-        with self.conn_lock:
-            self.conns -= 1
+    def read_ml(self, args, extra=None):
+        """A read-only `ml` call: (native bytes, None), or (None, dict) with extra merged in."""
+        ok, data, code = self.run_ml(args, self.limits["read_timeout"])
+        if not ok:
+            raise HttpError(code)
+        if extra is None or extra[1] is None:
+            return data, None  # native JSON bytes unchanged
+        v = json.loads(data.decode("utf-8"))  # run_ml already checked it is a JSON object
+        v[extra[0]] = extra[1]
+        return None, v
 
-    def close(self, grace=None):
-        """Graceful stop. Listeners must already be stopped. Refuse new launches, wait up to `grace` seconds
-        (default stop_grace: the 600 s analyze bound plus margin) for active jobs and connections, then mark
-        receipts still running as unknown (interrupted_by_stop, paths kept) and close the stores."""
-        grace = self.limits["stop_grace"] if grace is None else grace
-        with self.job_lock:
-            self.stopping = True
-        self.log.event("stopping", jobs=len(self.jobs))
-        end = time.monotonic() + grace
-        while time.monotonic() < end:
-            with self.conn_lock:
-                conns = self.conns
-            if not self.jobs and not conns:
-                break
-            time.sleep(0.05)
-        try:
-            marked = self.receipts.mark_running_unknown(self.clock(), "interrupted_by_stop")
-        except Exception:
-            marked = []
-            self.log.event("receipt_write_failed", id=None)
-        for r, durable in marked:
-            self.log.event("receipt_unknown", reason="stop", id=r["request_id"], client=r["client"], durable=durable,
-                           paths=[self.uploads + "/" + str(r["op"]) + "/", self.cfg["inbox"] + "/api-" + str(r["op"]) + ".wav"])
-        self.nonces.close()
-        self.receipts.close()
-        self.log.event("stopped", interrupted=len(marked))
-        self.log.close()
+    def timeline(self, rid, q):
+        """("page", body) for a rhythm layer, or ("ml", argv) for the native words/emotion timeline."""
+        args = ["timeline", rid]
+        if q.get("layer") in RHYTHM_LAYERS:
+            return "page", self.rhythm_timeline(rid, q)
+        if "layer" in q:
+            if q["layer"] not in ("words", "emotion"):
+                raise HttpError("bad_request")
+            args.append("--layer=" + q["layer"])
+        for k in ("start", "end"):
+            if k in q:
+                if not RE_NUM.match(q[k]):
+                    raise HttpError("bad_request")
+                args.append("--%s=%s" % (k, q[k]))
+        if "limit" in q:
+            if not RE_LIMIT.match(q["limit"]) or not 1 <= int(q["limit"]) <= 200:
+                raise HttpError("bad_request")
+            args.append("--limit=" + q["limit"])
+        if "cursor" in q:
+            if not RE_CURSOR.match(q["cursor"]):
+                raise HttpError("bad_request")
+            args.append("--cursor=" + q["cursor"])
+        return "ml", args
+
+    def rhythm_timeline(self, rid, q):
+        """layer=beats|chords|energy|melody|genre|bass|other|drums|bars, served from the stored rhythm file with the native range/limit/cursor rules."""
+        vals = {}
+        for k, default in (("start", 0.0), ("end", 600.0)):
+            if k in q:
+                if not RE_NUM.match(q[k]):
+                    raise HttpError("bad_request")
+                vals[k] = float(q[k])
+                if not 0 <= vals[k] <= 600:
+                    raise HttpError("invalid_argument")
+            else:
+                vals[k] = default
+        if vals["end"] < vals["start"]:
+            raise HttpError("invalid_argument")
+        limit = 100
+        if "limit" in q:
+            if not RE_LIMIT.match(q["limit"]) or not 1 <= int(q["limit"]) <= 200:
+                raise HttpError("bad_request")
+            limit = int(q["limit"])
+        cursor = 0
+        if "cursor" in q:
+            if not RE_CURSOR.match(q["cursor"]):
+                raise HttpError("bad_request")
+            cursor = int(q["cursor"])
+        st, v = self.load_rhythm(rid)
+        if st == "missing":
+            raise HttpError("rhythm_not_found")
+        if st != "ok":
+            raise HttpError("invalid_result")
+        if q["layer"] == "energy" and "energy" not in v:  # stored before worker 0.3.0: that layer is not stored
+            raise HttpError("rhythm_not_found")
+        if q["layer"] == "melody" and "melody_notes" not in v:  # stored before worker 0.4.0
+            raise HttpError("rhythm_not_found")
+        if q["layer"] == "genre" and "genre" not in v:  # stored before worker 0.5.0
+            raise HttpError("rhythm_not_found")
+        if q["layer"] == "bass" and "bass_notes" not in v:  # not configured, or stored before worker 0.8.0
+            raise HttpError("rhythm_not_found")
+        if q["layer"] == "other" and "other_notes" not in v:  # not configured, or stored before worker 0.12.0
+            raise HttpError("rhythm_not_found")
+        if q["layer"] == "drums" and "drum_hits" not in v:  # not configured, or stored before worker 0.9.0
+            raise HttpError("rhythm_not_found")
+        if q["layer"] == "bars" and "bars" not in v:  # no section model, or stored before worker 0.14.0
+            raise HttpError("rhythm_not_found")
+        return rhythm_page(rid, v, q["layer"], vals["start"], vals["end"], cursor, limit)
+
+    def sheet_view(self, rid, q):
+        """The GET /sheet body for parsed query q (format, start, end)."""
+        fmt = q.get("format", "text")
+        if fmt not in ("text", "json") or ("start" in q) != ("end" in q):
+            raise HttpError("bad_request")
+        span = None
+        if "start" in q:  # zoom: bar-by-bar reading of at most sheet.ZOOM_MAX s
+            for k in ("start", "end"):
+                if not RE_NUM.match(q[k]) or q[k].startswith("-"):  # also "-0"
+                    raise HttpError("bad_request")
+            span = float(q["start"]), float(q["end"])
+            if not 0 < round(span[1] - span[0], 6) <= sheet.ZOOM_MAX:  # round: 2.2 to 32.2 is 30 s
+                raise HttpError("bad_request", detail=SPAN_DETAIL % sheet.ZOOM_MAX)
+        st, v = self.load_rhythm(rid)
+        if st == "missing":
+            raise HttpError("rhythm_not_found")
+        if st != "ok":
+            raise HttpError("invalid_result")
+        if span is not None:
+            if span[0] >= v["duration"]:
+                raise HttpError("bad_request")
+            z = json.loads(json.dumps(sheet.zoom(v, span[0], span[1], rid)))
+            if fmt == "json":
+                return {"result_id": rid, "zoom": z}
+            return {"result_id": rid, "format": z["format"], "text": sheet.render_zoom(z)}
+        sh = json.loads(json.dumps(sheet.build(v, rid)))  # the text is rendered from the JSON form only
+        if fmt == "json":
+            return {"result_id": rid, "sheet": sh}
+        return {"result_id": rid, "format": sh["format"], "text": sheet.render(sh)}
+
 
     def child_env(self):
         return {"PATH": CHILD_ENV_PATH, "HOME": HOME, "LANG": "en_US.UTF-8",
@@ -2876,12 +2939,6 @@ class App:
         argv = [PYTHON, "-I", self.cfg["limit_exec"]] + (["--listen"] if listen else []) + [src, dst]
         return self._run_capped(argv, self.limits["convert_timeout"])
 
-    def earcheck_synth(self, result, src, start, end, out, layers):
-        """ear_check.py under limit_exec.py --earcheck with the rhythm python (numpy); returns rc or None on timeout."""
-        argv = [PYTHON, "-I", self.cfg["limit_exec"], "--earcheck", self.cfg["rhythm"]["python"], EAR_CHECK, result,
-                src, "%.6f" % start, "%.6f" % end, out, ",".join(layers)]
-        return self._run_capped(argv, self.limits["earcheck_timeout"])
-
     def _run_capped(self, argv, timeout):
         """Run argv in its own session (cwd /, child env); stdout+stderr kept only up to convert_output and dropped;
         process group killed on timeout. Returns returncode, or None on timeout."""
@@ -2914,46 +2971,7 @@ class App:
         p.stdout.close()
         return rc
 
-    # job supervision
-    def run_job(self, job):
-        status, body, raw, rec = 500, None, None, {}
-        try:
-            status, body, raw, rec = self._job(job)
-        except Exception as e:  # never leak details
-            self.log.event("job_error", id=job.rid, kind=type(e).__name__)
-            status, body = error_body("internal_error", request_id=job.rid)
-            rec = {"state": "failed", "http_status": status, "error_code": "internal_error"}
-        try:
-            self.receipts.update(job.client, job.rid, self.clock(), **rec)
-        except Exception:
-            # After launch the outcome exists but is not recorded: never say "nothing launched".
-            code = "outcome_unknown" if job.ml_started else "storage_error"
-            self.log.event("receipt_write_failed", id=job.rid, launched=job.ml_started)
-            try:
-                durable = self.receipts.mark_unknown(job.client, job.rid, self.clock(), code)
-            except Exception:
-                durable = False
-            self.log.event("receipt_unknown", reason="final_write_failed", id=job.rid, client=job.client,
-                           durable=durable)
-            status, body, raw = error_body(code, request_id=job.rid) + (None,)
-        else:
-            if job.rhythm and status == 200 and isinstance(body, dict):
-                # The receipt already says done (ASR outcome); the rhythm layer is an add-on on the same WAV.
-                try:
-                    body["rhythm"] = self.run_rhythm(job, rec.get("result_id"),
-                                                     self.cfg["inbox"] + "/api-" + job.op + ".wav")
-                except Exception as e:
-                    self.log.event("rhythm_error", id=job.rid, kind=type(e).__name__)
-                    body["rhythm"] = {"status": "failed", "code": "internal_error"}
-        self.cleanup(job.op, job.linked)
-        self.gate.release()
-        job.status, job.body, job.raw = status, body, raw
-        job.done.set()
-        try:
-            self.jobs.remove(job)
-        except ValueError:
-            pass
-
+    # analyze job (staged upload -> inbox link -> ml analyze)
     def _job(self, job):
         def fail(code):
             st, b = error_body(code, request_id=job.rid)
@@ -3013,6 +3031,140 @@ class App:
                 pass
             except OSError:
                 self.log.event("cleanup_failed", op=op, path="inbox")
+
+
+class App(Engine):
+    def __init__(self, cfg, clock=time.time):
+        self.cfg, self.limits, self.clock = cfg, cfg["limits"], clock
+        root = cfg["root"]
+        self.api_dir, self.uploads, self.logs = root + "/api", root + "/uploads", root + "/logs"
+        for d in (self.api_dir, self.uploads, self.logs):
+            if not os.path.isdir(d):
+                os.mkdir(d, 0o700)
+            st = os.lstat(d)
+            if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077:
+                raise ConfigError(d + " must be a 0700 directory owned by this user")
+        if os.stat(self.uploads).st_dev != os.stat(cfg["inbox"]).st_dev:
+            raise ConfigError("uploads and inbox must be on the same filesystem (hard-link promotion)")
+        lim = self.limits
+        for p in cfg["launchd_logs"]:
+            rotate_file(p, lim["log_bytes"], lim["log_files"])
+        self.log = JsonLog(self.logs + "/api.log", lim["log_bytes"], lim["log_files"])
+        now = self.clock()
+        self.nonces = NonceStore(self.api_dir + "/nonces.log", lim["nonce_cap"], now)
+        self.receipts = ReceiptStore(self.api_dir + "/receipts.log", lim["receipt_cap"], lim["receipt_days"], now)
+        for name, st in (("nonces", self.nonces), ("receipts", self.receipts)):
+            if st.torn_tail:
+                self.log.event("journal_tail_truncated", journal=name)
+        for r in self.receipts.recovered:
+            # Crash leftover: outcome unknown; paths kept until the owner verifies the job and descendants ended.
+            self.log.event("receipt_unknown", id=r["request_id"], client=r["client"],
+                           paths=[self.uploads + "/" + str(r["op"]) + "/", cfg["inbox"] + "/api-" + str(r["op"]) + ".wav"])
+        self.gate = threading.Lock()
+        self.conn_lock, self.conns = threading.Lock(), 0
+        swept = 0
+        for name in os.listdir(self.uploads):  # ear-check crash leftovers: no receipt can own them
+            if RE_EARCHECK_OP.match(name) and stat.S_ISDIR(os.lstat(self.uploads + "/" + name).st_mode):
+                self.cleanup(name, False)
+                swept += 1
+        if swept:
+            self.log.event("earcheck_leftovers_removed", count=swept)
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        ctx.options |= getattr(ssl, "OP_NO_COMPRESSION", 0) | getattr(ssl, "OP_NO_RENEGOTIATION", 0)
+        ctx.load_cert_chain(cfg["cert"], cfg["key"])
+        self.ssl_ctx = ctx
+        self.allow_net = cfg["allow"]
+        self.jobs = []
+        self.job_lock, self.stopping = threading.Lock(), False
+        self._rhythm_init()
+
+    # connections
+    def peer_allowed(self, ip):
+        try:
+            return ipaddress.ip_address(ip) in self.allow_net
+        except ValueError:
+            return False
+
+    def acquire_conn(self):
+        with self.conn_lock:
+            if self.conns >= self.limits["max_conns"]:
+                return False
+            self.conns += 1
+            return True
+
+    def release_conn(self):
+        with self.conn_lock:
+            self.conns -= 1
+
+    def close(self, grace=None):
+        """Graceful stop. Listeners must already be stopped. Refuse new launches, wait up to `grace` seconds
+        (default stop_grace: the 600 s analyze bound plus margin) for active jobs and connections, then mark
+        receipts still running as unknown (interrupted_by_stop, paths kept) and close the stores."""
+        grace = self.limits["stop_grace"] if grace is None else grace
+        with self.job_lock:
+            self.stopping = True
+        self.log.event("stopping", jobs=len(self.jobs))
+        end = time.monotonic() + grace
+        while time.monotonic() < end:
+            with self.conn_lock:
+                conns = self.conns
+            if not self.jobs and not conns:
+                break
+            time.sleep(0.05)
+        try:
+            marked = self.receipts.mark_running_unknown(self.clock(), "interrupted_by_stop")
+        except Exception:
+            marked = []
+            self.log.event("receipt_write_failed", id=None)
+        for r, durable in marked:
+            self.log.event("receipt_unknown", reason="stop", id=r["request_id"], client=r["client"], durable=durable,
+                           paths=[self.uploads + "/" + str(r["op"]) + "/", self.cfg["inbox"] + "/api-" + str(r["op"]) + ".wav"])
+        self.nonces.close()
+        self.receipts.close()
+        self.log.event("stopped", interrupted=len(marked))
+        self.log.close()
+
+    def earcheck_synth(self, result, src, start, end, out, layers):
+        """ear_check.py under limit_exec.py --earcheck with the rhythm python (numpy); returns rc or None on timeout."""
+        argv = [PYTHON, "-I", self.cfg["limit_exec"], "--earcheck", self.cfg["rhythm"]["python"], EAR_CHECK, result,
+                src, "%.6f" % start, "%.6f" % end, out, ",".join(layers)]
+        return self._run_capped(argv, self.limits["earcheck_timeout"])
+
+    # job supervision
+    def run_job(self, job):
+        status, body, raw, rec = 500, None, None, {}
+        try:
+            status, body, raw, rec = self._job(job)
+        except Exception as e:  # never leak details
+            self.log.event("job_error", id=job.rid, kind=type(e).__name__)
+            status, body = error_body("internal_error", request_id=job.rid)
+            rec = {"state": "failed", "http_status": status, "error_code": "internal_error"}
+        try:
+            self.receipts.update(job.client, job.rid, self.clock(), **rec)
+        except Exception:
+            # After launch the outcome exists but is not recorded: never say "nothing launched".
+            code = "outcome_unknown" if job.ml_started else "storage_error"
+            self.log.event("receipt_write_failed", id=job.rid, launched=job.ml_started)
+            try:
+                durable = self.receipts.mark_unknown(job.client, job.rid, self.clock(), code)
+            except Exception:
+                durable = False
+            self.log.event("receipt_unknown", reason="final_write_failed", id=job.rid, client=job.client,
+                           durable=durable)
+            status, body, raw = error_body(code, request_id=job.rid) + (None,)
+        else:
+            if job.rhythm and status == 200 and isinstance(body, dict):
+                # The receipt already says done (ASR outcome); the rhythm layer is an add-on on the same WAV.
+                self.attach_rhythm(job, body, rec.get("result_id"))
+        self.cleanup(job.op, job.linked)
+        self.gate.release()
+        job.status, job.body, job.raw = status, body, raw
+        job.done.set()
+        try:
+            self.jobs.remove(job)
+        except ValueError:
+            pass
 
 
 # ---------------------------------------------------------------- HTTP
@@ -3257,69 +3409,20 @@ class Handler(BaseHTTPRequestHandler):
             self.info["route"] = "/report/:id"
             if "?" in target:
                 raise HttpError("bad_request")
-            st, v = app.load_rhythm(m.group(1))
-            extra = None
-            if st == "ok":
-                extra = ("rhythm", dict(rhythm_summary(v, app.rhythm_overview(m.group(1), v)), read_next=app.read_next(m.group(1))))
-            elif st == "invalid":
-                extra = ("rhythm", {"status": "failed", "code": "invalid_result"})
-            return self.read_call(app, ["report", m.group(1)], extra=extra)
+            return self.read_call(app, ["report", m.group(1)], extra=app.report_extra(m.group(1)))
         m = ROUTE_TIMELINE.match(path)
         if m:
             self.info["route"] = "/timeline/:id"
             q = parse_query(query, ("layer", "start", "end", "limit", "cursor"))
-            args = ["timeline", m.group(1)]
-            if q.get("layer") in RHYTHM_LAYERS:
-                return self.rhythm_timeline(app, m.group(1), q)
-            if "layer" in q:
-                if q["layer"] not in ("words", "emotion"):
-                    raise HttpError("bad_request")
-                args.append("--layer=" + q["layer"])
-            for k in ("start", "end"):
-                if k in q:
-                    if not RE_NUM.match(q[k]):
-                        raise HttpError("bad_request")
-                    args.append("--%s=%s" % (k, q[k]))
-            if "limit" in q:
-                if not RE_LIMIT.match(q["limit"]) or not 1 <= int(q["limit"]) <= 200:
-                    raise HttpError("bad_request")
-                args.append("--limit=" + q["limit"])
-            if "cursor" in q:
-                if not RE_CURSOR.match(q["cursor"]):
-                    raise HttpError("bad_request")
-                args.append("--cursor=" + q["cursor"])
-            return self.read_call(app, args)
+            kind, val = app.timeline(m.group(1), q)
+            if kind == "page":
+                return self.send_json(200, val)
+            return self.read_call(app, val)
         m = ROUTE_SHEET.match(path)
         if m:
             self.info["route"] = "/sheet/:id"
             q = parse_query(query, ("format", "start", "end"))
-            fmt = q.get("format", "text")
-            if fmt not in ("text", "json") or ("start" in q) != ("end" in q):
-                raise HttpError("bad_request")
-            span = None
-            if "start" in q:  # zoom: bar-by-bar reading of at most sheet.ZOOM_MAX s
-                for k in ("start", "end"):
-                    if not RE_NUM.match(q[k]) or q[k].startswith("-"):  # also "-0"
-                        raise HttpError("bad_request")
-                span = float(q["start"]), float(q["end"])
-                if not 0 < round(span[1] - span[0], 6) <= sheet.ZOOM_MAX:  # round: 2.2 to 32.2 is 30 s
-                    raise HttpError("bad_request", detail=SPAN_DETAIL % sheet.ZOOM_MAX)
-            st, v = app.load_rhythm(m.group(1))
-            if st == "missing":
-                raise HttpError("rhythm_not_found")
-            if st != "ok":
-                raise HttpError("invalid_result")
-            if span is not None:
-                if span[0] >= v["duration"]:
-                    raise HttpError("bad_request")
-                z = json.loads(json.dumps(sheet.zoom(v, span[0], span[1], m.group(1))))
-                if fmt == "json":
-                    return self.send_json(200, {"result_id": m.group(1), "zoom": z})
-                return self.send_json(200, {"result_id": m.group(1), "format": z["format"], "text": sheet.render_zoom(z)})
-            sh = json.loads(json.dumps(sheet.build(v, m.group(1))))  # the text is rendered from the JSON form only
-            if fmt == "json":
-                return self.send_json(200, {"result_id": m.group(1), "sheet": sh})
-            return self.send_json(200, {"result_id": m.group(1), "format": sh["format"], "text": sheet.render(sh)})
+            return self.send_json(200, app.sheet_view(m.group(1), q))
         m = ROUTE_RECEIPT.match(path)
         if m:
             self.info["route"] = "/receipt/:id"
@@ -3333,59 +3436,10 @@ class Handler(BaseHTTPRequestHandler):
         raise HttpError("not_found")
 
     def read_call(self, app, args, extra=None):
-        ok, data, code = app.run_ml(args, app.limits["read_timeout"])
-        if not ok:
-            raise HttpError(code)
-        if extra is None or extra[1] is None:
+        data, v = app.read_ml(args, extra)
+        if v is None:
             return self.send_raw(200, data)  # native JSON bytes unchanged
-        v = json.loads(data.decode("utf-8"))  # run_ml already checked it is a JSON object
-        v[extra[0]] = extra[1]
         self.send_json(200, v)
-
-    def rhythm_timeline(self, app, rid, q):
-        """layer=beats|chords|energy|melody|genre|bass|other|drums|bars, served from the stored rhythm file with the native range/limit/cursor rules."""
-        vals = {}
-        for k, default in (("start", 0.0), ("end", 600.0)):
-            if k in q:
-                if not RE_NUM.match(q[k]):
-                    raise HttpError("bad_request")
-                vals[k] = float(q[k])
-                if not 0 <= vals[k] <= 600:
-                    raise HttpError("invalid_argument")
-            else:
-                vals[k] = default
-        if vals["end"] < vals["start"]:
-            raise HttpError("invalid_argument")
-        limit = 100
-        if "limit" in q:
-            if not RE_LIMIT.match(q["limit"]) or not 1 <= int(q["limit"]) <= 200:
-                raise HttpError("bad_request")
-            limit = int(q["limit"])
-        cursor = 0
-        if "cursor" in q:
-            if not RE_CURSOR.match(q["cursor"]):
-                raise HttpError("bad_request")
-            cursor = int(q["cursor"])
-        st, v = app.load_rhythm(rid)
-        if st == "missing":
-            raise HttpError("rhythm_not_found")
-        if st != "ok":
-            raise HttpError("invalid_result")
-        if q["layer"] == "energy" and "energy" not in v:  # stored before worker 0.3.0: that layer is not stored
-            raise HttpError("rhythm_not_found")
-        if q["layer"] == "melody" and "melody_notes" not in v:  # stored before worker 0.4.0
-            raise HttpError("rhythm_not_found")
-        if q["layer"] == "genre" and "genre" not in v:  # stored before worker 0.5.0
-            raise HttpError("rhythm_not_found")
-        if q["layer"] == "bass" and "bass_notes" not in v:  # not configured, or stored before worker 0.8.0
-            raise HttpError("rhythm_not_found")
-        if q["layer"] == "other" and "other_notes" not in v:  # not configured, or stored before worker 0.12.0
-            raise HttpError("rhythm_not_found")
-        if q["layer"] == "drums" and "drum_hits" not in v:  # not configured, or stored before worker 0.9.0
-            raise HttpError("rhythm_not_found")
-        if q["layer"] == "bars" and "bars" not in v:  # no section model, or stored before worker 0.14.0
-            raise HttpError("rhythm_not_found")
-        self.send_json(200, rhythm_page(rid, v, q["layer"], vals["start"], vals["end"], cursor, limit))
 
     def do_analyze(self, app, client, rid, query, cl, rest, body_sha, expect_continue):
         lim = app.limits
