@@ -1,4 +1,4 @@
-"""Musical units (worker 0.14.0, 0.15.0, 0.16.0, 0.18.0, 0.22.0): downbeats, bars, scale and degree, swing, two chords in a bar,
+"""Musical units (worker 0.14.0, 0.15.0, 0.16.0, 0.18.0, 0.22.0, 0.23.0): downbeats, bars, scale and degree, swing, two chords in a bar,
 beats per bar."""
 import json
 import unittest
@@ -45,6 +45,24 @@ class BarTest(unittest.TestCase):
     def test_missing_layers_are_none(self):
         row = rw.bars_field(BEATS, CHORDS, {"status": "skipped", "reason": "x"}, [], False, 4.0)["rows"][0]
         self.assertEqual((row["chord"], row["split"], row["scale"], row["degree"], row["kick"], row["snare"]), (None,) * 6)
+
+    def test_rows_run_on_to_the_song_end(self):
+        hits = HITS + [{"time": 5.0, "class": "snare"}, {"time": 6.5, "class": "kick"}]
+        b = rw.bars_field(BEATS, CHORDS + [{"start": 4.0, "end": 7.0, "label": "C"}], DONE, hits, True, 7.0)
+        self.assertEqual([(r["start"], r["end"]) for r in b["rows"]], [(0.0, 2.0), (2.0, 4.0), (4.0, 6.0), (6.0, 7.0)])
+        self.assertEqual(b["extended_rows"], 2)
+        self.assertEqual([(r["chord"], r["kick"], r["snare"]) for r in b["rows"][2:]], [("C", [4], [8]), ("C", [4], [])])  # 6.5 s is step 4 of a 2 s bar
+        self.assertEqual(rw.bars_field(BEATS, CHORDS, DONE, HITS, True, 4.0)["extended_rows"], 0)
+        self.assertEqual(rw.bar_spans([0.0, 2.0], 2.0004), [(0.0, 2.0)])   # a sliver that rounds to nothing is dropped
+
+    def test_extended_rows_are_checked(self):
+        v = stored(bars=rw.bars_field(BEATS, CHORDS, DONE, HITS, True, 7.0), duration=7.0)
+        self.assertIsNotNone(server.check_rhythm(json.loads(json.dumps(v))))
+        v22 = json.loads(json.dumps(v)); del v22["bars"]["extended_rows"]  # worker 0.22.0 rows end at the last downbeat
+        self.assertIsNone(server.check_rhythm(v22))   # count no longer matches the rows
+        for bad in (5, -1, "2", None):
+            w = json.loads(json.dumps(v)); w["bars"]["extended_rows"] = bad
+            self.assertIsNone(server.check_rhythm(w), bad)
 
     def test_no_downbeats_no_field(self):
         self.assertIsNone(rw.bars_field([], CHORDS, DONE, HITS, True, 4.0))
@@ -105,15 +123,15 @@ class ScaleTest(unittest.TestCase):
         self.assertEqual(rw.bars_to_song_end([0.0, 2.0, 4.0], 7.0), [(0.0, 2.0), (2.0, 4.0), (4.0, 6.0), (6.0, 7.0)])
         self.assertEqual(rw.bars_to_song_end([0.0, 2.0], 2.5), [(0.0, 2.0), (2.0, 2.5)])
 
-    def test_chords_past_the_last_downbeat_count_but_get_no_row(self):
+    def test_chords_past_the_last_downbeat_get_rows(self):
         chords = [{"start": 0.0, "end": 4.0, "label": "C"}, {"start": 4.0, "end": 40.0, "label": "F"},
                   {"start": 40.0, "end": 60.0, "label": "Bb"}]
-        out = rw.bar_scales([0.0, 2.0, 4.0], chords, 60.0)
-        self.assertEqual(len(out), 2)
+        out = rw.bar_scales(rw.bar_spans([0.0, 2.0, 4.0], 60.0), chords)
+        self.assertEqual(len(out), 30)
         self.assertEqual(out[0], ("F", "5"))
 
     def test_bar_without_a_chord(self):
-        out = rw.bar_scales([0.0, 2.0, 4.0], [{"start": 0.0, "end": 2.0, "label": "N"}, {"start": 2.0, "end": 4.0, "label": "C"}], 4.0)
+        out = rw.bar_scales([(0.0, 2.0), (2.0, 4.0)], [{"start": 0.0, "end": 2.0, "label": "N"}, {"start": 2.0, "end": 4.0, "label": "C"}])
         self.assertEqual(out[0][1], None)
         self.assertEqual(out[1][1], "1")
 
@@ -283,7 +301,7 @@ class MeterTest(unittest.TestCase):
         w["bars"]["rows"][0]["kick"] = [12]
         self.assertIsNone(server.check_rhythm(w))
         old = json.loads(json.dumps(stored()))
-        del old["bars"]["beats_per_bar"], old["bars"]["steps"]  # stored before worker 0.22.0
+        del old["bars"]["beats_per_bar"], old["bars"]["steps"], old["bars"]["extended_rows"]  # stored before worker 0.22.0
         self.assertIsNotNone(server.check_rhythm(old))
 
 

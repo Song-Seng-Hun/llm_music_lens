@@ -382,11 +382,15 @@ def hit_counts(rows, skip=()):
 
 def zoom(v, a, b, rid=None):
     """Bar-by-bar reading of [a, b). A note or hit belongs to the bar holding its onset; rows starting outside the
-    span are left out. Notes sit on the bar grid's steps (each bar's own length), so tempo drift does not move them."""
+    span are left out. Notes sit on the bar grid's steps (each bar's own length, so tempo drift does not move them; a
+    last bar cut at the song end keeps the median bar length, as the worker's kick and snare steps do)."""
     nsteps = meter(v)[1]
     secs = [dict(id='S%02d' % n, label=s['label'], function=s.get('function'), start=s['start'], end=s['end'])
             for n, s in enumerate(v.get('sections') or [], 1)]
     bars = (done(v, 'bars') or {}).get('rows')
+    cut = len(bars) if bars and len(bars) > 1 and (done(v, 'bars') or {}).get('extended_rows') else None  # bar number
+    full = statistics.median(r['end'] - r['start'] for r in bars) if cut else None
+    glen = lambda z: max(z['end'] - z['start'], full) if z['n'] == cut else z['end'] - z['start']
     lay = zoom_layers(v)
     rows = {k: sorted((r for r in x if a <= r['time' if k == 'hits' else 'start'] < b),
                       key=lambda r: r['time' if k == 'hits' else 'start']) if isinstance(x, list) else x
@@ -407,7 +411,7 @@ def zoom(v, a, b, rid=None):
         for r in x:
             t = r['time' if k == 'hits' else 'start']
             j = bisect.bisect_right(starts, t) - 1
-            if j >= 0 and t < zb[j]['end'] and round((t - zb[j]['start']) / (zb[j]['end'] - zb[j]['start']) * nsteps) >= nsteps:
+            if j >= 0 and t < zb[j]['end'] and round((t - zb[j]['start']) / glen(zb[j]) * nsteps) >= nsteps:
                 j = j + 1 if j + 1 < len(zb) and abs(zb[j + 1]['start'] - zb[j]['end']) <= EPS else -1  # next bar's step 0
                 if j >= 0:
                     zb[j][k].append(r)
@@ -417,7 +421,7 @@ def zoom(v, a, b, rid=None):
         for z in zb:
             z['chords_timed'] = timed(v['chords'], max(z['start'], a), min(z['end'], b))
     for z in zb:
-        ln = z['end'] - z['start']
+        ln = glen(z)
         step = lambda t: min(nsteps - 1, max(0, int(round((t - z['start']) / ln * nsteps))))
         for k in ('melody', 'bass'):
             if k in z:
@@ -444,7 +448,7 @@ def zoom(v, a, b, rid=None):
             'conventions': {
                 'bars': 'bars overlapping the span, numbered as in the full sheet; partial = the bar reaches outside the span',
                 'chord': 'the display held longest in the bar (or half bar when split) among the rows of the bar row\'s chord; the label when rows have no display',
-                'notes': 'a note belongs to the bar holding its onset (an onset in a bar\'s last half step goes to step 0 of the next bar, as in the kick/snare grid): [name, step, length], %d steps per bar of that bar\'s own length; rows starting outside the span are left out' % nsteps,
+                'notes': 'a note belongs to the bar holding its onset (an onset in a bar\'s last half step goes to step 0 of the next bar, as in the kick/snare grid): [name, step, length], %d steps per bar of that bar\'s own length (a last bar cut at the song end: the median bar length, as kick/snare); rows starting outside the span are left out' % nsteps,
                 'drums': 'kick and snare are the bar row\'s %d-step pattern; hits counts the other drum classes in the bar' % nsteps,
                 'outside_bars': 'rows whose onset lies in no bar: notes [name, start s, duration s]; spans = gaps of %.0f s or more' % GAP,
                 'status': 'detected = rows in the span; empty = measured, none in the span; unavailable = not measured; failed = the layer failed'},
