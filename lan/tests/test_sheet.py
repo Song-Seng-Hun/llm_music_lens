@@ -171,6 +171,27 @@ class ZoomTest(unittest.TestCase):
         self.assertIn("outside the bar grid, gaps 0:04.00-0:05.00 (onset", t)
         self.assertIn("  melody E4 0:04.20+0.40", t)
 
+    def test_three_beat_grid(self):
+        v = self.v()
+        v["bars"].update(beats_per_bar=3, steps=12)
+        v["bars"]["rows"][0].update(kick=[0, 6], snare=[4, 8])
+        z = sheet.zoom(v, 0.0, 6.0, RID64)
+        self.assertEqual(z["bars"][0]["melody"], [["C4", 0, 3], ["D4", 3, 3]])   # 0.5 s of a 2 s bar = 3 of 12 steps
+        t = sheet.render_zoom(z)
+        self.assertIn("  drums  kick x.....x..... snare ....o...o...;", t)
+        self.assertIn("12 steps per bar", t)
+        v["drums"] = {"status": "done", "reliability": "reference_candidate"}
+        sh = sheet.build(v, RID64)
+        self.assertEqual(sh["song"]["meter"], {"beats_per_bar": 3, "steps": 12})
+        r = sheet.render(sh)
+        self.assertIn("beats per bar 3", r)
+        self.assertIn("kick x.....x..... snare ....o...o...", r)
+
+    def test_meter_unknown_before_0_22(self):
+        sh = sheet.build(self.v(), RID64)
+        self.assertEqual(sh["song"]["meter"], {"beats_per_bar": None, "steps": 16})
+        self.assertIn("beats per bar unknown", sheet.render(sh))
+
     def test_span_edges(self):
         z = sheet.zoom(self.v(), 0.4, 2.3)
         self.assertEqual([(x["n"], x["partial"]) for x in z["bars"]], [(1, True), (2, True)])
