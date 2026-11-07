@@ -2505,7 +2505,7 @@ class Job:
         self.linked = False
         self.ml_started = False  # set just before `ml analyze` is spawned
         self.rhythm = False  # opt-in rhythm layer (POST /analyze?rhythm=1)
-        self.quick = False  # rhythm=quick: the worker without stems (never replaces a stored full result)
+        self.quick = False  # rhythm=quick: the worker without stems (never replaces a stored result with a stem-made layer)
         self.deadline = None  # monotonic time by which the waiting handler gives up (handler_total)
         self.done = threading.Event()
         self.status, self.body, self.raw = 500, None, None

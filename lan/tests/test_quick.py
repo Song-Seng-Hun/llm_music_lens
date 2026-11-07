@@ -63,6 +63,10 @@ class QuickServerTest(QuickBase):
         for line in text.splitlines():
             if line.startswith(("  parts", "  drums")):
                 self.assertTrue(line.split()[1] in ("unavailable", "failed"), line)  # never "empty"
+        z = self.c.json("GET", "/sheet/%s?format=json&start=0&end=6" % RID64)[1]["zoom"]
+        self.assertEqual(z["profile"], sh["profile"])
+        zt = self.c.json("GET", "/sheet/%s?start=0&end=6" % RID64)[1]["text"]
+        self.assertIn("\nprofile quick: bass, other, drums, parts, bars", zt)
 
     def test_full_run_replaces_quick(self):
         self.post(AQ)
@@ -72,6 +76,8 @@ class QuickServerTest(QuickBase):
         self.assertIn("--melody-source", self.argv())
         self.assertNotIn("profile", self.stored())
         self.assertNotIn("profile", self.c.json("GET", "/report/" + RID64)[1]["rhythm"])
+        self.assertNotIn("profile", self.c.json("GET", "/sheet/%s?format=json&start=0&end=6" % RID64)[1]["zoom"])
+        self.assertNotIn("\nprofile ", self.c.json("GET", "/sheet/%s?start=0&end=6" % RID64)[1]["text"])
 
     def test_quick_reuses_quick_and_full(self):
         self.post(AQ)
@@ -82,7 +88,7 @@ class QuickServerTest(QuickBase):
             json.dump(full, f)
         r = self.post(AQ)
         self.assertEqual((r["cache_hit"], r.get("profile"), len(self.fw.calls())), (True, None, n))
-        self.assertEqual(self.stored(), full)  # a quick request never replaces a stored full result
+        self.assertEqual(self.stored(), full)  # a quick request never replaces a stored result with a stem-made layer
 
     def test_quick_without_droppable_stems_is_not_marked(self):
         r = self.post(AQ, WAV)  # canonical 16 kHz: no stems either way

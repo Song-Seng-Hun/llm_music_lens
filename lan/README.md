@@ -127,8 +127,10 @@ mix, part positions, tone and sung notes.
   skipped. The summary, `/report` and the sheet then show `profile` (`profile_note`, or a `profile` header line).
   Dropped layers read `skipped`/`unavailable`, never `empty`.
 - A later `rhythm=1` run on full-band audio replaces it. Every stem layer at `canonical_16k` counts as "can
-  improve". A later `rhythm=quick` run reuses a stored quick or full result and never replaces a full one: quick
-  is treated like a 16 kHz upload.
+  improve". A later `rhythm=quick` run is treated like a 16 kHz upload: it reuses a stored quick or full result,
+  and never replaces a full result that holds a layer made from stems (a `done` separation, bass, other, drums,
+  sections model, parts, mix, part positions or tone). A full result in which every stem stage failed holds none,
+  so the usual recompute rules apply and quick can replace it. Nothing measured is lost that way.
 - Without `quick`, behaviour and bodies are unchanged.
 - Measured once on a 3.5 min pop song (stereo WAV, all optional models configured):
   - `ml` ASR: 12.6 s.
