@@ -12,7 +12,7 @@ Usage:
                [--name NAME] [--no-rhythm]
   local_cli.py [--config PATH] report ID
   local_cli.py [--config PATH] timeline ID [--layer L] [--start S] [--end E] [--limit N] [--cursor C]
-  local_cli.py [--config PATH] sheet ID [--start S --end E] [--format {text,json}]
+  local_cli.py [--config PATH] sheet ID [--start S --end E | --view brief | --layers L,...] [--format {text,json}]
 """
 import argparse
 import hashlib
@@ -196,7 +196,7 @@ def cmd_timeline(engine, ns):
 
 def cmd_sheet(engine, ns):
     rid = check_id(ns.result_id)
-    q = {k: getattr(ns, k) for k in ("format", "start", "end") if getattr(ns, k) is not None}
+    q = {k: getattr(ns, k) for k in ("format", "start", "end", "view", "layers") if getattr(ns, k) is not None}
     out_json(engine, engine.sheet_view(rid, q))
 
 
@@ -239,6 +239,8 @@ def parser():
     s.add_argument("--format", choices=("text", "json"))
     s.add_argument("--start")
     s.add_argument("--end")
+    s.add_argument("--view", help="brief: one line per section (as GET /sheet?view=brief)")
+    s.add_argument("--layers", help="comma list of " + ",".join(server.sheet.SECTION_LAYERS) + " (as GET /sheet?layers=)")
     return ap
 
 

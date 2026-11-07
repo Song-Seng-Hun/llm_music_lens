@@ -27,7 +27,10 @@ PY = "/usr/bin/python3"
 RID64 = "ab" * 32
 
 FAKE_ML = r'''#!/usr/bin/python3 -I
-import json, os, sys, time
+import json, os, signal, sys, time
+# A suite started without job control (`(... &)`, agent background runs) has SIGINT ignored, and children inherit
+# that; the real ml under launchd or a terminal has the default. Behave like that whatever started the tests.
+signal.signal(signal.SIGINT, signal.default_int_handler)
 HERE = os.path.dirname(os.path.realpath(__file__))
 with open(os.path.join(HERE, "control.json")) as f:
     ctl = json.load(f)
@@ -49,7 +52,7 @@ if cmd == "analyze":
         f.write(json.dumps(info) + "\n")
 child = None
 if spec.get("child"):  # like the real ml: an inference child in its own session holding the team lock fd
-    import fcntl, signal, subprocess
+    import fcntl, subprocess
     if spec.get("ignore_int"):
         signal.signal(signal.SIGINT, signal.SIG_IGN)
     lfd = os.open(ctl["lock"], os.O_CREAT | os.O_RDWR, 0o600)

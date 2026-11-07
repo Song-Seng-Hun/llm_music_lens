@@ -81,6 +81,8 @@ same trust boundary as the `ml` wrapper: no TLS, no signing, no nonces, no recei
 /usr/bin/python3 -I local_cli.py timeline <result_id> --layer chords --start 30 --end 60 --limit 50
 /usr/bin/python3 -I local_cli.py sheet <result_id>                                         # same body as GET /sheet/<id>
 /usr/bin/python3 -I local_cli.py sheet <result_id> --start 60 --end 90 --format json       # zoom, at most 30 s
+/usr/bin/python3 -I local_cli.py sheet <result_id> --view brief                            # one line per section
+/usr/bin/python3 -I local_cli.py sheet <result_id> --layers chords,drums                   # only those section layers
 ```
 
 - It reads the server's config (`--config`, default `~/.music-lens/api.json`) through `server.load_config`, so the
@@ -283,6 +285,17 @@ API:
   `{"result_id", "zoom"}` (format `music-lens-sheet-zoom/1`). Both or neither of `start`/`end`; a span over 30 s, an
   empty span or a start at or past the song's end: 400 `bad_request` (a span over 30 s or an empty span adds
   `error.detail` naming the limit).
+- `GET /sheet/<id>?view=brief[&format=text|json]` is the short sheet: the same header block (tempo, key, form, level,
+  genre, layer status), then one line per section (ID, label and role, times, bars, key, level). The per-section detail
+  lines and the legend lines for them (parts, melody, grooves) are left out. `GET /sheet/<id>?layers=<csv>` is the full
+  sheet with per-section detail only for the chosen layers: `grid` (straddling bars, spans with no bar), `key` (key
+  and scale changes), `chords`, `melody`, `parts`, `drums` (with the groove lines). Both add a `view` line, and the
+  JSON gets `"view": {"layers": [...]}`. Use one of the two, never both, and not with `start`/`end`. An unknown or
+  repeated layer name, an empty list, or any other `view` value gives 400 `bad_request` with an `error.detail` naming
+  the options. With neither parameter, the sheet is byte-identical to the sheet before these options existed. On the
+  test fixture (three sections, no bars), the text body is 2577 bytes full, 1989 brief and 2091 with
+  `layers=chords`. On a five-bar unit fixture with bars and drums, it is 2786 full and 1954 brief. The saving grows
+  with the number of sections and bars. CLI: `local_cli.py sheet <id> --view brief` or `--layers chords,drums`.
 - `POST /earcheck/<id>?start=<s>&end=<s>[&layers=<csv>]`, body = the song's audio again (WAV, MP3 or M4A; the server
   deletes uploads after every job, so the client re-uploads). Returns an ear-check file for a person: left ear the
   original, right ear `ear_check.py`'s synth replay of the stored result, as `{"result_id", "start", "end", "layers",

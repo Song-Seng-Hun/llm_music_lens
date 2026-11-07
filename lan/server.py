@@ -139,6 +139,8 @@ EAR_CHECK = os.path.join(HERE, "ear_check.py")  # run by the rhythm python (nump
 EARCHECK_LAYERS = ("melody", "bass", "other", "chords", "drums", "clicks")  # ear_check.LAYERS
 EARCHECK_DEFAULT = ("melody", "bass", "other", "chords", "drums")  # ear_check.DEFAULT
 SPAN_DETAIL = "end - start must be more than 0 and at most %g s"
+VIEW_DETAIL = ("view=brief or layers=<comma list of %s>, one of them, not with start/end"
+               % ",".join(sheet.SECTION_LAYERS))
 EARCHECK_MAX_SPAN = 30.0  # s; 30 s stereo s16 44.1 kHz = 5,292,044 bytes, base64 7.06 MB < response_max 8 MiB
 LISTEN_RATE = 44100
 LISTEN_MAX_BYTES = 56 * MiB  # limit_exec.LISTEN_FSIZE_BYTES
@@ -2860,10 +2862,17 @@ class Engine:
         return rhythm_page(rid, v, q["layer"], vals["start"], vals["end"], cursor, limit)
 
     def sheet_view(self, rid, q):
-        """The GET /sheet body for parsed query q (format, start, end)."""
+        """The GET /sheet body for parsed query q (format, start, end, view, layers)."""
         fmt = q.get("format", "text")
         if fmt not in ("text", "json") or ("start" in q) != ("end" in q):
             raise HttpError("bad_request")
+        sel = None  # chosen per-section layers: view=brief = none, layers=a,b = those; not with a zoom span
+        if "view" in q or "layers" in q:
+            if "start" in q or ("view" in q and "layers" in q) or q.get("view", "brief") != "brief":
+                raise HttpError("bad_request", detail=VIEW_DETAIL)
+            sel = q["layers"].split(",") if "layers" in q else []
+            if not all(n in sheet.SECTION_LAYERS for n in sel) or len(set(sel)) != len(sel):
+                raise HttpError("bad_request", detail=VIEW_DETAIL)
         span = None
         if "start" in q:  # zoom: bar-by-bar reading of at most sheet.ZOOM_MAX s
             for k in ("start", "end"):
@@ -2885,6 +2894,8 @@ class Engine:
                 return {"result_id": rid, "zoom": z}
             return {"result_id": rid, "format": z["format"], "text": sheet.render_zoom(z)}
         sh = json.loads(json.dumps(sheet.build(v, rid)))  # the text is rendered from the JSON form only
+        if sel is not None:
+            sh = sheet.select(sh, sel)
         if fmt == "json":
             return {"result_id": rid, "sheet": sh}
         return {"result_id": rid, "format": sh["format"], "text": sheet.render(sh)}
@@ -3441,7 +3452,7 @@ class Handler(BaseHTTPRequestHandler):
         m = ROUTE_SHEET.match(path)
         if m:
             self.info["route"] = "/sheet/:id"
-            q = parse_query(query, ("format", "start", "end"))
+            q = parse_query(query, ("format", "start", "end", "view", "layers"))
             return self.send_json(200, app.sheet_view(m.group(1), q))
         m = ROUTE_RECEIPT.match(path)
         if m:

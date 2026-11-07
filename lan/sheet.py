@@ -21,6 +21,11 @@ STRADDLE = 0.1  # a bar straddles when more than this share of it lies outside i
 GAP = 1.0       # uncovered spans shorter than this, s, are not listed
 KEY_MIN = 2.0   # key segments overlapping a section by less than this, s, are not listed as changes
 ZOOM_MAX = 30.0  # s; the same span as one POST /earcheck clip
+SECTION_LAYERS = {  # per-section detail of the full sheet, by the name GET /sheet?layers= takes
+    'grid': ('straddling_bars', 'uncovered'), 'key': ('key_changes', 'scale_changes'), 'chords': ('chords',),
+    'melody': ('melody',), 'parts': ('parts',), 'drums': ('drums',)}
+LEGEND = {'chords': ('chord_names',), 'key': ('scale_changes',), 'melody': ('notes_per_note_s',), 'parts': ('parts',),
+          'drums': ('drums',)}  # conventions that explain only that layer
 STEPS = 16      # steps per bar when the result gives none (worker before 0.22.0)
 NOTE_LAYERS = (('melody', 'melody_notes', 'melody'), ('bass', 'bass_notes', 'bass'), ('other', 'other_notes', 'other'))
 
@@ -274,6 +279,18 @@ def build(v, rid=None):
                        'zoom': 'GET /sheet/%s?start=<s>&end=<s> for a bar-by-bar reading of up to %.0f s' % (rid or '<result_id>', ZOOM_MAX)}}
 
 
+def select(sh, layers):
+    """The built sheet with only the chosen per-section layers (SECTION_LAYERS names; () = the brief view: one line
+    per section). Song-level fields stay; conventions and grooves for layers not shown are dropped."""
+    drop = {k for n, ks in SECTION_LAYERS.items() if n not in layers for k in ks}
+    out = dict(sh, view={'layers': [n for n in SECTION_LAYERS if n in layers]})
+    out['sections'] = [{k: x for k, x in s.items() if k not in drop} for s in sh['sections']]
+    out['conventions'] = {k: x for k, x in sh['conventions'].items()
+                          if not any(k in LEGEND.get(n, ()) for n in SECTION_LAYERS if n not in layers)}
+    out['song'] = {k: x for k, x in sh['song'].items() if k != 'grooves' or 'drums' in layers}
+    return out
+
+
 def render(sh):
     mm = lambda t: '?' if t is None else '%d:%05.2f' % (t // 60, t % 60)
     num = lambda x, f: '?' if x is None else f % x
@@ -296,10 +313,15 @@ def render(sh):
             'level   loudest %s, quietest %s; section level = dB vs song median' % (rng(g['loudest']), rng(g['quietest'])),
             'genre   guess, %s: %s' % (g['genre_guess']['reliability'], ', '.join(g['genre_guess']['top']) or 'unknown'),
             'layers  ' + ', '.join('%s %s/%s' % (k, x['status'], x['reliability']) for k, x in L.items()) + '; melody = ' + g['melody_source'],
-            'parts   % = ' + c['parts'],
-            'melody  notes/s = ' + c['notes_per_note_s'],
+            'parts   % = ' + c['parts'] if 'parts' in c else None,
+            'melody  notes/s = ' + c['notes_per_note_s'] if 'notes_per_note_s' in c else None,
             'bars    ' + c['bars']]
-    for gid, p in g['grooves'].items():
+    out = [x for x in out if x is not None]
+    if 'view' in sh:
+        shown = sh['view']['layers']
+        out.append('view    %s; full sheet: GET /sheet/%s' % ('section layers ' + ', '.join(shown) + ' only' if shown else
+                                                           'brief, one line per section', sh['result_id'] or '<result_id>'))
+    for gid, p in g.get('grooves', {}).items():
         out.append('groove  %s kick %s snare %s' % (gid, grid(p['kick'], 'x'), grid(p['snare'], 'o')))
     out.append('')
     if not sh['sections']:
@@ -319,10 +341,12 @@ def render(sh):
             out.append('  key    changes ' + ' '.join('%s %s' % (mm(t), k) for t, k in s['key_changes']))
         if s.get('scale_changes'):
             out.append('  scale  changes ' + ' '.join('%s %s' % (mm(t), k) for t, k in s['scale_changes']))
-        ch = s['chords']
-        for ob in ch.get('outside_bars', []):
+        ch = s.get('chords')
+        for ob in (ch or {}).get('outside_bars', []):
             out.append('  chords outside bars %s: %s' % (rng(ob['span']), ' '.join('%s %s' % (mm(t), c) for t, c in ob['changes']) or 'none'))
-        if 'same_as' in ch:
+        if ch is None:
+            pass
+        elif 'same_as' in ch:
             out.append('  chords = %s' % ch['same_as'])
         elif 'per_bar' in ch:
             out.append('  chords ' + ('| ' + ' | '.join('>'.join(x) if isinstance(x, list) else (x or '?') for x in ch['per_bar']) + ' |' if ch['per_bar'] else ch['status']))
@@ -330,18 +354,23 @@ def render(sh):
             out.append('  chords (no bar grid) ' + (' '.join('%s %s' % (mm(t), c) for t, c in ch['changes']) or 'empty'))
         else:
             out.append('  chords ' + ch['status'])
-        m = s['melody']
-        out.append('  melody ' + (m['status'] if m['status'] != 'detected' else '%d notes, %s-%s, peak %s at %s, %s, %.1f notes/s' % (
-            m['notes'], m['low'], m['high'], m['peak'], mm(m['peak_time']), m['direction'] or 'direction unknown', m['notes_per_note_s'])))
-        p = s['parts']
-        if p['status'] != 'detected':
+        m = s.get('melody')
+        if m is not None:
+            out.append('  melody ' + (m['status'] if m['status'] != 'detected' else '%d notes, %s-%s, peak %s at %s, %s, %.1f notes/s' % (
+                m['notes'], m['low'], m['high'], m['peak'], mm(m['peak_time']), m['direction'] or 'direction unknown', m['notes_per_note_s'])))
+        p = s.get('parts')
+        if p is None:
+            pass
+        elif p['status'] != 'detected':
             out.append('  parts  ' + p['status'])
         else:
             d = ['%s rose past 50%%' % k for k in p.get('crossed_50_up', [])] + ['%s fell below 50%%' % k for k in p.get('crossed_50_down', [])]
             out.append('  parts  %s; other notes %s/s%s' % (' '.join('%s %s' % (k, '?' if p[k] is None else '%d%%' % round(100 * p[k])) for k in PARTS),
                                                              num(p['other_notes_per_s'], '%.1f'), ' (vs previous: ' + ', '.join(d) + ')' if d else ''))
-        dr = s['drums']
-        if dr['status'] in ('failed', 'unavailable'):
+        dr = s.get('drums')
+        if dr is None:
+            pass
+        elif dr['status'] in ('failed', 'unavailable'):
             out.append('  drums  ' + dr['status'] + (' (%d bars, none measured)' % dr['bars'] if dr.get('bars') else ''))
         else:
             cov = 'measured %d/%d bars' % (dr['measured'], dr['bars'])
