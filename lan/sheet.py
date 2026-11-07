@@ -26,6 +26,7 @@ SECTION_LAYERS = {  # per-section detail of the full sheet, by the name GET /she
     'melody': ('melody',), 'parts': ('parts',), 'drums': ('drums',)}
 LEGEND = {'chords': ('chord_names',), 'key': ('scale_changes',), 'melody': ('notes_per_note_s',), 'parts': ('parts',),
           'drums': ('drums',)}  # conventions that explain only that layer
+QUICK_DROPPED = ('bass', 'other', 'drums', 'parts', 'bars', 'downbeats', 'swing', 'mix', 'part_positions', 'tone', 'sung_notes')
 STEPS = 16      # steps per bar when the result gives none (worker before 0.22.0)
 NOTE_LAYERS = (('melody', 'melody_notes', 'melody'), ('bass', 'bass_notes', 'bass'), ('other', 'other_notes', 'other'))
 
@@ -244,7 +245,7 @@ def build(v, rid=None):
     total = sum(span.values()) or 1
     tool, sw, k0 = v.get('tool') or {}, done(v, 'swing') or {}, v.get('key')
     lay = lambda k: {'status': st[k][0], 'reliability': st[k][1]}
-    return {
+    out = {
         'format': 'music-lens-sheet/1', 'result_id': rid, 'worker': tool.get('version'), 'duration': v['duration'],
         'conventions': {
             'reliability': 'cand = worker reliability reference_candidate, low = low_reference; neither is a measured accuracy',
@@ -277,6 +278,19 @@ def build(v, rid=None):
         'drill_down': {'request': 'GET /timeline/%s?layer=<layer>&start=<s>&end=<s>&limit=<1-200>&cursor=<n>' % (rid or '<result_id>'),
                        'layers': LAYERS, 'range': '0-600 s; rows overlapping [start, end]', 'paging': 'follow continuation as the next cursor',
                        'zoom': 'GET /sheet/%s?start=<s>&end=<s> for a bar-by-bar reading of up to %.0f s' % (rid or '<result_id>', ZOOM_MAX)}}
+    if v.get('profile') == 'quick':  # server-added on a rhythm=quick result only
+        out['profile'] = profile(v)
+    return out
+
+
+def profile(v):
+    """The profile block of the sheet and the zoom."""
+    return {'name': 'quick', 'not_measured': list(QUICK_DROPPED),
+            'note': 'no stem separation: sections from the beat method, melody from the mix; a full run (rhythm=1) replaces it'}
+
+
+def profile_line(pr):
+    return 'profile %s: %s not measured; %s' % (pr['name'], ', '.join(pr['not_measured']), pr['note'])
 
 
 def select(sh, layers):
@@ -317,6 +331,8 @@ def render(sh):
             'melody  notes/s = ' + c['notes_per_note_s'] if 'notes_per_note_s' in c else None,
             'bars    ' + c['bars']]
     out = [x for x in out if x is not None]
+    if 'profile' in sh:
+        out.append(profile_line(sh['profile']))
     if 'view' in sh:
         shown = sh['view']['layers']
         out.append('view    %s; full sheet: GET /sheet/%s' % ('section layers ' + ', '.join(shown) + ' only' if shown else
@@ -481,7 +497,7 @@ def zoom(v, a, b, rid=None):
         else:
             out[k] = [[r.get('note') or note(r['midi']), round(r['start'], 2), round(r['end'] - r['start'], 2)] for r in x]
     bst = layer_state(v, 'bars')
-    return {'format': 'music-lens-sheet-zoom/1', 'result_id': rid, 'worker': (v.get('tool') or {}).get('version'),
+    z = {'format': 'music-lens-sheet-zoom/1', 'result_id': rid, 'worker': (v.get('tool') or {}).get('version'),
             'duration': v['duration'], 'span': [a, b], 'meter': dict(zip(('beats_per_bar', 'steps'), meter(v))),
             'conventions': {
                 'bars': 'bars overlapping the span, numbered as in the full sheet; partial = the bar reaches outside the span',
@@ -495,6 +511,9 @@ def zoom(v, a, b, rid=None):
             'melody_source': melody_source(done(v, 'melody')),
             'sections': [s for s in secs if s['start'] < b and s['end'] > a],
             'bars': zb if bars is not None else None, 'outside_bars': out}
+    if v.get('profile') == 'quick':  # server-added on a rhythm=quick result only
+        z['profile'] = profile(v)
+    return z
 
 
 def render_zoom(z):
@@ -513,6 +532,8 @@ def render_zoom(z):
            + '; bars %s/%s; chords %s/%s' % (L['bars']['status'], L['bars']['reliability'], L['chords']['status'], L['chords']['reliability'])
            + '; melody = ' + z['melody_source'],
            'sections ' + ('; '.join('%s label %s%s %s-%s' % (s['id'], s['label'], ' (role %s)' % s['function'] if s['function'] else '', mm(s['start']), mm(s['end'])) for s in z['sections']) or 'none in the span')]
+    if 'profile' in z:
+        out.append(profile_line(z['profile']))
     if z['bars'] is None:
         out.append('bars    unavailable in this result')
     for r in z['bars'] or []:

@@ -77,6 +77,7 @@ same trust boundary as the `ml` wrapper: no TLS, no signing, no nonces, no recei
 
 ```sh
 /usr/bin/python3 -I local_cli.py analyze /abs/song.m4a --language ko --emotion-mode music   # ml analyze, then the rhythm layer
+/usr/bin/python3 -I local_cli.py analyze /abs/song.m4a --language ko --quick                # rhythm layer without stems (seconds, not minutes)
 /usr/bin/python3 -I local_cli.py report <result_id>
 /usr/bin/python3 -I local_cli.py timeline <result_id> --layer chords --start 30 --end 60 --limit 50
 /usr/bin/python3 -I local_cli.py sheet <result_id>                                         # same body as GET /sheet/<id>
@@ -112,6 +113,33 @@ same trust boundary as the `ml` wrapper: no TLS, no signing, no nonces, no recei
 
 Tests: `tests/test_local_cli.py` (fake `ml` and fake worker; the stop-signal path; checks the CLI output byte for byte against the served
 `/report`, `/timeline` and `/sheet` bodies).
+
+## Quick rhythm profile (`rhythm=quick`, `analyze --quick`)
+
+`POST /analyze?rhythm=quick` (CLI: `local_cli.py analyze FILE --language … --quick`) runs the rhythm worker
+without stem separation. The worker follows the same path it takes for a 16 kHz upload: no `--melody-source`, so
+every stem stage is skipped with `canonical_16k`. Beats, tempo (Essentia and TempoCNN), key and key sections,
+chords (BTC on the mix when configured), energy, genre, lyric repeats, sections (beat method) and the melody (from
+the mix) are kept. Not measured: bass, other notes, drums, parts, bars and downbeats (All-In-One needs stems), swing,
+mix, part positions, tone and sung notes.
+
+- The stored file gets the server-owned field `"profile": "quick"`, but only when stems were possible and were
+  skipped. The summary, `/report` and the sheet then show `profile` (`profile_note`, or a `profile` header line).
+  Dropped layers read `skipped`/`unavailable`, never `empty`.
+- A later `rhythm=1` run on full-band audio replaces it. Every stem layer at `canonical_16k` counts as "can
+  improve". A later `rhythm=quick` run is treated like a 16 kHz upload: it reuses a stored quick or full result,
+  and never replaces a full result that holds a layer made from stems (a `done` separation, bass, other, drums,
+  sections model, parts, mix, part positions or tone). A full result in which every stem stage failed holds none,
+  so the usual recompute rules apply and quick can replace it. Nothing measured is lost that way.
+- Without `quick`, behaviour and bodies are unchanged.
+- Measured once on a 3.5 min pop song (stereo WAV, all optional models configured):
+  - `ml` ASR: 12.6 s.
+  - Full rhythm worker: 107 s. Stems took 102 s of that: sung notes 46, All-In-One sections and downbeats 19,
+    stereo separation 10, bass 8, vocal melody 7, other notes 6, drums 4.5.
+  - Mix-only stages took about 5 s: Essentia about 2.6, BTC chords 1.5, genre 0.6, TempoCNN 0.3.
+  - Quick therefore needs about 5 s of rhythm time, so the whole analyze takes about 18 s instead of 120 s.
+- Accuracy caveat: quick chords, melody and sections come from the mix, not from stems. Their accuracy against the
+  full run was not measured here. Use quick for a first look, then run `rhythm=1` for the layers that need stems.
 
 ## Signing (summary)
 
