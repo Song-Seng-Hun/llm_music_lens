@@ -230,7 +230,7 @@ API:
   `rhythm_not_found`; a damaged one: `invalid_result`. Question-test results: [docs/sheet-eval.md](docs/sheet-eval.md).
 - `GET /sheet/<id>?start=<s>&end=<s>[&format=text|json]` zooms into at most 30 s (the same span as one `/earcheck`
   clip): one block per bar overlapping the span (number as in the sheet, times, section, chord with scale and degree,
-  kick/snare 16-step pattern, other drum hits counted, melody and bass as `name@step+length` on that bar's 16-step
+  kick/snare pattern on the bar grid's `steps` (12 or 16), other drum hits counted, melody and bass as `name@step+length` on that bar's same
   grid, other notes as count and range). Rows belong to the bar holding their onset (the last half step rounds to
   the next bar's step 0, as in the kick/snare grid); rows starting outside the span are left out; a skipped layer is
   unavailable, not empty; bars without chords (chord model off) list the timed chords instead; rows in no bar, and every row of a result without bars, are listed by time. JSON:
@@ -907,7 +907,7 @@ whose MIDI has no standard kick or snare notes.
 
 Swing was evaluated on the same songs against the MIDI hats, with its bars set beforehand and passed. Few of those songs swing (3 of 35), so
 the call rests on little evidence, and sixteenth-note swing is not measured. Steady straight sixteenth hats put as many hits at 0.75 as at 0.5, so they can read as `swung` with a phase
-near 0.625; no evaluated song did this, so how often it happens is unknown. A beat is a quarter of a bar, so a bar of another length misplaces it.
+near 0.625; no evaluated song did this, so how often it happens is unknown. A beat is a third of the bar when `beats_per_bar` is 3, else a quarter, so a bar of another length misplaces it.
 A fill flag per bar was tried too and failed its bar, so it is not provided; the hit times are in `layer=drums`.
 
 `split` was evaluated on the same songs against the annotated chords, with 60% chosen on songs 1-50, and it missed one of its three bars, kept by the
