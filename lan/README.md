@@ -126,6 +126,16 @@ layer) with `emotion_mode` `none` or `voice` also gets `error.hint`: for instrum
 `{"error":{"code":"empty_output","message":"Analyzer returned no output","detail":"No requested analysis layer
 succeeded; no result published","hint":"no layer succeeded (no words recognized, or speech recognition failed); ..."},"request_id":"..."}`.
 
+Music fallback: when the rhythm layer is requested (`rhythm=1` or `quick`; CLI without `--no-rhythm`), mode `none`
+or `voice`, and ml fails with that `empty_output` reason, ml runs once more with `--emotion-mode music`. Music mood
+needs no words, so this succeeds for instrumental audio; the rhythm layer then runs as usual. ml gives the same
+reason when speech recognition itself failed, so the fallback runs then too and the result has no words. The summary adds
+`"emotion_fallback": "music"`, and the result is ml's music-mode result (its own `result_id`, a music-mood layer).
+There is no loop: if the second run fails, its error body is returned (`detail`, no `hint`). Without the rhythm
+layer nothing is retried (the error carries the hint). Audio with words is unchanged. A later mode-`none` request for
+the same audio repeats both ml runs (the first fails again in seconds) and lands on the same music-mode result, so the
+stored rhythm file is reused under the usual rules.
+
 ## Quick rhythm profile (`rhythm=quick`, `analyze --quick`)
 
 `POST /analyze?rhythm=quick` (CLI: `local_cli.py analyze FILE --language … --quick`) runs the rhythm worker
