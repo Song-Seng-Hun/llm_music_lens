@@ -58,6 +58,8 @@ def meter(v):
 
 # Tempo level: on RWC-P (100 songs, frozen test 2026-11-07) Essentia and the bar tempo split ~2x on 12 songs;
 # the bar tempo matched the annotated beat on 10, Essentia on 2. So a ~2x split shows the bar tempo.
+# On 8 songs both agree at the other level (5 doubled, 3 halved); chord changes per bar could not tell them apart
+# (frozen test), so the half/double in bpm_alternatives stays a real candidate.
 TEMPO_SPLIT = ((1.8, 2.2), (0.45, 0.55))
 
 

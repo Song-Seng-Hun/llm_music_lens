@@ -227,7 +227,9 @@ API:
   One block per source section (ID, times, bars, key estimate and in-section scale changes over bars, or key changes from `key_sections` in a section with no scaled bar, level, chords per bar or
   timed with N.C., melody, parts, drum coverage and groove ID), each layer marked detected / empty / unavailable /
   failed. The tempo line gives Essentia's bpm, or the bar tempo when the two differ about 2x (on RWC-P the bar tempo
-  matched the annotated beat on 10 of 12 such songs, Essentia on 2). Give an LLM the sheet first and let it drill down with `/timeline` for exact rows. No stored file: 404
+  matched the annotated beat on 10 of 12 such songs, Essentia on 2). On 8 of 100 RWC-P songs the two agree at the
+  other level (5 doubled, 3 halved); a frozen chord-rate test could not tell them apart, so treat the half/double in
+  `bpm_alternatives` as a real candidate. Give an LLM the sheet first and let it drill down with `/timeline` for exact rows. No stored file: 404
   `rhythm_not_found`; a damaged one: `invalid_result`. Question-test results: [docs/sheet-eval.md](docs/sheet-eval.md).
 - `GET /sheet/<id>?start=<s>&end=<s>[&format=text|json]` zooms into at most 30 s (the same span as one `/earcheck`
   clip): one block per bar overlapping the span (number as in the sheet, times, section, chord with scale and degree,
