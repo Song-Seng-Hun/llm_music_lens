@@ -20,6 +20,7 @@ Nothing here is installed. No LaunchAgent, firewall rule, certificate or key is 
 | `other_notes.py` | Optional accompaniment layer: Basic Pitch notes of the other stem, run by `rhythm_worker.py` in its own environment |
 | `adtof_model.py` | Optional drum layer: ADTOF Frame_RNN inference on CPU, run by `rhythm_worker.py` as its own process (separate implementation, reads the official checkpoint) |
 | `limit_exec.py` | Sets RLIMIT_CPU 60 s / FSIZE 24 MiB / NOFILE 32, then `execv /usr/bin/afconvert -f WAVE -d LEI16@16000 -c 1 src dst`. Two more fixed modes for the ear check: `--listen SRC DST` (`-d LEI16@44100 -c 1`, FSIZE 56 MiB) and `--earcheck PYTHON SCRIPT RESULT SRC START END OUT LAYERS` (FSIZE 16 MiB, NOFILE 64, `execv PYTHON -I SCRIPT ...`) |
+| `local_cli.py` | Mac-local CLI (no network): analyze + rhythm layer, report, timeline and sheet through the server's own code (`server.Engine`); see "Local CLI (this Mac)" |
 | `sign.py` | Shared canonical-string and HMAC helper (server, tests, Python clients) |
 | `sheet.py` | LLM sheet: compact section-indexed text/JSON of a stored rhythm result, served at `/sheet/<id>`, with a bar-by-bar zoom (stdlib only) |
 | `ear_check.py` | Ear check for a person: left ear the original, right ear a synth replay of a stored result, loudness following the original (local tool, and run by the server for `POST /earcheck/<id>` under the rhythm python; needs numpy) |
@@ -67,6 +68,39 @@ NOFILE 64) and fails if numpy does not start under those limits.
 
 A LAN client can get the same file from the server: `POST /earcheck/<result_id>?start=&end=` with the audio
 re-uploaded (see "Optional rhythm layer"); spans there are at most 30 s.
+
+## Local CLI (this Mac)
+
+The LAN server refuses loopback in production and holds only the Windows client keys, so agents on the Mac itself
+cannot call it. `local_cli.py` gives them the same results without the network. It runs as the same OS user, the
+same trust boundary as the `ml` wrapper: no TLS, no signing, no nonces, no receipts.
+
+```sh
+/usr/bin/python3 -I local_cli.py analyze /abs/song.m4a --language ko --emotion-mode music   # ml analyze, then the rhythm layer
+/usr/bin/python3 -I local_cli.py report <result_id>
+/usr/bin/python3 -I local_cli.py timeline <result_id> --layer chords --start 30 --end 60 --limit 50
+/usr/bin/python3 -I local_cli.py sheet <result_id>                                         # same body as GET /sheet/<id>
+/usr/bin/python3 -I local_cli.py sheet <result_id> --start 60 --end 90 --format json       # zoom, at most 30 s
+```
+
+- It reads the server's config (`--config`, default `~/.music-lens/api.json`) through `server.load_config`, so the
+  same checks apply. It never prints key material.
+- The commands run the server's own code in `server.Engine` (the class `App` builds on). That covers staging into
+  `<root>/uploads/<op>/`, afconvert under `limit_exec.py`, the strict WAV check, the hard link into the inbox and
+  `ml analyze`. The rhythm worker then runs with the same `rhythm` config section, under the same team flock
+  (`<root>/.analyze.lock`, `busy` when it is held). Results go to the same `results-rhythm/` directory with the
+  same cache and reuse rules. A result stored by the CLI is served by the LAN server, and the reverse also holds.
+- stdout is the body the server would send: the analyze summary (with `rhythm` unless `--no-rhythm`), the `ml
+  report` with the stored rhythm merged in, a rhythm timeline page (`words`/`emotion` pass through to `ml
+  timeline`), or the sheet body. Errors use the server's error body on stderr. Exit codes: 0 ok, 1 error, 2 config
+  or usage error.
+- Limits: there is no in-process API gate across processes. A CLI analyze beside a server analyze is serialised
+  by the team flock (`ml` reports `busy`, and the rhythm layer reports `busy`). Events are logged to
+  `<root>/logs/local.log`. If the CLI process is killed mid-run, its `uploads/<op>/` directory can stay behind.
+  No receipt owns it, so remove it by hand.
+
+Tests: `tests/test_local_cli.py` (fake `ml` and fake worker; checks the CLI output byte for byte against the served
+`/report`, `/timeline` and `/sheet` bodies).
 
 ## Signing (summary)
 
