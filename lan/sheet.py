@@ -272,13 +272,14 @@ def render(sh):
     num = lambda x, f: '?' if x is None else f % x
     rng = lambda r: '%s-%s' % (mm(r[0]), mm(r[1])) if r else 'unknown'
     g, c = sh['song'], sh['conventions']
-    tsrc = lambda t: ' from bars (Essentia %s BPM is the other level)' % num(t.get('essentia_bpm'), '%.1f') if t.get('source') == 'bars' else ''
+    tline = lambda t: ('%s BPM from bars (Essentia %s BPM, confidence %s of ~%.1f, uncalibrated, is the other level)' % (num(t['bpm'], '%.1f'), num(t.get('essentia_bpm'), '%.1f'), num(t['confidence'], '%.1f'), t['confidence_max'])
+                       if t.get('source') == 'bars' else '%s BPM (confidence %s of ~%.1f, uncalibrated)' % (num(t['bpm'], '%.1f'), num(t['confidence'], '%.1f'), t['confidence_max']))
     grid = lambda steps, ch: ''.join(ch if i in steps else '.' for i in range(g['meter']['steps']))
     L = g['layers']
     out = ['MUSIC LENS SHEET (%s) | result %s | %s | worker %s' % (sh['format'], (sh['result_id'] or 'unknown')[:12], mm(sh['duration']), sh['worker']),
            'labels: %s.' % c['reliability'],
            'status: ' + c['status'] + '.',
-           'tempo   %s BPM%s (confidence %s of ~%.1f, uncalibrated); feel %s; downbeats %s; beats per bar %s' % (num(g['tempo']['bpm'], '%.1f'), tsrc(g['tempo']), num(g['tempo']['confidence'], '%.1f'), g['tempo']['confidence_max'], g['feel'] or 'unknown', g['downbeats'], g['meter']['beats_per_bar'] or 'unknown'),
+           'tempo   %s; feel %s; downbeats %s; beats per bar %s' % (tline(g['tempo']), g['feel'] or 'unknown', g['downbeats'], g['meter']['beats_per_bar'] or 'unknown'),
            'key     whole-song %s; per-section estimates (longest overlap) %s' % (g['key']['whole_song'] or 'unknown', ', '.join('%s %d%%' % (k['key'] or '?', round(100 * k['share'])) for k in g['key']['by_section']))]
     keys = {k['key'] for k in g['key']['by_section']} - {None}
     if g['key']['whole_song'] and keys and g['key']['whole_song'] not in keys:

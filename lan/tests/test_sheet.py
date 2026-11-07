@@ -66,7 +66,7 @@ class TempoTest(unittest.TestCase):
         sh = sheet.build(self.v(142.93, 3.32), RID64)
         t = sh["song"]["tempo"]
         self.assertEqual((t["bpm"], t["source"], t["essentia_bpm"]), (72.29, "bars", 142.93))
-        self.assertIn("tempo   72.3 BPM from bars (Essentia 142.9 BPM is the other level) (confidence", sheet.render(sh))
+        self.assertIn("tempo   72.3 BPM from bars (Essentia 142.9 BPM, confidence 3.9 of ~5.3, uncalibrated, is the other level); feel", sheet.render(sh))
 
     def test_half_split_and_three_beats(self):
         t = sheet.build(self.v(60.0, 1.5, n=3), RID64)["song"]["tempo"]   # bars 120
