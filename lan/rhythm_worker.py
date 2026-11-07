@@ -21,7 +21,7 @@ Usage: <essentia python> -I rhythm_worker.py [--words-stdin] WAV
        0.12.0 an accompaniment layer, see "Accompaniment notes" in README.md)
        --drum-model /abs/checkpoint.index (0.9.0; with the Demucs options: a drum layer, see "Drum hits" in README.md)
        With the Demucs options, 0.13.0 adds part activity per section, see "Part activity" in README.md.
-       With the section model, 0.14.0 adds downbeats and bars, and 0.15.0 a scale and degree per bar, and 0.16.0 swing, and 0.18.0 a bar's two chords, and 0.22.0 beats per bar, and 0.23.0 bars to the song end (extended_rows), see "Musical units" in README.md.
+       With the section model, 0.14.0 adds downbeats and bars, and 0.15.0 a scale and degree per bar, and 0.16.0 swing, and 0.18.0 a bar's two chords, and 0.22.0 beats per bar, and 0.23.0 bars to the song end (extended_rows), and 0.24.0 the key_changes warning from bar scales, see "Musical units" in README.md.
 WAV is the server's already-validated canonical file (PCM mono 16 kHz s16, 0 < duration <= 600 s).
 --words-stdin (0.4.3; the server always passes it): stdin holds one JSON object {"words": [[text, start, end], ...]}
 (the ASR words of the same result) or {"words": null, "reason": code} (the server could not provide them), at most
@@ -198,7 +198,7 @@ import time
 import unicodedata
 import wave
 
-TOOL = {"name": "music-lens-rhythm-worker", "version": "0.23.0"}
+TOOL = {"name": "music-lens-rhythm-worker", "version": "0.24.0"}
 SRC_RATE = 16000
 RATE = 44100
 MAX_SECONDS = 600.0
@@ -1918,6 +1918,19 @@ def bar_scales(spans, chords):
     return out
 
 
+def key_change_warning(key_sections, bars):
+    """The key_changes warning, or None. With bar scales it counts bars whose scale differs from the bar before (the key
+    path; on RWC-P truth it reported 0.00 false changes per no-change song where the 20 s windows reported 3.08);
+    without them it counts the 20 s key sections."""
+    scales = [r["scale"] for r in (bars or {}).get("rows", [])]
+    if scales and all(scales):
+        n = sum(a != b for a, b in zip(scales, scales[1:]))
+        return "key_changes: %d scale changes over bars (key path)" % n if n else None
+    if len(key_sections) > 1:
+        return "key_changes: %d sections on %g s windows (DSP estimate)" % (len(key_sections), KEY_WINDOW)
+    return None
+
+
 def half_chord(chords, start, end):
     """(top chord label, its share of [start, end]), or (None, 0)."""
     label = top_chord(chords, start, end)
@@ -2613,8 +2626,6 @@ def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None, genre_di
     key_sections = merge_key_sections(rows)
     if bad_ks:
         warnings.append("key_section_strength_unavailable: non-finite native strength; section strength is null")
-    if len(key_sections) > 1:
-        warnings.append("key_changes: %d sections on %g s windows (DSP estimate)" % (len(key_sections), KEY_WINDOW))
 
     window = es.Windowing(type="blackmanharris62")
     spectrum = es.Spectrum()
@@ -2689,6 +2700,9 @@ def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None, genre_di
     if parts and parts.get("reason") == "levels_failed":
         warnings.append("parts_failed: levels_failed")
     bars = bars_field((sep or {}).get("downbeats"), chords, drums, drum_hits, btc_used, duration, (sep or {}).get("model_beats"))
+    kw = key_change_warning(key_sections, bars)
+    if kw:
+        warnings.append(kw)
     swing = swing_field((sep or {}).get("downbeats"), drums, drum_hits, bars and bars["beats_per_bar"])
     mix_field, positions = stereo_fields(sep, sections)
     tone = tone_field(sep, sections)

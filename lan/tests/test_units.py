@@ -111,6 +111,15 @@ class ScaleTest(unittest.TestCase):
         for label in ("N", "X", "", None, "?"):
             self.assertIsNone(rw.chord_tones(label))
 
+    def test_key_change_warning_follows_bar_scales(self):
+        ks2 = [{"tonic": "C"}, {"tonic": "D"}]
+        bars = lambda *sc: {"rows": [{"scale": x} for x in sc]}
+        self.assertEqual(rw.key_change_warning(ks2 * 2, bars("C", "C", "D", "D")), "key_changes: 1 scale changes over bars (key path)")
+        self.assertIsNone(rw.key_change_warning(ks2 * 2, bars("C", "C")))
+        self.assertEqual(rw.key_change_warning(ks2, bars(None, None)), "key_changes: 2 sections on 20 s windows (DSP estimate)")
+        self.assertEqual(rw.key_change_warning(ks2, None), "key_changes: 2 sections on 20 s windows (DSP estimate)")
+        self.assertIsNone(rw.key_change_warning(ks2[:1], None))
+
     def test_a_long_change_moves_and_a_short_visit_stays(self):
         c, d = ["C", "F", "Dm", "Am"] * 6, ["D", "A", "Bm", "Em"] * 6
         self.assertEqual(rw.scale_path(c + d), [0] * 24 + [2] * 24)

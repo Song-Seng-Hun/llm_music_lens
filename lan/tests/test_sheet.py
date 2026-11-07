@@ -168,6 +168,16 @@ class SectionTest(unittest.TestCase):
         s = sheet.build(v)["sections"][0]
         self.assertEqual((s["key_estimate"], s["key_changes"]), ("C", [[0.0, "C"], [4.0, "D"]]))
 
+    def test_scale_changes_replace_key_changes(self):
+        rows = [dict(bar(float(i), i + 1.0, "C"), scale=x) for i, x in enumerate("CCCCDD")]
+        v = base(sections=[{"start": 0.0, "end": 6.0, "label": "A", "energy_mean": -20.0}],
+                 bars={"status": "done", "reliability": "reference_candidate", "rows": rows})
+        s = sheet.build(v)["sections"][0]
+        self.assertEqual((s["key_changes"], s["scale_changes"]), ([], [[4.0, "D"]]))
+        t = sheet.render(sheet.build(v))
+        self.assertIn("  scale  changes 0:04.00 D", t)
+        self.assertNotIn("  key    changes", t)
+
     def test_melody_failed_vs_skipped(self):
         self.assertEqual(sheet.build(base(melody={"status": "failed"}))["sections"][0]["melody"], {"status": "failed"})
         self.assertEqual(sheet.build(base(melody={"status": "skipped"}))["sections"][0]["melody"], {"status": "unavailable"})
