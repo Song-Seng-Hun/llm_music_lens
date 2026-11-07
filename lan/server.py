@@ -115,6 +115,29 @@ ERRORS = {
 ML_400 = ("invalid_audio", "invalid_path", "invalid_id", "invalid_argument")
 ML_MISCONFIG = ("pin_mismatch", "configuration", "dependency_missing")
 ML_500_KEEP = ("invalid_output", "invalid_result", "empty_output", "cancelled", "internal_error")
+# ml 0.2.6's fixed reason texts (music_lens_local.py Failure messages) per code the server keeps as is. Only these
+# reach the client, as error.detail: never other stderr text (paths, OSError strings, diagnostics).
+ML_REASONS = {
+    "empty_output": ("No timed words in structurally valid output; silence or unrecognized audio is not a successful transcript",
+                     "No requested analysis layer succeeded; no result published"),
+    "invalid_audio": ("WAV exceeds 64 MiB", "Expected mono 16000 Hz signed16 PCM WAV",
+                      "Empty, truncated or longer-than-600s WAV", "Malformed PCM WAV"),
+    "invalid_path": ("Invalid audio path or traversal", "Audio path must resolve inside audio root",
+                     "Audio must be a regular file", "Result symlinks are forbidden"),
+    "invalid_id": ("Expected a 64-character lowercase hex result ID",),
+    "not_found": ("Unknown result ID",),
+    "invalid_argument": ("end must be at least start", "layer must be words or emotion", "cursor exceeds matching word count",
+                         "title must be 1..300 printable characters", "language must be explicit: auto, en, ko or ja",
+                         "emotion_mode must be none, voice or music", "Unknown tool or invalid arguments",
+                         "Unknown or missing arguments"),
+    "busy": ("This analysis is locked; stale locks require manual owner verification",),
+    "timeout": ("Analysis exceeded configured timeout", "Inference exceeded configured timeout"),
+    "cancelled": ("Analysis cancelled", "Analysis cancelled before child start", "Analysis cancelled during preparation",
+                  "Analysis cancelled before inference", "Analysis cancelled between stages",
+                  "Analysis cancelled before publication", "Inference cancelled", "Inference cancelled before publication"),
+}
+NO_WORDS_HINT = ("no sung or spoken words were recognized; for instrumental audio use emotion_mode=music "
+                 "(local CLI: --emotion-mode music) so the music-mood layer succeeds and the rhythm layer runs")
 
 RE_IFACE = re.compile(r"\A[a-z]{1,8}[0-9]{1,3}\Z")
 RE_TIME = re.compile(r"\A(0|[1-9][0-9]{0,11})\Z")
@@ -820,13 +843,15 @@ def valid_name(name):
     return not any(unicodedata.category(c) == "Cc" for c in name)
 
 
-def error_body(code, detail=None, **extra):
+def error_body(code, detail=None, hint=None, **extra):
     status, message = ERRORS[code]
     if code == "unauthorized":
         return status, {"error": {"code": code}}  # auth failures carry nothing else
     body = {"error": {"code": code, "message": message}}
     if detail:
         body["error"]["detail"] = detail
+    if hint:
+        body["error"]["hint"] = hint
     body.update(extra)
     return status, body
 
@@ -848,25 +873,39 @@ def map_ml_error(code):
 
 
 def last_stderr_code(f, max_line):
-    """Parse only the last non-empty stderr line (<= max_line bytes) as {"error":{"code"}}."""
+    return last_stderr_error(f, max_line)[0]
+
+
+def ml_error(f, max_line):
+    """(server code, detail): ml's code mapped, and its message when it is one of ML_REASONS[code]."""
+    code, message = last_stderr_error(f, max_line)
+    mapped = map_ml_error(code)
+    return mapped, (message if mapped == code and message in ML_REASONS.get(code, ()) else None)
+
+
+def last_stderr_error(f, max_line):
+    """Parse only the last non-empty stderr line (<= max_line bytes) as {"error":{"code","message"}}: (code, message
+    or None)."""
     size = os.fstat(f.fileno()).st_size
     span = min(size, max_line * 2 + 2)
     f.seek(size - span)
     tail = f.read(span).rstrip(b"\r\n\t ")
     if not tail:
-        return "internal_error"
+        return "internal_error", None
     nl = tail.rfind(b"\n")
     if nl < 0 and span < size:
-        return "internal_error"  # the last line is longer than we read
+        return "internal_error", None  # the last line is longer than we read
     line = tail[nl + 1:]
     if len(line) > max_line:
-        return "internal_error"
+        return "internal_error", None
     try:
         v = json.loads(line.decode("utf-8"))
-        code = v["error"]["code"]
+        code, message = v["error"]["code"], v["error"].get("message")
     except (ValueError, KeyError, TypeError):
-        return "internal_error"
-    return code if isinstance(code, str) and len(code) <= 64 else "internal_error"
+        return "internal_error", None
+    if not (isinstance(code, str) and len(code) <= 64):
+        return "internal_error", None
+    return code, message if isinstance(message, str) else None
 
 
 # ---------------------------------------------------------------- rhythm layer (optional)
@@ -2803,9 +2842,9 @@ class Engine:
 
     def read_ml(self, args, extra=None):
         """A read-only `ml` call: (native bytes, None), or (None, dict) with extra merged in."""
-        ok, data, code = self.run_ml(args, self.limits["read_timeout"])
+        ok, data, code, detail = self.run_ml(args, self.limits["read_timeout"])
         if not ok:
-            raise HttpError(code)
+            raise HttpError(code, detail=detail)
         if extra is None or extra[1] is None:
             return data, None  # native JSON bytes unchanged
         v = json.loads(data.decode("utf-8"))  # run_ml already checked it is a JSON object
@@ -2932,7 +2971,8 @@ class Engine:
 
     # wrapper calls
     def run_ml(self, args, timeout):
-        """Returns (ok, stdout_bytes or None, error_code). timeout None = never kill (analyze)."""
+        """Returns (ok, stdout_bytes or None, error_code, detail: ml's fixed reason or None). timeout None = never kill
+        (analyze)."""
         lim = self.limits
         with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
             try:
@@ -2940,7 +2980,7 @@ class Engine:
                                env=self.child_env(), cwd="/", close_fds=True, shell=False,
                                start_new_session=True)
             except OSError:
-                return False, None, "server_misconfigured"
+                return False, None, "server_misconfigured", None
             if timeout is None:
                 p.wait()
             else:
@@ -2948,23 +2988,23 @@ class Engine:
                     p.wait(timeout)
                 except subprocess.TimeoutExpired:
                     self.stop_ml(p)
-                    return False, None, "timeout"
+                    return False, None, "timeout", None
             if p.returncode != 0:
-                return False, None, map_ml_error(last_stderr_code(err, lim["stderr_line"]))
+                return (False, None) + ml_error(err, lim["stderr_line"])
             size = os.fstat(out.fileno()).st_size
             if size > lim["ml_stdout"]:
-                return False, None, "invalid_output"
+                return False, None, "invalid_output", None
             out.seek(0)
             data = out.read().strip()
             if not data:
-                return False, None, "empty_output"
+                return False, None, "empty_output", None
             try:
                 v = json.loads(data.decode("utf-8"))
             except ValueError:
-                return False, None, "invalid_output"
+                return False, None, "invalid_output", None
             if not isinstance(v, dict):
-                return False, None, "invalid_output"
-            return True, data, None
+                return False, None, "invalid_output", None
+            return True, data, None, None
 
     def stop_ml(self, p):
         """Stop an `ml` child: SIGINT first, so ml's own `finally` kills its inference child (a separate session that
@@ -3024,8 +3064,8 @@ class Engine:
 
     # analyze job (staged upload -> inbox link -> ml analyze)
     def _job(self, job):
-        def fail(code):
-            st, b = error_body(code, request_id=job.rid)
+        def fail(code, detail=None, hint=None):
+            st, b = error_body(code, detail=detail, hint=hint, request_id=job.rid)
             return st, b, None, {"state": "failed", "http_status": st, "error_code": code}
         wav = job.src
         # MP3/M4A always convert; a RIFF/WAVE upload converts only when it is not already canonical
@@ -3047,11 +3087,12 @@ class Engine:
             return fail("internal_error")
         job.linked = True
         job.ml_started = True
-        ok, data, code = self.run_ml(["analyze", dst_name, "--language", job.language, "--emotion-mode",
-                                      job.emotion_mode], None)
+        ok, data, code, detail = self.run_ml(["analyze", dst_name, "--language", job.language, "--emotion-mode",
+                                              job.emotion_mode], None)
         self.log.event("analyze_exit", id=job.rid, ok=ok, code=code)
-        if not ok:
-            return fail(code)
+        if not ok:  # ml's own empty_output (detail set): no words and no emotion layer; music mood needs no words
+            hint = NO_WORDS_HINT if code == "empty_output" and detail and job.emotion_mode != "music" else None
+            return fail(code, detail, hint)
         native = json.loads(data.decode("utf-8"))
         native["request_id"], native["upload_sha256"], native["name"] = job.rid, job.upload_sha256, job.name
         rid = native.get("result_id")

@@ -174,7 +174,9 @@ def cmd_analyze(engine, ns):
     finally:
         engine.cleanup(op, job.linked if job is not None else False)
     if status != 200:
-        raise Fail(body["error"]["code"], **{k: v for k, v in body.items() if k != "error"})
+        err = body["error"]
+        raise Fail(err["code"], err.get("detail"), **({"hint": err["hint"]} if "hint" in err else {}),
+                   **{k: v for k, v in body.items() if k != "error"})
     out_json(engine, body)
 
 

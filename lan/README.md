@@ -114,6 +114,18 @@ same trust boundary as the `ml` wrapper: no TLS, no signing, no nonces, no recei
 Tests: `tests/test_local_cli.py` (fake `ml` and fake worker; the stop-signal path; checks the CLI output byte for byte against the served
 `/report`, `/timeline` and `/sheet` bodies).
 
+## ml error reasons (`error.detail`, `error.hint`)
+
+When `ml` fails with one of its own fixed reasons (ml 0.2.6 `Failure` texts, listed in `server.ML_REASONS` per
+code), the error body keeps its fixed `message` and adds that text as `error.detail`. This applies to the server and
+the local CLI (stderr JSON), on analyze and on reads. Other stderr text (paths, OS errors, diagnostics, a code the
+server remaps) is never passed on: those bodies stay `{code, message}`. An analyze that ml fails as `empty_output`
+(no words and no emotion layer, e.g. instrumental audio) with `emotion_mode` `none` or `voice` also gets
+`error.hint`: use `emotion_mode=music` (CLI `--emotion-mode music`) so the music-mood layer succeeds and the rhythm
+layer runs. Example:
+`{"error":{"code":"empty_output","message":"Analyzer returned no output","detail":"No requested analysis layer
+succeeded; no result published","hint":"no sung or spoken words were recognized; ..."},"request_id":"..."}`.
+
 ## Quick rhythm profile (`rhythm=quick`, `analyze --quick`)
 
 `POST /analyze?rhythm=quick` (CLI: `local_cli.py analyze FILE --language … --quick`) runs the rhythm worker
