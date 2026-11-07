@@ -20,6 +20,17 @@ def bar(s, e, chord, kick=(), snare=()):
             "snare": None if snare is None else list(snare)}
 
 
+class MelodySourceTest(unittest.TestCase):
+    def test_long_method_cut_at_a_word(self):
+        m = "Demucs htdemucs_ft vocal at 44.1 kHz, then RMVPE threshold 0.03 on CPU in 30 s pieces; sampled every 10 ms. Next."
+        s = sheet.melody_source({"method": m})
+        self.assertTrue(s.endswith(" ..."), s)
+        self.assertIn(s[len("melody estimate: "):-4].split()[-1], [w.rstrip(",;:") for w in m.split()])  # last word whole
+        self.assertLessEqual(len(s), len("melody estimate: ") + 95)
+        self.assertEqual(sheet.melody_source({"method": "Short one. Rest"}), "melody estimate: Short one")
+        self.assertEqual(sheet.melody_source({}), "unknown method")
+
+
 class OldWorkerTest(unittest.TestCase):
     """A result without bars, parts or drums (worker 0.4.x shape)."""
 
@@ -251,6 +262,7 @@ class SheetRouteTest(RhythmBase):
                   "start=6&end=7", "start=1e1&end=12", "start=0&end=1&start=0"):
             st, b = self.c.json("GET", "/sheet/%s?%s" % (RID64, q))
             self.assertEqual((st, b["error"]["code"]), (400, "bad_request"), q)
+            self.assertEqual("at most 30 s" in b["error"].get("detail", ""), q in ("start=0&end=30.5", "start=2&end=2", "start=3&end=2"), q)
         self.assertEqual(self.c.json("GET", "/sheet/%s?start=0&end=30" % RID64)[0], 200)
         self.assertEqual(self.c.json("GET", "/sheet/%s?start=2.2&end=32.2" % RID64)[0], 200)  # 30 s despite float error
 

@@ -159,6 +159,8 @@ class EarcheckRouteTest(EarcheckBase):
                   target("1e1", "2"), target("-0", "2"), target("-0.0", "2"), target("0", "-0"), "/earcheck/%s?end=2" % RID64, "/earcheck/%s" % RID64):
             st, b = self.post(t)
             self.assertEqual((st, b["error"]["code"]), (400, "bad_request"), t)
+        for t, d in ((target("0", "30.5"), True), (target("3", "2"), True), (target("0", "1", "bass,piano"), False)):
+            self.assertEqual("at most 30 s" in self.post(t)[1]["error"].get("detail", ""), d, t)
         self.assertEqual(self.fp.calls(), [])
         self.assert_clean()
 

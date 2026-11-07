@@ -138,6 +138,7 @@ UPLOAD_NAMES = ("upload.part", "upload.wav", "upload.mp3", "upload.m4a", "conver
 EAR_CHECK = os.path.join(HERE, "ear_check.py")  # run by the rhythm python (numpy); never imported here
 EARCHECK_LAYERS = ("melody", "bass", "other", "chords", "drums", "clicks")  # ear_check.LAYERS
 EARCHECK_DEFAULT = ("melody", "bass", "other", "chords", "drums")  # ear_check.DEFAULT
+SPAN_DETAIL = "end - start must be more than 0 and at most %g s"
 EARCHECK_MAX_SPAN = 30.0  # s; 30 s stereo s16 44.1 kHz = 5,292,044 bytes, base64 7.06 MB < response_max 8 MiB
 LISTEN_RATE = 44100
 LISTEN_MAX_BYTES = 56 * MiB  # limit_exec.LISTEN_FSIZE_BYTES
@@ -149,10 +150,11 @@ class ConfigError(Exception):
 
 
 class HttpError(Exception):
-    def __init__(self, code, close_silently=False):
+    def __init__(self, code, close_silently=False, detail=None):
         super().__init__(code)
         self.code = code
         self.close_silently = close_silently
+        self.detail = detail  # fixed server text naming the broken limit; never echoes client input
 
 
 # ---------------------------------------------------------------- durable files
@@ -816,11 +818,13 @@ def valid_name(name):
     return not any(unicodedata.category(c) == "Cc" for c in name)
 
 
-def error_body(code, **extra):
+def error_body(code, detail=None, **extra):
     status, message = ERRORS[code]
     if code == "unauthorized":
         return status, {"error": {"code": code}}  # auth failures carry nothing else
     body = {"error": {"code": code, "message": message}}
+    if detail:
+        body["error"]["detail"] = detail
     body.update(extra)
     return status, body
 
@@ -3043,7 +3047,7 @@ class Handler(BaseHTTPRequestHandler):
             self.process(app, deadline)
         except HttpError as e:
             if not e.close_silently:
-                self.send_error_code(e.code)
+                self.send_error_code(e.code, detail=e.detail)
                 if self.unread_body:
                     self.drain()
         except Exception as e:
@@ -3290,7 +3294,7 @@ class Handler(BaseHTTPRequestHandler):
                         raise HttpError("bad_request")
                 span = float(q["start"]), float(q["end"])
                 if not 0 < round(span[1] - span[0], 6) <= sheet.ZOOM_MAX:  # round: 2.2 to 32.2 is 30 s
-                    raise HttpError("bad_request")
+                    raise HttpError("bad_request", detail=SPAN_DETAIL % sheet.ZOOM_MAX)
             st, v = app.load_rhythm(m.group(1))
             if st == "missing":
                 raise HttpError("rhythm_not_found")
@@ -3462,7 +3466,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise HttpError("bad_request")
         start, end = float(q["start"]), float(q["end"])
         if start < 0 or not 0 < round(end - start, 6) <= EARCHECK_MAX_SPAN:  # round: 2.2 to 32.2 is 30 s
-            raise HttpError("bad_request")
+            raise HttpError("bad_request", detail=SPAN_DETAIL % EARCHECK_MAX_SPAN)
         layers = EARCHECK_DEFAULT
         if "layers" in q:
             layers = tuple(q["layers"].split(","))

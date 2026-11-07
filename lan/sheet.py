@@ -54,7 +54,12 @@ def melody_source(m):
     meth = (m or {}).get('method') or ''
     if 'YourMT3' in meth:
         return 'sung notes of the vocal stem; may include backing vocals'
-    return ('melody estimate: ' + meth.split('. ')[0][:90]) if meth else 'unknown method'
+    if not meth:
+        return 'unknown method'
+    s = meth.split('. ')[0]
+    if len(s) > 90:  # cut at a word boundary, never mid-word
+        s = s[:91].rsplit(' ', 1)[0].rstrip(',;:') + ' ...'
+    return 'melody estimate: ' + s
 
 
 def same_span(r, a, b):
