@@ -177,6 +177,11 @@ class SectionTest(unittest.TestCase):
         t = sheet.render(sheet.build(v))
         self.assertIn("  scale  changes 0:04.00 D", t)
         self.assertNotIn("  key    changes", t)
+        v["bars"]["rows"] = rows[:2]  # bars end at 2 s: a section after them keeps the key_sections changes
+        v["sections"] = [dict(v["sections"][0], end=2.0), dict(v["sections"][0], start=2.0)]
+        s2 = sheet.build(v)["sections"]
+        self.assertEqual((s2[0]["key_changes"], s2[0]["scale_changes"]), ([], []))
+        self.assertEqual((s2[1]["key_changes"], "scale_changes" in s2[1]), ([[2.0, "C"], [4.0, "D"]], False))
 
     def test_melody_failed_vs_skipped(self):
         self.assertEqual(sheet.build(base(melody={"status": "failed"}))["sections"][0]["melody"], {"status": "failed"})

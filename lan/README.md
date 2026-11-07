@@ -224,7 +224,7 @@ API:
   config) and a `note` to read the sheet first.
 - `GET /sheet/<id>?format=text|json` (default `text`) builds the LLM sheet (`sheet.py`, format `music-lens-sheet/1`) from the
   stored file: `{"result_id", "format", "text"}`, or `{"result_id", "sheet"}` with the JSON the text is rendered from.
-  One block per source section (ID, times, bars, key estimate and in-section key changes, level, chords per bar or
+  One block per source section (ID, times, bars, key estimate and in-section scale changes over bars, or key changes from `key_sections` in a section with no scaled bar, level, chords per bar or
   timed with N.C., melody, parts, drum coverage and groove ID), each layer marked detected / empty / unavailable /
   failed. The tempo line gives Essentia's bpm, or the bar tempo when the two differ about 2x (on RWC-P the bar tempo
   matched the annotated beat on 10 of 12 such songs, Essentia on 2). Give an LLM the sheet first and let it drill down with `/timeline` for exact rows. No stored file: 404

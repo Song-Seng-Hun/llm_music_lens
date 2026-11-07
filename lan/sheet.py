@@ -173,13 +173,14 @@ def build(v, rid=None):
         span[key] += b - a
         kch = [[max(k['start'], a), keyname(k)] for k in sorted(ks, key=lambda k: k['start']) if min(k['end'], b) - max(k['start'], a) >= KEY_MIN]
         sec = {'id': sid, 'label': s['label'], 'function': s.get('function'), 'start': a, 'end': b, 'key_estimate': key,
-               'key_changes': [] if scaled else kch if len({k for _, k in kch}) > 1 else [],
+               'key_changes': kch if len({k for _, k in kch}) > 1 else [],
                'level_db': None if med is None or s.get('energy_mean') is None else round(s['energy_mean'] - med, 1)}
         # bars: a bar belongs to the section holding its midpoint
         idx = [i for i, r in enumerate(bars or []) if a <= (r['start'] + r['end']) / 2 < b]
         bs = [bars[i] for i in idx]
-        if scaled:
+        if scaled and idx:  # a section with no bar keeps the key_sections changes
             sec['scale_changes'] = [[bars[i]['start'], bars[i]['scale']] for i in idx if i and bars[i]['scale'] != bars[i - 1]['scale']]
+            sec['key_changes'] = []
         if bars is not None:
             sec['bars'] = [idx[0] + 1, idx[-1] + 1] if idx else None
             sec['straddling_bars'] = [i + 1 for i, r in zip(idx, bs)
@@ -244,7 +245,7 @@ def build(v, rid=None):
             'chord_names': 'a chord row\'s display (key spelling, /bass when the bass layer holds one chord tone other than the root for half the row or more); a bar shows the display held longest among its chord\'s rows',
             'times': 'seconds from audio start, as in the source result',
             'key_estimate': 'the key_sections estimate with the longest overlap with the section',
-            'scale_changes': 'bars whose key-path scale (12 major scales; C also stands for A minor) differs from the bar before; when bars carry a scale it replaces key_changes from the 20 s key_sections, which report false changes',
+            'scale_changes': 'bars whose key-path scale (12 major scales; C also stands for A minor) differs from the bar before; in a section holding bars that carry a scale it replaces key_changes from the 20 s key_sections, which report false changes',
             'level_db': 'section mean energy minus the song median, dB',
             'bars': 'a bar belongs to the section that holds its midpoint; straddling = more than %d%% of the bar lies outside; uncovered = spans of %.0f s or more with no bar' % (100 * STRADDLE, GAP),
             'parts': 'share of 2 s windows where the stem is within 15 dB of the mix; crossed_50 compares with the previous section only when both were measured',
