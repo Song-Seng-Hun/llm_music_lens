@@ -56,6 +56,36 @@ class OldWorkerTest(unittest.TestCase):
         self.assertNotIn("none", t.split("drill down")[0].replace("unknown", ""))
 
 
+class TempoTest(unittest.TestCase):
+    def v(self, bpm, bar_len, n=4, rows=6):
+        bars = {"status": "done", "reliability": "low_reference", "beats_per_bar": n, "steps": 4 * n,
+                "rows": [bar(i * bar_len, (i + 1) * bar_len, "C") for i in range(rows)]}
+        return base(bpm=bpm, bars=bars)
+
+    def test_2x_split_shows_bar_tempo(self):
+        sh = sheet.build(self.v(142.93, 3.32), RID64)
+        t = sh["song"]["tempo"]
+        self.assertEqual((t["bpm"], t["source"], t["essentia_bpm"]), (72.29, "bars", 142.93))
+        self.assertIn("tempo   72.3 BPM from bars (Essentia 142.9 BPM, confidence 3.9 of ~5.3, uncalibrated, is the other level); feel", sheet.render(sh))
+
+    def test_half_split_and_three_beats(self):
+        t = sheet.build(self.v(60.0, 1.5, n=3), RID64)["song"]["tempo"]   # bars 120
+        self.assertEqual((t["bpm"], t["source"]), (120.0, "bars"))
+
+    def test_agreeing_or_not_2x_keeps_essentia(self):
+        for bpm, bl in ((120.0, 2.0), (90.0, 2.0)):   # bars 120: ratio 1.0, then 0.75
+            sh = sheet.build(self.v(bpm, bl), RID64)
+            self.assertEqual((sh["song"]["tempo"]["bpm"], sh["song"]["tempo"]["source"]), (bpm, "essentia"))
+            self.assertNotIn("from bars", sheet.render(sh))
+
+    def test_no_meter_or_one_bar_keeps_essentia(self):
+        v = self.v(142.93, 3.32); del v["bars"]["beats_per_bar"]
+        self.assertEqual(sheet.build(v, RID64)["song"]["tempo"]["source"], "essentia")
+        t = sheet.build(self.v(142.93, 3.32, rows=1), RID64)["song"]["tempo"]
+        self.assertEqual((t["source"], t["bar_bpm"]), ("essentia", None))
+        self.assertEqual(sheet.build(base(), RID64)["song"]["tempo"]["bpm"], 120.0)
+
+
 class BarsTest(unittest.TestCase):
     def v(self, **kw):
         bars = [bar(0.0, 1.0, "C", [0], [4]), bar(1.0, 2.0, "G", [0], [4]),          # S01
