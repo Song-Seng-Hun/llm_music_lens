@@ -36,7 +36,8 @@ class ReasonTest(Base):
                                            "detail": NO_LAYER, "hint": server.NO_WORDS_HINT}, "request_id": nonce})
             r = self.c.json("GET", "/receipt/" + nonce)[1]
             self.assertEqual((r["state"], r["error_code"]), ("failed", "empty_output"))
-        self.assertIn("emotion_mode=music", server.NO_WORDS_HINT)
+        self.assertIn("emotion_mode=music with rhythm=1", server.NO_WORDS_HINT)
+        self.assertIn("without --no-rhythm", server.NO_WORDS_HINT)
 
     def test_music_mode_gets_no_hint(self):
         self.fail_with("analyze", "empty_output", NO_LAYER)

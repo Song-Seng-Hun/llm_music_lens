@@ -80,7 +80,8 @@ class FallbackTest(RhythmBase):
         b = json.loads(p.stdout)
         self.assertEqual((b["emotion_fallback"], b["rhythm"]["status"]), ("music", "done"))
         self.assertEqual(self.modes(), ["none", "music"])
-        self.assertIn("emotion_mode=music", server.NO_WORDS_HINT)
+        self.assertIn("emotion_mode=music with rhythm=1", server.NO_WORDS_HINT)
+        self.assertIn("without --no-rhythm", server.NO_WORDS_HINT)
 
 
 if __name__ == "__main__":

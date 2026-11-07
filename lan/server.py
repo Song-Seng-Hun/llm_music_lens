@@ -136,9 +136,9 @@ ML_REASONS = {
                   "Analysis cancelled before inference", "Analysis cancelled between stages",
                   "Analysis cancelled before publication", "Inference cancelled", "Inference cancelled before publication"),
 }
-NO_WORDS_HINT = ("no layer succeeded (no words recognized, or speech recognition failed); for instrumental audio try "
-                 "emotion_mode=music (local CLI: --emotion-mode music) so the music-mood layer succeeds and the rhythm "
-                 "layer runs")
+NO_WORDS_HINT = ("no layer succeeded (no words recognized, or speech recognition failed); for instrumental audio use "
+                 "emotion_mode=music with rhythm=1 (local CLI: --emotion-mode music, without --no-rhythm) so the "
+                 "music-mood layer succeeds and the rhythm layer runs")
 
 RE_IFACE = re.compile(r"\A[a-z]{1,8}[0-9]{1,3}\Z")
 RE_TIME = re.compile(r"\A(0|[1-9][0-9]{0,11})\Z")
