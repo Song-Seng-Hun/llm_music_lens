@@ -10,7 +10,7 @@ On 45 frozen questions over four stored results (workers 0.4.3-0.21.0) an LLM re
 correctly than one reading the /report JSON, with no claims about unmeasured layers (see docs/sheet-eval.md).
 GET /sheet/<result_id>?start=&end= serves zoom() instead: a bar-by-bar reading of up to ZOOM_MAX seconds.
 CLI: python3 -I sheet.py RESULT.json OUT.json OUT.txt [START END]"""
-import bisect, collections, itertools, json, os, re, sys
+import bisect, collections, itertools, json, os, re, statistics, sys
 
 LBL = {'reference_candidate': 'cand', 'low_reference': 'low'}
 NAMES = 'C C# D D# E F F# G G# A A# B'.split()
@@ -54,6 +54,29 @@ def meter(v):
     """(beats per bar or None, steps per bar) of the bar grid; results before worker 0.22.0 give (None, 16)."""
     b = done(v, 'bars') or {}
     return b.get('beats_per_bar'), b.get('steps') or STEPS
+
+
+# Tempo level: on RWC-P (100 songs, frozen test 2026-11-07) Essentia and the bar tempo split ~2x on 12 songs;
+# the bar tempo matched the annotated beat on 10, Essentia on 2. So a ~2x split shows the bar tempo.
+TEMPO_SPLIT = ((1.8, 2.2), (0.45, 0.55))
+
+
+def bar_bpm(v):
+    """60 x beats per bar / median bar length; None without a meter or with fewer than 2 bars."""
+    n, rows = meter(v)[0], (done(v, 'bars') or {}).get('rows') or []
+    if not n or len(rows) < 2:
+        return None
+    return round(60.0 * n / statistics.median(r['end'] - r['start'] for r in rows), 2)
+
+
+def tempo(v):
+    """The sheet's tempo: Essentia's bpm, or the bar tempo when the two split ~2x (Essentia's kept as the other level)."""
+    e, a = v.get('bpm'), bar_bpm(v)
+    t = {'bpm': e, 'source': 'essentia', 'essentia_bpm': e, 'bar_bpm': a, 'confidence': v.get('bpm_confidence'),
+         'confidence_max': 5.3, 'calibrated': False}
+    if e and a and any(lo <= e / a <= hi for lo, hi in TEMPO_SPLIT):
+        t.update(bpm=a, source='bars')
+    return t
 
 
 def melody_source(m):
@@ -223,8 +246,9 @@ def build(v, rid=None):
             'parts': 'share of 2 s windows where the stem is within 15 dB of the mix; crossed_50 compares with the previous section only when both were measured',
             'notes_per_note_s': 'notes divided by the summed duration of those notes (sounding time, not section length)',
             'drums': 'measured = bars with kick and snare data; groove = most common non-empty kick/snare pattern, steps 0-%d (4 per beat)' % (meter(v)[1] - 1),
+            'tempo': 'Essentia bpm; when it and the bar tempo (60 x beats per bar / median bar length) differ about 2x, the bar tempo, with Essentia\'s as the other level; confidence is Essentia\'s',
             'meter': 'beats per bar = median count of the section model\'s beats in a bar, given only when 3 or 4; unknown keeps 16 steps'},
-        'song': {'tempo': {'bpm': v.get('bpm'), 'confidence': v.get('bpm_confidence'), 'confidence_max': 5.3, 'calibrated': False},
+        'song': {'tempo': tempo(v),
                  'meter': dict(zip(('beats_per_bar', 'steps'), meter(v))),
                  'feel': sw.get('feel'), 'downbeats': rel(v.get('downbeats') or {}),
                  'key': {'whole_song': keyname(k0) if k0 else None, 'by_section': [{'key': k, 'share': round(t / total, 2)} for k, t in span.most_common()]},
@@ -248,12 +272,13 @@ def render(sh):
     num = lambda x, f: '?' if x is None else f % x
     rng = lambda r: '%s-%s' % (mm(r[0]), mm(r[1])) if r else 'unknown'
     g, c = sh['song'], sh['conventions']
+    tsrc = lambda t: ' from bars (Essentia %s BPM is the other level)' % num(t.get('essentia_bpm'), '%.1f') if t.get('source') == 'bars' else ''
     grid = lambda steps, ch: ''.join(ch if i in steps else '.' for i in range(g['meter']['steps']))
     L = g['layers']
     out = ['MUSIC LENS SHEET (%s) | result %s | %s | worker %s' % (sh['format'], (sh['result_id'] or 'unknown')[:12], mm(sh['duration']), sh['worker']),
            'labels: %s.' % c['reliability'],
            'status: ' + c['status'] + '.',
-           'tempo   %s BPM (confidence %s of ~%.1f, uncalibrated); feel %s; downbeats %s; beats per bar %s' % (num(g['tempo']['bpm'], '%.1f'), num(g['tempo']['confidence'], '%.1f'), g['tempo']['confidence_max'], g['feel'] or 'unknown', g['downbeats'], g['meter']['beats_per_bar'] or 'unknown'),
+           'tempo   %s BPM%s (confidence %s of ~%.1f, uncalibrated); feel %s; downbeats %s; beats per bar %s' % (num(g['tempo']['bpm'], '%.1f'), tsrc(g['tempo']), num(g['tempo']['confidence'], '%.1f'), g['tempo']['confidence_max'], g['feel'] or 'unknown', g['downbeats'], g['meter']['beats_per_bar'] or 'unknown'),
            'key     whole-song %s; per-section estimates (longest overlap) %s' % (g['key']['whole_song'] or 'unknown', ', '.join('%s %d%%' % (k['key'] or '?', round(100 * k['share'])) for k in g['key']['by_section']))]
     keys = {k['key'] for k in g['key']['by_section']} - {None}
     if g['key']['whole_song'] and keys and g['key']['whole_song'] not in keys:

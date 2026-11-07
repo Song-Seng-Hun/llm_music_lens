@@ -226,7 +226,8 @@ API:
   stored file: `{"result_id", "format", "text"}`, or `{"result_id", "sheet"}` with the JSON the text is rendered from.
   One block per source section (ID, times, bars, key estimate and in-section key changes, level, chords per bar or
   timed with N.C., melody, parts, drum coverage and groove ID), each layer marked detected / empty / unavailable /
-  failed. Give an LLM the sheet first and let it drill down with `/timeline` for exact rows. No stored file: 404
+  failed. The tempo line gives Essentia's bpm, or the bar tempo when the two differ about 2x (on RWC-P the bar tempo
+  matched the annotated beat on 10 of 12 such songs, Essentia on 2). Give an LLM the sheet first and let it drill down with `/timeline` for exact rows. No stored file: 404
   `rhythm_not_found`; a damaged one: `invalid_result`. Question-test results: [docs/sheet-eval.md](docs/sheet-eval.md).
 - `GET /sheet/<id>?start=<s>&end=<s>[&format=text|json]` zooms into at most 30 s (the same span as one `/earcheck`
   clip): one block per bar overlapping the span (number as in the sheet, times, section, chord with scale and degree,
