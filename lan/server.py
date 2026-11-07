@@ -136,9 +136,9 @@ ML_REASONS = {
                   "Analysis cancelled before inference", "Analysis cancelled between stages",
                   "Analysis cancelled before publication", "Inference cancelled", "Inference cancelled before publication"),
 }
-NO_WORDS_HINT = ("no layer succeeded (no words recognized, or speech recognition failed); for instrumental audio try "
-                 "emotion_mode=music (local CLI: --emotion-mode music) so the music-mood layer succeeds and the rhythm "
-                 "layer runs")
+NO_WORDS_HINT = ("no layer succeeded (no words recognized, or speech recognition failed); for instrumental audio use "
+                 "emotion_mode=music with rhythm=1 (local CLI: --emotion-mode music, without --no-rhythm) so the "
+                 "music-mood layer succeeds and the rhythm layer runs")
 
 RE_IFACE = re.compile(r"\A[a-z]{1,8}[0-9]{1,3}\Z")
 RE_TIME = re.compile(r"\A(0|[1-9][0-9]{0,11})\Z")
@@ -3088,13 +3088,24 @@ class Engine:
             return fail("internal_error")
         job.linked = True
         job.ml_started = True
-        ok, data, code, detail = self.run_ml(["analyze", dst_name, "--language", job.language, "--emotion-mode",
-                                              job.emotion_mode], None)
+        mode = job.emotion_mode
+        ok, data, code, detail = self.run_ml(["analyze", dst_name, "--language", job.language, "--emotion-mode", mode], None)
         self.log.event("analyze_exit", id=job.rid, ok=ok, code=code)
-        if not ok:  # ml's own empty_output (detail set): no words (none recognized, or ASR failed) and no emotion layer
-            hint = NO_WORDS_HINT if code == "empty_output" and detail and job.emotion_mode != "music" else None
+        # ml's own empty_output (detail set): no words (none recognized, or ASR failed) and no emotion layer. Music mood
+        # needs no words, so with the rhythm layer requested ml runs once more with emotion_mode music (no loop; its
+        # failure is the error body).
+        no_words = not ok and code == "empty_output" and detail and mode != "music"
+        if no_words and job.rhythm and not self.stopping:
+            mode = "music"
+            ok, data, code, detail = self.run_ml(["analyze", dst_name, "--language", job.language, "--emotion-mode", mode],
+                                                 None)
+            self.log.event("analyze_exit", id=job.rid, ok=ok, code=code, fallback=mode)
+        if not ok:
+            hint = NO_WORDS_HINT if code == "empty_output" and detail and mode != "music" else None
             return fail(code, detail, hint)
         native = json.loads(data.decode("utf-8"))
+        if mode != job.emotion_mode:
+            native["emotion_fallback"] = mode
         native["request_id"], native["upload_sha256"], native["name"] = job.rid, job.upload_sha256, job.name
         rid = native.get("result_id")
         rid = rid if isinstance(rid, str) and RE_HEX64.match(rid) else None

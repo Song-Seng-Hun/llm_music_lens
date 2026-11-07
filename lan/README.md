@@ -121,10 +121,24 @@ code), the error body keeps its fixed `message` and adds that text as `error.det
 the local CLI (stderr JSON), on analyze and on reads. Other stderr text (paths, OS errors, diagnostics, a code the
 server remaps) is never passed on: those bodies stay `{code, message}`. An analyze that ml fails as `empty_output`
 (no layer succeeded: no words recognized, e.g. instrumental audio, or speech recognition failed; and no emotion
-layer) with `emotion_mode` `none` or `voice` also gets `error.hint`: for instrumental audio try `emotion_mode=music`
-(CLI `--emotion-mode music`) so the music-mood layer succeeds and the rhythm layer runs. Example:
+layer) with `emotion_mode` `none` or `voice` also gets `error.hint`: for instrumental audio use `emotion_mode=music`
+with `rhythm=1` (CLI `--emotion-mode music`, without `--no-rhythm`) so the music-mood layer succeeds and the rhythm
+layer runs. Example:
 `{"error":{"code":"empty_output","message":"Analyzer returned no output","detail":"No requested analysis layer
 succeeded; no result published","hint":"no layer succeeded (no words recognized, or speech recognition failed); ..."},"request_id":"..."}`.
+
+Music fallback: when the rhythm layer is requested (`rhythm=1` or `quick`; CLI without `--no-rhythm`), mode `none`
+or `voice`, and ml fails with that `empty_output` reason, ml runs once more with `--emotion-mode music`. Music mood
+needs no words, so this succeeds for instrumental audio; the rhythm layer then runs as usual. ml gives the same
+reason when speech recognition itself failed, so the fallback runs then too and the result has no words. The summary adds
+`"emotion_fallback": "music"`, and the result is ml's music-mode result (its own `result_id`, a music-mood layer).
+There is no loop: if the second run fails, its error body is returned (`detail`, no `hint`). Without the rhythm
+layer nothing is retried (the error carries the hint). Audio with words is unchanged. Cost: ml runs its full speech
+recognition pass before it reports no words, so every fallback request pays that pass twice (seconds for a short
+clip, minutes for a long song); a later mode-`none` request for the same audio repeats both runs. When no words were
+recognized, the music run is deterministic: it lands on the same `result_id` and the stored rhythm file is reused under
+the usual rules. When speech recognition failed transiently, ml gives each run a new `result_id` (a `failure_attempt`
+in its provenance), so the rhythm layer is computed again each time.
 
 ## Quick rhythm profile (`rhythm=quick`, `analyze --quick`)
 

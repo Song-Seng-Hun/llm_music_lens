@@ -39,6 +39,8 @@ with open(os.path.join(HERE, "argv.log"), "a") as f:
     f.write(json.dumps(args) + "\n")
 cmd = args[0] if args else ""
 spec = ctl.get(cmd, {})
+if "--emotion-mode" in args and "by_mode" in spec:  # opt-in: a different spec for one emotion mode
+    spec = spec["by_mode"].get(args[args.index("--emotion-mode") + 1], spec)
 with open(os.path.join(HERE, "pid.log"), "a") as f:
     f.write(json.dumps({"cmd": cmd, "pid": os.getpid()}) + "\n")
 if cmd == "analyze":
