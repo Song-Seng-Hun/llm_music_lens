@@ -1,4 +1,5 @@
-"""Musical units (worker 0.14.0, 0.15.0, 0.16.0, 0.18.0): downbeats, bars, scale and degree, swing, two chords in a bar."""
+"""Musical units (worker 0.14.0, 0.15.0, 0.16.0, 0.18.0, 0.22.0): downbeats, bars, scale and degree, swing, two chords in a bar,
+beats per bar."""
 import json
 import unittest
 
@@ -233,6 +234,57 @@ class CheckTest(unittest.TestCase):
         p = server.rhythm_page("ab" * 32, stored(), "bars", 2.5, 3.0, 0, 10)
         self.assertEqual((p["total"], p["bars"][0]["chord"], p["reliability"], p["layer_status"]),
                          (1, "F", "reference_candidate", "done"))
+
+
+WALTZ = [i * 1.5 for i in range(5)]  # 4 bars of 3 beats of 0.5 s
+WALTZ_BEATS = [i * 0.5 for i in range(12)]
+
+
+class MeterTest(unittest.TestCase):
+    def test_beats_per_bar(self):
+        self.assertEqual(rw.beats_per_bar(WALTZ_BEATS, WALTZ), 3)
+        self.assertEqual(rw.beats_per_bar([i * 0.5 for i in range(16)], [0.0, 2.0, 4.0, 6.0, 8.0]), 4)
+        self.assertIsNone(rw.beats_per_bar([0.0, 0.5, 1.0, 1.5, 2.0], [0.0, 2.5]))  # 5
+        self.assertIsNone(rw.beats_per_bar([0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0], [0.0, 1.5, 3.5]))  # median 3.5
+        self.assertIsNone(rw.beats_per_bar([], WALTZ))
+        self.assertIsNone(rw.beats_per_bar(None, WALTZ))
+
+    def test_clean_beats(self):
+        self.assertEqual(rw.clean_beats([0.5, 1.0004, 9.0], 2.0), [0.5, 1.0])
+        for times in (None, "x", [1.0, 0.5], [0.5, float("nan")], [0.0] * (rw.MAX_BEATS + 1)):
+            self.assertEqual(rw.clean_beats(times, 1e6), [])
+
+    def test_three_beat_bars_get_12_steps(self):
+        hits = [{"time": 0.0, "class": "kick"}, {"time": 0.5, "class": "snare"}, {"time": 1.0, "class": "snare"}, {"time": 1.49, "class": "kick"}]
+        b = rw.bars_field(WALTZ, [], DONE, hits, False, 6.0, WALTZ_BEATS)
+        self.assertEqual((b["beats_per_bar"], b["steps"]), (3, 12))
+        self.assertEqual((b["rows"][0]["kick"], b["rows"][0]["snare"], b["rows"][1]["kick"]), ([0], [4, 8], [0]))
+
+    def test_unknown_keeps_16(self):
+        b = rw.bars_field(BEATS, CHORDS, DONE, HITS, True, 4.0)
+        self.assertEqual((b["beats_per_bar"], b["steps"]), (None, 16))
+
+    def test_swing_reads_beats_of_a_3_beat_bar(self):
+        hits = [{"time": round(i * 0.5 + 0.25, 3), "class": "hihat"} for i in range(30)]  # half a beat after each beat
+        grid = [i * 1.5 for i in range(11)]
+        self.assertEqual(rw.swing_field(grid, DONE, hits, 3)["off_beat_phase"], 0.5)
+        self.assertIsNone(rw.swing_field(grid, DONE, hits)["off_beat_phase"])  # read as 4 beats the hits spread out
+
+    def test_server_checks_the_grid(self):
+        hits = [{"time": 1.375, "class": "kick"}]  # step 11 of 12
+        bars = rw.bars_field(WALTZ, [], DONE, hits, False, 6.0, WALTZ_BEATS)
+        v = stored(bars=bars, downbeats=dict(stored()["downbeats"], count=5))
+        self.assertEqual(v["bars"]["rows"][0]["kick"], [11])
+        self.assertIsNotNone(server.check_rhythm(v))
+        self.assertEqual(server.rhythm_summary(v)["bars"]["beats_per_bar"], 3)
+        for change in (dict(steps=16), dict(beats_per_bar=4), dict(beats_per_bar=5, steps=20), dict(steps=None)):
+            self.assertIsNone(server.check_rhythm(dict(v, bars=dict(bars, **change))), change)
+        w = json.loads(json.dumps(v))
+        w["bars"]["rows"][0]["kick"] = [12]
+        self.assertIsNone(server.check_rhythm(w))
+        old = json.loads(json.dumps(stored()))
+        del old["bars"]["beats_per_bar"], old["bars"]["steps"]  # stored before worker 0.22.0
+        self.assertIsNotNone(server.check_rhythm(old))
 
 
 if __name__ == "__main__":

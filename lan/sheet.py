@@ -21,7 +21,7 @@ STRADDLE = 0.1  # a bar straddles when more than this share of it lies outside i
 GAP = 1.0       # uncovered spans shorter than this, s, are not listed
 KEY_MIN = 2.0   # key segments overlapping a section by less than this, s, are not listed as changes
 ZOOM_MAX = 30.0  # s; the same span as one POST /earcheck clip
-STEPS = 16      # steps per bar in the zoom view
+STEPS = 16      # steps per bar when the result gives none (worker before 0.22.0)
 NOTE_LAYERS = (('melody', 'melody_notes', 'melody'), ('bass', 'bass_notes', 'bass'), ('other', 'other_notes', 'other'))
 
 
@@ -48,6 +48,12 @@ def layer_state(v, k):
 def done(v, k):
     x = v.get(k)
     return x if isinstance(x, dict) and x.get('status', 'done') == 'done' else None
+
+
+def meter(v):
+    """(beats per bar or None, steps per bar) of the bar grid; results before worker 0.22.0 give (None, 16)."""
+    b = done(v, 'bars') or {}
+    return b.get('beats_per_bar'), b.get('steps') or STEPS
 
 
 def melody_source(m):
@@ -196,8 +202,10 @@ def build(v, rid=None):
             'bars': 'a bar belongs to the section that holds its midpoint; straddling = more than %d%% of the bar lies outside; uncovered = spans of %.0f s or more with no bar' % (100 * STRADDLE, GAP),
             'parts': 'share of 2 s windows where the stem is within 15 dB of the mix; crossed_50 compares with the previous section only when both were measured',
             'notes_per_note_s': 'notes divided by the summed duration of those notes (sounding time, not section length)',
-            'drums': 'measured = bars with kick and snare data; groove = most common non-empty kick/snare pattern, 16th-note steps 0-15'},
+            'drums': 'measured = bars with kick and snare data; groove = most common non-empty kick/snare pattern, steps 0-%d (4 per beat)' % (meter(v)[1] - 1),
+            'meter': 'beats per bar = median count of the section model\'s beats in a bar, given only when 3 or 4; unknown keeps 16 steps'},
         'song': {'tempo': {'bpm': v.get('bpm'), 'confidence': v.get('bpm_confidence'), 'confidence_max': 5.3, 'calibrated': False},
+                 'meter': dict(zip(('beats_per_bar', 'steps'), meter(v))),
                  'feel': sw.get('feel'), 'downbeats': rel(v.get('downbeats') or {}),
                  'key': {'whole_song': keyname(k0) if k0 else None, 'by_section': [{'key': k, 'share': round(t / total, 2)} for k, t in span.most_common()]},
                  'form': [{'label': l, 'count': len(list(g))} for l, g in itertools.groupby(s['label'] for s in secs)],
@@ -219,13 +227,13 @@ def render(sh):
     mm = lambda t: '?' if t is None else '%d:%05.2f' % (t // 60, t % 60)
     num = lambda x, f: '?' if x is None else f % x
     rng = lambda r: '%s-%s' % (mm(r[0]), mm(r[1])) if r else 'unknown'
-    grid = lambda steps, ch: ''.join(ch if i in steps else '.' for i in range(16))
     g, c = sh['song'], sh['conventions']
+    grid = lambda steps, ch: ''.join(ch if i in steps else '.' for i in range(g['meter']['steps']))
     L = g['layers']
     out = ['MUSIC LENS SHEET (%s) | result %s | %s | worker %s' % (sh['format'], (sh['result_id'] or 'unknown')[:12], mm(sh['duration']), sh['worker']),
            'labels: %s.' % c['reliability'],
            'status: ' + c['status'] + '.',
-           'tempo   %s BPM (confidence %s of ~%.1f, uncalibrated); feel %s; downbeats %s' % (num(g['tempo']['bpm'], '%.1f'), num(g['tempo']['confidence'], '%.1f'), g['tempo']['confidence_max'], g['feel'] or 'unknown', g['downbeats']),
+           'tempo   %s BPM (confidence %s of ~%.1f, uncalibrated); feel %s; downbeats %s; beats per bar %s' % (num(g['tempo']['bpm'], '%.1f'), num(g['tempo']['confidence'], '%.1f'), g['tempo']['confidence_max'], g['feel'] or 'unknown', g['downbeats'], g['meter']['beats_per_bar'] or 'unknown'),
            'key     whole-song %s; per-section estimates (longest overlap) %s' % (g['key']['whole_song'] or 'unknown', ', '.join('%s %d%%' % (k['key'] or '?', round(100 * k['share'])) for k in g['key']['by_section']))]
     keys = {k['key'] for k in g['key']['by_section']} - {None}
     if g['key']['whole_song'] and keys and g['key']['whole_song'] not in keys:
@@ -328,7 +336,8 @@ def hit_counts(rows, skip=()):
 
 def zoom(v, a, b, rid=None):
     """Bar-by-bar reading of [a, b). A note or hit belongs to the bar holding its onset; rows starting outside the
-    span are left out. Notes sit on a 16-step grid per bar (each bar's own length), so tempo drift does not move them."""
+    span are left out. Notes sit on the bar grid's steps (each bar's own length), so tempo drift does not move them."""
+    nsteps = meter(v)[1]
     secs = [dict(id='S%02d' % n, label=s['label'], function=s.get('function'), start=s['start'], end=s['end'])
             for n, s in enumerate(v.get('sections') or [], 1)]
     bars = (done(v, 'bars') or {}).get('rows')
@@ -352,7 +361,7 @@ def zoom(v, a, b, rid=None):
         for r in x:
             t = r['time' if k == 'hits' else 'start']
             j = bisect.bisect_right(starts, t) - 1
-            if j >= 0 and t < zb[j]['end'] and round((t - zb[j]['start']) / (zb[j]['end'] - zb[j]['start']) * STEPS) >= STEPS:
+            if j >= 0 and t < zb[j]['end'] and round((t - zb[j]['start']) / (zb[j]['end'] - zb[j]['start']) * nsteps) >= nsteps:
                 j = j + 1 if j + 1 < len(zb) and abs(zb[j + 1]['start'] - zb[j]['end']) <= EPS else -1  # next bar's step 0
                 if j >= 0:
                     zb[j][k].append(r)
@@ -363,10 +372,10 @@ def zoom(v, a, b, rid=None):
             z['chords_timed'] = timed(v['chords'], max(z['start'], a), min(z['end'], b))
     for z in zb:
         ln = z['end'] - z['start']
-        step = lambda t: min(STEPS - 1, max(0, int(round((t - z['start']) / ln * STEPS))))
+        step = lambda t: min(nsteps - 1, max(0, int(round((t - z['start']) / ln * nsteps))))
         for k in ('melody', 'bass'):
             if k in z:
-                z[k] = [[r.get('note') or note(r['midi']), step(r['start']), max(1, int(round((r['end'] - r['start']) / ln * STEPS)))] for r in z[k]]
+                z[k] = [[r.get('note') or note(r['midi']), step(r['start']), max(1, int(round((r['end'] - r['start']) / ln * nsteps)))] for r in z[k]]
         if 'other' in z:
             z['other'] = pitch_summary(z['other'])
         if 'hits' in z:
@@ -385,11 +394,11 @@ def zoom(v, a, b, rid=None):
             out[k] = [[r.get('note') or note(r['midi']), round(r['start'], 2), round(r['end'] - r['start'], 2)] for r in x]
     bst = layer_state(v, 'bars')
     return {'format': 'music-lens-sheet-zoom/1', 'result_id': rid, 'worker': (v.get('tool') or {}).get('version'),
-            'duration': v['duration'], 'span': [a, b],
+            'duration': v['duration'], 'span': [a, b], 'meter': dict(zip(('beats_per_bar', 'steps'), meter(v))),
             'conventions': {
                 'bars': 'bars overlapping the span, numbered as in the full sheet; partial = the bar reaches outside the span',
-                'notes': 'a note belongs to the bar holding its onset (an onset in a bar\'s last half step goes to step 0 of the next bar, as in the kick/snare grid): [name, step, length], %d steps per bar of that bar\'s own length; rows starting outside the span are left out' % STEPS,
-                'drums': 'kick and snare are the bar row\'s 16-step pattern; hits counts the other drum classes in the bar',
+                'notes': 'a note belongs to the bar holding its onset (an onset in a bar\'s last half step goes to step 0 of the next bar, as in the kick/snare grid): [name, step, length], %d steps per bar of that bar\'s own length; rows starting outside the span are left out' % nsteps,
+                'drums': 'kick and snare are the bar row\'s %d-step pattern; hits counts the other drum classes in the bar' % nsteps,
                 'outside_bars': 'rows whose onset lies in no bar: notes [name, start s, duration s]; spans = gaps of %.0f s or more' % GAP,
                 'status': 'detected = rows in the span; empty = measured, none in the span; unavailable = not measured; failed = the layer failed'},
             'layers': dict(status, bars={'status': bst[0], 'reliability': bst[1]},
@@ -401,7 +410,7 @@ def zoom(v, a, b, rid=None):
 
 def render_zoom(z):
     mm = lambda t: '%d:%05.2f' % (t // 60, t % 60)
-    grid = lambda steps, ch: ''.join(ch if i in steps else '.' for i in range(STEPS))
+    grid = lambda steps, ch: ''.join(ch if i in steps else '.' for i in range(z['meter']['steps']))
     notes = lambda xs: ' '.join('%s@%d+%d' % tuple(x) for x in xs) or 'none'
     pitch = lambda p: '%d note%s, %s-%s' % (p['count'], 's' * (p['count'] > 1), p['low'], p['high']) if p['count'] else 'none'
     hits = lambda h: ', '.join('%s %d' % kv for kv in h.items()) or 'none'

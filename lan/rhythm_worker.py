@@ -21,7 +21,7 @@ Usage: <essentia python> -I rhythm_worker.py [--words-stdin] WAV
        0.12.0 an accompaniment layer, see "Accompaniment notes" in README.md)
        --drum-model /abs/checkpoint.index (0.9.0; with the Demucs options: a drum layer, see "Drum hits" in README.md)
        With the Demucs options, 0.13.0 adds part activity per section, see "Part activity" in README.md.
-       With the section model, 0.14.0 adds downbeats and bars, and 0.15.0 a scale and degree per bar, and 0.16.0 swing, and 0.18.0 a bar's two chords, see "Musical units" in README.md.
+       With the section model, 0.14.0 adds downbeats and bars, and 0.15.0 a scale and degree per bar, and 0.16.0 swing, and 0.18.0 a bar's two chords, and 0.22.0 beats per bar, see "Musical units" in README.md.
 WAV is the server's already-validated canonical file (PCM mono 16 kHz s16, 0 < duration <= 600 s).
 --words-stdin (0.4.3; the server always passes it): stdin holds one JSON object {"words": [[text, start, end], ...]}
 (the ASR words of the same result) or {"words": null, "reason": code} (the server could not provide them), at most
@@ -198,7 +198,7 @@ import time
 import unicodedata
 import wave
 
-TOOL = {"name": "music-lens-rhythm-worker", "version": "0.21.0"}
+TOOL = {"name": "music-lens-rhythm-worker", "version": "0.22.0"}
 SRC_RATE = 16000
 RATE = 44100
 MAX_SECONDS = 600.0
@@ -340,7 +340,7 @@ DRUM_FAIL_REASONS = ("models_invalid", "decode_failed", "separation_failed", "ad
 # Sections from All-In-One (0.11.0, optional): functional segments on the four Demucs stems, run in their own environment.
 # See "Sections from All-In-One" in README.md. Audio without stems keeps the beat method.
 ALLIN1_CODE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "allin1_sections.py")
-ALLIN1_CODE_SHA256 = "7abd3840f8765930ee2026a48461e4b2394e8b6d593fa7b3e7242c7a2c66d87f"
+ALLIN1_CODE_SHA256 = "9aedd5ca7e7a8aae957fe646fde9b0d74daa33099c306a4afec75dc511d738d0"
 ALLIN1_CODE_MAX_BYTES = 16 * 1024
 ALLIN1_WEIGHTS = (("harmonix-fold0-0vra4ys2.pth", "0db596dfb0995f41d62f6267d76a9d54c046f1649bd35e1dbeca0c5f9a7b8acd"),
                   ("harmonix-fold1-3ozjhtsj.pth", "607b4864eaabccd4f6951410d5ea6676666ad1cfa6ce2e18bc99f3824b77c3b7"),
@@ -383,15 +383,17 @@ PART_POSITION_METHOD = ("Demucs htdemucs_ft on the stereo decode: balance, width
                         "Stem bleed moves these values.")
 # Musical units (0.14.0): existing results grouped by the section model's downbeats; see "Musical units" in README.md.
 BAR_MAX = 2000
-BAR_STEPS = 16
+BAR_STEPS = {3: 12, 4: 16}  # steps per bar by beats per bar; 16 when the count is unknown
+# Beats per bar (0.22.0): the median count of the model's beats in a bar, kept only when it is 3 or 4. Ballroom (2026-11-07,
+# frozen bars): 154 of 175 3/4 excerpts read 3, 0 of 77 4/4 excerpts read 3. 6/8 is not tested.
 DOWNBEAT_METHOD = "All-In-One 8-fold ensemble on Demucs htdemucs_ft stems. A wrong downbeat shifts every bar built on it."
-BAR_METHOD = ("Between consecutive downbeats: the chord sounding longest; kick and snare on 16 equal steps, a 4/4 grid "
-              "even if the bar differs; scale and degree estimated from chord tones; split = each half's chord.")
+BAR_METHOD = ("Between consecutive downbeats: the chord sounding longest; kick and snare on equal steps (12 if 3 beats per "
+              "bar, else 16); scale and degree from chord tones; split = each half's chord.")
 # Two chords in a bar (0.18.0): each half's chord must hold this share of its half. Evaluated at this value.
 BAR_SPLIT_SHARE = 0.6
 # Swing (0.16.0): where hi-hat and cymbal hits fall between two beats. Evaluated at these values.
-SWING_METHOD = ("Median position inside the beat, 0 to 1, of hi-hat and cymbal hits between 0.4 and 0.8, a beat being a quarter "
-                "of a bar: about 0.5 straight, 0.67 triplet swing.")
+SWING_METHOD = ("Median position inside the beat, 0 to 1, of hi-hat and cymbal hits between 0.4 and 0.8, a beat being a third "
+                "of a bar in 3-beat songs, else a quarter: about 0.5 straight, 0.67 triplet swing.")
 SWING_OFF_BEAT = (0.4, 0.8)
 SWING_MIN_HITS = 30
 SWING_AT = 0.58
@@ -1802,15 +1804,32 @@ def clean_downbeats(times, duration):
     return rows
 
 
-def bar_steps(times, downbeats):
-    """{bar index: sorted steps}: each hit goes to the nearest of 16 steps, the last one to the next bar's first."""
+def clean_beats(times, duration):
+    """Rounded ascending beat times inside the song, or [] when the list is unusable."""
+    if not (isinstance(times, list) and len(times) <= MAX_BEATS
+            and all(isinstance(t, (int, float)) and math.isfinite(t) for t in times)):
+        return []
+    rows = [r3(t) for t in times if 0 <= t < duration]
+    return [] if any(b <= a for a, b in zip(rows, rows[1:])) else rows
+
+
+def beats_per_bar(beats, downbeats):
+    """3 or 4 when the median count of beats in [downbeat, next downbeat) is that, else None."""
+    if not beats or not downbeats or len(downbeats) < 2:
+        return None
+    n = statistics.median(bisect.bisect_left(beats, b) - bisect.bisect_left(beats, a) for a, b in zip(downbeats, downbeats[1:]))
+    return int(n) if n in (3, 4) else None
+
+
+def bar_steps(times, downbeats, steps=16):
+    """{bar index: sorted steps}: each hit goes to the nearest of `steps` steps, the last one to the next bar's first."""
     out = {}
     for t in times:
         i = bisect.bisect_right(downbeats, t) - 1
         if i < 0 or i >= len(downbeats) - 1:
             continue
-        k = int(round((t - downbeats[i]) / (downbeats[i + 1] - downbeats[i]) * BAR_STEPS))
-        if k == BAR_STEPS:
+        k = int(round((t - downbeats[i]) / (downbeats[i + 1] - downbeats[i]) * steps))
+        if k == steps:
             i, k = i + 1, 0
         if i < len(downbeats) - 1:
             out.setdefault(i, set()).add(k)
@@ -1912,16 +1931,18 @@ def bar_split(chords, start, end):
     return None
 
 
-def bars_field(downbeats, chords, drums, drum_hits, chords_ok, duration):
+def bars_field(downbeats, chords, drums, drum_hits, chords_ok, duration, beats=None):
     """The bars field, or None without downbeats. A bar's chord, scale and degree are None unless BTC made the chords;
-    kick and snare are None without a drum layer."""
+    kick and snare are None without a drum layer. `beats` are the section model's beats, for beats per bar."""
     if not downbeats:
         return None
+    meter = beats_per_bar(beats, downbeats)
+    n = BAR_STEPS.get(meter, 16)
     scales = bar_scales(downbeats, chords, duration) if chords_ok else [(None, None)] * (len(downbeats) - 1)
     done = bool(drums) and drums.get("status") == "done"
-    steps = {c: bar_steps([h["time"] for h in drum_hits if h["class"] == c], downbeats) if done else None
+    steps = {c: bar_steps([h["time"] for h in drum_hits if h["class"] == c], downbeats, n) if done else None
              for c in ("kick", "snare")}
-    return {"status": "done", "method": BAR_METHOD, "reliability": "reference_candidate",
+    return {"status": "done", "method": BAR_METHOD, "reliability": "reference_candidate", "beats_per_bar": meter, "steps": n,
             "rows": [{"start": a, "end": b, "chord": top_chord(chords, a, b) if chords_ok else None,
                       "split": bar_split(chords, a, b) if chords_ok else None,
                       "scale": scales[i][0], "degree": scales[i][1],
@@ -1929,15 +1950,16 @@ def bars_field(downbeats, chords, drums, drum_hits, chords_ok, duration):
                      for i, (a, b) in enumerate(zip(downbeats, downbeats[1:]))]}
 
 
-def swing_field(downbeats, drums, drum_hits):
-    """The swing field, or None without downbeats or a finished drum layer. The value is None under SWING_MIN_HITS."""
+def swing_field(downbeats, drums, drum_hits, meter=None):
+    """The swing field, or None without downbeats or a finished drum layer. The value is None under SWING_MIN_HITS.
+    `meter` is the bars' beats per bar; None counts as 4."""
     if not downbeats or not drums or drums.get("status") != "done":
         return None
     off = []
     for h in drum_hits:
         i = bisect.bisect_right(downbeats, h["time"]) - 1
         if h["class"] in ("hihat", "cymbal") and 0 <= i < len(downbeats) - 1:
-            pos = (h["time"] - downbeats[i]) / (downbeats[i + 1] - downbeats[i]) * 4 % 1
+            pos = (h["time"] - downbeats[i]) / (downbeats[i + 1] - downbeats[i]) * (meter or 4) % 1
             if SWING_OFF_BEAT[0] < pos < SWING_OFF_BEAT[1]:
                 off.append(pos)
     phase = round(statistics.median(off), 3) if len(off) >= SWING_MIN_HITS else None
@@ -2219,6 +2241,7 @@ def section_segments(sep, duration):
     if segs is None:
         return None, "sections_failed"
     sep["downbeats"] = clean_downbeats(got.get("downbeats"), duration)
+    sep["model_beats"] = clean_beats(got.get("beats"), duration)
     return (None, "too_many_sections") if len(segs) > SEC_MAX else (segs, None)
 
 
@@ -2655,8 +2678,8 @@ def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None, genre_di
     parts = parts_field(sep, sections, bass, bass_notes, other, other_notes, drums, drum_hits)
     if parts and parts.get("reason") == "levels_failed":
         warnings.append("parts_failed: levels_failed")
-    bars = bars_field((sep or {}).get("downbeats"), chords, drums, drum_hits, btc_used, duration)
-    swing = swing_field((sep or {}).get("downbeats"), drums, drum_hits)
+    bars = bars_field((sep or {}).get("downbeats"), chords, drums, drum_hits, btc_used, duration, (sep or {}).get("model_beats"))
+    swing = swing_field((sep or {}).get("downbeats"), drums, drum_hits, bars and bars["beats_per_bar"])
     mix_field, positions = stereo_fields(sep, sections)
     tone = tone_field(sep, sections)
     for name, f in (("mix", mix_field), ("part_positions", positions), ("tone", tone)):
