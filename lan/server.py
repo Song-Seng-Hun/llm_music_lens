@@ -53,7 +53,7 @@ DEFAULT_LIMITS = {
     "read_timeout": 30.0, "max_body": 64 * MiB, "disk_floor": 2 * 1024 * MiB, "ml_stdout": 8 * MiB,
     "response_max": 8 * MiB, "stderr_line": 4096, "convert_output": 4096, "log_bytes": 5 * MiB, "log_files": 3,
     "send_timeout": 30.0, "stop_grace": 630.0, "rhythm_timeout": 300.0, "rhythm_output": 4 * MiB,
-    "earcheck_timeout": 60.0,
+    "earcheck_timeout": 60.0, "ml_stop_grace": 40.0,
 }
 CONFIG_KEYS = {"bind", "port", "allow", "clients", "cert", "key", "ml", "root", "inbox", "limit_exec",
                "launchd_logs", "test_mode", "limits", "test_ready_file", "rhythm"}
@@ -2916,11 +2916,7 @@ class Engine:
                 try:
                     p.wait(timeout)
                 except subprocess.TimeoutExpired:
-                    try:
-                        os.killpg(p.pid, signal.SIGKILL)
-                    except OSError:
-                        pass
-                    p.wait()
+                    self.stop_ml(p)
                     return False, None, "timeout"
             if p.returncode != 0:
                 return False, None, map_ml_error(last_stderr_code(err, lim["stderr_line"]))
@@ -2938,6 +2934,25 @@ class Engine:
             if not isinstance(v, dict):
                 return False, None, "invalid_output"
             return True, data, None
+
+    def stop_ml(self, p):
+        """Stop an `ml` child: SIGINT first, so ml's own `finally` kills its inference child (a separate session that
+        holds the team lock), then after ml_stop_grace SIGKILL to ml's process group. ml's cancel can wait up to 30 s
+        for its probe; the grace covers that."""
+        try:
+            os.kill(p.pid, signal.SIGINT)
+        except OSError:
+            pass
+        try:
+            p.wait(self.limits["ml_stop_grace"])
+            return  # reaped: its pid (= group id) may be reused now, so no killpg after this
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            os.killpg(p.pid, signal.SIGKILL)  # ml ignored SIGINT or hung in its cleanup: as before, the whole group
+        except OSError:
+            pass
+        p.wait()
 
     def convert(self, src, dst, listen=False):
         """afconvert under limit_exec.py (listen: 44.1 kHz for the ear check); returns (returncode or None on timeout)."""

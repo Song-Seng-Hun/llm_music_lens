@@ -23,6 +23,7 @@ import shutil
 import signal
 import stat
 import sys
+import threading
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 if HERE not in sys.path:  # -I drops the script directory from sys.path; this directory is the trusted install dir
@@ -37,7 +38,7 @@ class LocalEngine(server.Engine):
     """server.Engine plus the children it started, so SIGTERM/SIGINT/SIGHUP can stop them before cleanup."""
 
     def __init__(self, cfg, log_name):
-        self.children, self.cancelled = [], False
+        self.children, self.cancelled, self.interrupted = [], False, set()
         super().__init__(cfg, log_name)
 
     def popen(self, argv, **kw):
@@ -50,19 +51,39 @@ class LocalEngine(server.Engine):
         return p
 
     def cancel(self, signum, frame):
-        """Signal handler: kill each live child's process group like the server's timeout path (all children run
-        with start_new_session=True). The blocked wait then returns, the pipeline fails as usual, and the normal
-        cleanup removes uploads/<op>/ and the inbox link after the children are reaped."""
+        """Signal handler: stop each live child the way the server's timeout paths do (all children run with
+        start_new_session=True). The blocked wait then returns, the pipeline fails as usual, and the normal cleanup
+        removes uploads/<op>/ and the inbox link after the children are reaped. A second signal skips ml's grace."""
+        again = self.cancelled
         self.cancelled = self.stopping = True  # stopping: run_rhythm launches nothing more
-        self.kill_children()
+        self.kill_children(force=again)
 
-    def kill_children(self):
+    def kill_children(self, force=False):
+        """ml: SIGINT now, SIGKILL to its group after ml_stop_grace (as Engine.stop_ml, without blocking this
+        handler). Others (afconvert, rhythm worker): SIGKILL to the group at once."""
         for p in self.children:
-            if p.returncode is None:
-                try:
-                    os.killpg(p.pid, signal.SIGKILL)
-                except OSError:
-                    pass
+            if p.returncode is not None:
+                continue
+            if p.args[0] == self.cfg["ml"] and not force:
+                if p not in self.interrupted:
+                    self.interrupted.add(p)
+                    try:
+                        os.kill(p.pid, signal.SIGINT)
+                    except OSError:
+                        pass
+                    t = threading.Timer(self.limits["ml_stop_grace"], self.kill_group, (p,))
+                    t.daemon = True
+                    t.start()
+            else:
+                self.kill_group(p)
+
+    @staticmethod
+    def kill_group(p):
+        if p.returncode is None:  # not reaped yet, so its pid (= group id) is still its own
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except OSError:
+                pass
 
 
 class Fail(Exception):

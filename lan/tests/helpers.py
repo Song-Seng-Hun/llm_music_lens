@@ -47,7 +47,24 @@ if cmd == "analyze":
         info["size"] = os.path.getsize(p)
     with open(os.path.join(HERE, "seen.log"), "a") as f:
         f.write(json.dumps(info) + "\n")
-time.sleep(spec.get("sleep", 0))
+child = None
+if spec.get("child"):  # like the real ml: an inference child in its own session holding the team lock fd
+    import fcntl, signal, subprocess
+    if spec.get("ignore_int"):
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+    lfd = os.open(ctl["lock"], os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(lfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    child = subprocess.Popen([sys.executable, "-I", "-c", "import time; time.sleep(600)"], pass_fds=(lfd,),
+                             start_new_session=True)
+    os.close(lfd)
+    with open(os.path.join(HERE, "child.pid"), "w") as f:
+        f.write(str(child.pid))
+try:
+    time.sleep(spec.get("sleep", 0))
+finally:  # ml kills its child only here (cancel, timeout, exception such as KeyboardInterrupt)
+    if child is not None:
+        os.killpg(child.pid, signal.SIGKILL)
+        child.wait()
 for line in spec.get("stderr_lines", []):
     sys.stderr.write(line + "\n")
 if "stdout" in spec:

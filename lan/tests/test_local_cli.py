@@ -156,9 +156,8 @@ def alive(pid):
     return True
 
 
-class CliSignalTest(CliBase):
-    """A stop signal kills the CLI's children (own process groups), waits for them, then cleans up like a finished
-    run: no orphan holds the team flock, no uploads/<op>/, no inbox link."""
+class SignalBase(CliBase):
+    """Helpers for running the CLI in the background and stopping it with a signal."""
 
     def start(self, *args):
         return subprocess.Popen([PY, "-I", CLI, "--config", self.env.config_path] + list(args),
@@ -197,6 +196,11 @@ class CliSignalTest(CliBase):
             rows = [json.loads(x) for x in f if x.strip()]
         return next((r["pid"] for r in rows if r["cmd"] == "analyze"), None)
 
+
+class CliSignalTest(SignalBase):
+    """A stop signal kills the CLI's children (own process groups), waits for them, then cleans up like a finished
+    run: no orphan holds the team flock, no uploads/<op>/, no inbox link."""
+
     def test_signal_during_ml(self):
         for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             with self.subTest(sig=sig):
@@ -220,6 +224,65 @@ class CliSignalTest(CliBase):
         self.assertFalse(os.path.exists(self.rhythm_file()))
         with open(os.path.join(self.env.root, "logs", "local.log")) as f:
             self.assertIn('"event":"rhythm_exit"', f.read())
+
+
+class MlChildTest(SignalBase):
+    """The real ml runs its inference child in its own session holding the team lock and kills it only in its own
+    finally. Stopping ml = SIGINT first (that finally runs), SIGKILL to ml's group only after ml_stop_grace."""
+
+    def lock(self):
+        return os.path.join(self.env.root, ".analyze.lock")
+
+    def child_pid(self):
+        p = os.path.join(self.env.mldir, "child.pid")
+        if not os.path.exists(p):
+            return None
+        with open(p) as f:
+            return int(f.read() or 0) or None
+
+    def test_cli_signal_stops_ml_child(self):
+        self.env.write_control(lock=self.lock(), analyze={"sleep": 60, "child": True,
+                                                          "stdout": json.dumps(ANALYZE_OUT) + "\n"})
+        p = self.start("analyze", self.wav, "--language", "en")
+        child = self.wait_for(self.child_pid, "ml inference child")
+        ml = self.ml_pid()
+        self.stop(p, signal.SIGTERM)
+        self.assertFalse(alive(ml))
+        self.assert_clean(child)  # child gone, flock free, no uploads/<op>/, no inbox link
+
+    def test_cli_escalates_when_ml_ignores_sigint(self):
+        self.restart(limits={"ml_stop_grace": 1}, rhythm={"python": PY, "worker": self.fw.path})
+        self.env.write_control(lock=self.lock(), analyze={"sleep": 60, "child": True, "ignore_int": True,
+                                                          "stdout": json.dumps(ANALYZE_OUT) + "\n"})
+        p = self.start("analyze", self.wav, "--language", "en")
+        child = self.wait_for(self.child_pid, "ml inference child")
+        ml = self.ml_pid()
+        t0 = time.time()
+        try:
+            self.stop(p, signal.SIGTERM)
+            self.assertGreaterEqual(time.time() - t0, 0.9)  # SIGKILL to ml's group only after the grace
+            self.assertFalse(alive(ml))
+            self.assertEqual(self.env.uploads_entries(), [])
+            self.assertEqual(os.listdir(self.env.inbox), [])
+        finally:
+            if alive(child):  # ml never ran its finally: its own-session child is out of reach, as before
+                os.kill(child, signal.SIGKILL)
+
+    def test_server_ml_timeout_stops_ml_child(self):
+        self.restart(limits={"read_timeout": 1, "ml_stop_grace": 10}, rhythm={"python": PY, "worker": self.fw.path})
+        self.env.write_control(lock=self.lock(), report={"sleep": 60, "child": True, "stdout": "{}"})
+        t0 = time.time()
+        st, b = self.c.json("GET", "/report/" + RID64)
+        self.assertEqual((st, b["error"]["code"]), (504, "timeout"))
+        self.assertLess(time.time() - t0, 8)  # ml exited on SIGINT, well inside the grace
+        child = self.child_pid()
+        self.assertIsNotNone(child)
+        self.assertFalse(alive(child))
+        fd = os.open(self.lock(), os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(fd)
 
 
 class CliReadTest(CliBase):

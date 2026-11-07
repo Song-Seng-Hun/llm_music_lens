@@ -97,8 +97,11 @@ same trust boundary as the `ml` wrapper: no TLS, no signing, no nonces, no recei
 - Limits: there is no in-process API gate across processes. A CLI analyze beside a server analyze is serialised
   by the team flock (`ml` reports `busy`, and the rhythm layer reports `busy`). Events are logged to
   `<root>/logs/local.log`.
-- Stopping: SIGTERM, SIGINT and SIGHUP kill the CLI's children, meaning the process groups of `ml`, afconvert
-  and the rhythm worker, the same way the server's timeout path does. The CLI waits for them, removes
+- Stopping: SIGTERM, SIGINT and SIGHUP stop the CLI's children the same way the server's timeout paths do.
+  `ml` gets SIGINT first, so its own `finally` can end its inference child, which runs in a separate session and
+  holds the team lock. Only after `ml_stop_grace` (40 s) does `ml`'s process group get SIGKILL; the server's `ml`
+  read timeout uses the same order. afconvert and the rhythm worker get SIGKILL to their process group at once.
+  A second signal skips the grace. The CLI waits for them, removes
   `uploads/<op>/` and the inbox link `api-<op>.wav`, and exits 1 with `cancelled`. A cancelled run stores no rhythm
   file. Only SIGKILL skips this. Then `uploads/<op>/` and `<inbox>/api-<op>.wav` stay behind, and the children
   keep running, with the rhythm worker still holding the team flock. No receipt owns those paths, so remove them by
