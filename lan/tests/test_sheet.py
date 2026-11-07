@@ -221,6 +221,14 @@ class ZoomTest(unittest.TestCase):
         self.assertIn("outside the bar grid, gaps 0:04.00-0:05.00 (onset", t)
         self.assertIn("  melody E4 0:04.20+0.40", t)
 
+    def test_cut_last_bar_keeps_the_full_bar_grid(self):
+        rows = [zbar(0.0, 2.0, "C"), zbar(2.0, 4.0, "G"), zbar(4.0, 5.0, "F")]   # last row cut at the song end
+        notes = [zn(4.5, 4.75, 64, "E4"), zn(4.9, 5.0, 65, "F4")]
+        for ext, want in ((1, [["E4", 4, 2], ["F4", 7, 1]]), (0, [["E4", 8, 4], ["F4", 14, 2]])):   # 0: a real short bar
+            v = self.v(melody_notes=notes)
+            v["bars"] = {"status": "done", "reliability": "low_reference", "rows": rows, "extended_rows": ext}
+            self.assertEqual(sheet.zoom(v, 0.0, 5.0, RID64)["bars"][2]["melody"], want, ext)
+
     def test_split_halves_use_display(self):
         v = self.v(chords=[{"start": 0, "end": 2, "label": "C", "display": "C"},
                            {"start": 2, "end": 3, "label": "G", "display": "G/B"},

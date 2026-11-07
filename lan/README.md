@@ -879,14 +879,16 @@ Existing results grouped by bar, for reading a song the way it is written. It ne
 with the section model and reads the downbeats that model already finds, the chords, and the drum hits.
 
 - `rhythm.downbeats` is `{status: "done", method, reliability: "reference_candidate", count}`, or `{status: "not_provided", reason}`
-  without the section model. The times are the `start` of each bar.
+  without the section model. The downbeats are the starts of the first `bar_count - extended_rows` bars and the end of the last
+  of those; the added bars after them start on no downbeat.
 - `rhythm.bars` is `{status: "done", method, reliability: "reference_candidate", beats_per_bar, steps, extended_rows, bar_count}`, or `null`. Read the rows with `/timeline`
   `layer=bars`: `{start, end, chord, split, scale, degree, kick, snare}`, one per pair of consecutive downbeats, then on at the median bar length to the song end. The last
   `extended_rows` rows are these added bars (the model gave no downbeat there), so only music before the first downbeat is in no bar.
   On RWC-P (100 songs, frozen test) the added bar starts matched annotated downbeats 77% of the time (the first added bar 91%,
   later ones less as they drift) and found 80% of the downbeats after the last one; added bars also run over a fade-out or
   silence at the end. Results stored before 0.23.0 have no `extended_rows` and end at the last downbeat. `chord` is the label sounding longest in the bar, `N` for none, `null` unless BTC made the chords. `kick` and
-  `snare` list steps of `steps` equal steps per bar, `null` without a drum layer. Results stored by worker 0.14.0 have no `scale` or `degree`, and those stored before 0.18.0 no `split`.
+  `snare` list steps of `steps` equal steps per bar (a last bar cut at the song end keeps the median bar length, so it holds only the
+  early steps), `null` without a drum layer. Results stored by worker 0.14.0 have no `scale` or `degree`, and those stored before 0.18.0 no `split`.
 - `beats_per_bar` is the median count of the section model's beats in a bar, `3` or `4`, else `null`. `steps` is `12` for 3 and `16`
   otherwise (4 per beat). Results stored before 0.22.0 have neither and use 16 steps. Swing reads a beat as a third of the bar when it is 3.
 - `split` is `[first half's chord, second half's chord]` when each holds at least 60% of its half and their roots differ, else `null`. `chord`,
@@ -906,7 +908,8 @@ Beats per bar was evaluated on the Ballroom set (30 s excerpts, beat annotations
 of the 175 excerpts in 3/4 and on none of 77 in 4/4. The misses read 4, or had almost no beats. 6/8 and other meters are not tested.
 
 Limits: a wrong downbeat shifts every bar built on it; two songs scored under 50 on downbeats. The model can stop before the music does:
-on one real song the bars ended about 13 s early, in a fading outro. On the 50 test songs the music ran on past the last bar by a median of 3.5 s, over 5 s on 14 songs, over 10 s on 5, and at most 26 s. Bars are not extended past the model. A bar whose own length differs from `beats_per_bar` still gets the song's step count. Drum scores leave out songs
+on one real song the bars ended about 13 s early, in a fading outro. On the 50 test songs the music ran on past the last downbeat by a median of 3.5 s, over 5 s on 14 songs, over 10 s on 5, and at most 26 s; from worker 0.23.0
+  the added bars cover that span at the median bar length, drifting off the real downbeats as they go (see `extended_rows`). A bar whose own length differs from `beats_per_bar` still gets the song's step count. Drum scores leave out songs
 whose MIDI has no standard kick or snare notes.
 
 Swing was evaluated on the same songs against the MIDI hats, with its bars set beforehand and passed. Few of those songs swing (3 of 35), so

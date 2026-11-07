@@ -21,7 +21,7 @@ Usage: <essentia python> -I rhythm_worker.py [--words-stdin] WAV
        0.12.0 an accompaniment layer, see "Accompaniment notes" in README.md)
        --drum-model /abs/checkpoint.index (0.9.0; with the Demucs options: a drum layer, see "Drum hits" in README.md)
        With the Demucs options, 0.13.0 adds part activity per section, see "Part activity" in README.md.
-       With the section model, 0.14.0 adds downbeats and bars, and 0.15.0 a scale and degree per bar, and 0.16.0 swing, and 0.18.0 a bar's two chords, and 0.22.0 beats per bar, see "Musical units" in README.md.
+       With the section model, 0.14.0 adds downbeats and bars, and 0.15.0 a scale and degree per bar, and 0.16.0 swing, and 0.18.0 a bar's two chords, and 0.22.0 beats per bar, and 0.23.0 bars to the song end (extended_rows), see "Musical units" in README.md.
 WAV is the server's already-validated canonical file (PCM mono 16 kHz s16, 0 < duration <= 600 s).
 --words-stdin (0.4.3; the server always passes it): stdin holds one JSON object {"words": [[text, start, end], ...]}
 (the ASR words of the same result) or {"words": null, "reason": code} (the server could not provide them), at most
