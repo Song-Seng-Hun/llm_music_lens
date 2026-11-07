@@ -9,7 +9,7 @@ and SIGHUP kill the children (process groups), clean up, and exit 1 with code "c
 
 Usage:
   local_cli.py [--config PATH] analyze FILE --language {en,ko,ja,auto} [--emotion-mode {voice,music,none}]
-               [--name NAME] [--no-rhythm]
+               [--name NAME] [--no-rhythm | --quick]
   local_cli.py [--config PATH] report ID
   local_cli.py [--config PATH] timeline ID [--layer L] [--start S] [--end E] [--limit N] [--cursor C]
   local_cli.py [--config PATH] sheet ID [--start S --end E | --view brief | --layers L,...] [--format {text,json}]
@@ -162,7 +162,7 @@ def cmd_analyze(engine, ns):
         kind, upload_sha = stage(engine, op, ns.file)
         job = server.Job(CLIENT, op, op, kind, engine.uploads + "/" + op + "/upload." + kind, ns.language,
                          ns.emotion_mode, ns.name, upload_sha)
-        job.rhythm = rhythm
+        job.rhythm, job.quick = rhythm, ns.quick
         try:
             status, body, _raw, rec = engine._job(job)
         except Exception as e:  # noqa: BLE001  never leak details (as App.run_job)
@@ -226,7 +226,9 @@ def parser():
     a.add_argument("--language", choices=("en", "ko", "ja", "auto"), required=True)
     a.add_argument("--emotion-mode", choices=("voice", "music", "none"), default="none")
     a.add_argument("--name")
-    a.add_argument("--no-rhythm", action="store_true", help="ASR (and emotion) only, like rhythm=0 on the server")
+    mode = a.add_mutually_exclusive_group()
+    mode.add_argument("--no-rhythm", action="store_true", help="ASR (and emotion) only, like rhythm=0 on the server")
+    mode.add_argument("--quick", action="store_true", help="rhythm layer without stems, like rhythm=quick on the server")
     r = sub.add_parser("report")
     r.add_argument("result_id")
     t = sub.add_parser("timeline")

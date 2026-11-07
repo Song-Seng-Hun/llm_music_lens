@@ -26,6 +26,7 @@ SECTION_LAYERS = {  # per-section detail of the full sheet, by the name GET /she
     'melody': ('melody',), 'parts': ('parts',), 'drums': ('drums',)}
 LEGEND = {'chords': ('chord_names',), 'key': ('scale_changes',), 'melody': ('notes_per_note_s',), 'parts': ('parts',),
           'drums': ('drums',)}  # conventions that explain only that layer
+QUICK_DROPPED = ('bass', 'other', 'drums', 'parts', 'bars', 'downbeats', 'swing', 'mix', 'part_positions', 'tone', 'sung_notes')
 STEPS = 16      # steps per bar when the result gives none (worker before 0.22.0)
 NOTE_LAYERS = (('melody', 'melody_notes', 'melody'), ('bass', 'bass_notes', 'bass'), ('other', 'other_notes', 'other'))
 
@@ -244,7 +245,7 @@ def build(v, rid=None):
     total = sum(span.values()) or 1
     tool, sw, k0 = v.get('tool') or {}, done(v, 'swing') or {}, v.get('key')
     lay = lambda k: {'status': st[k][0], 'reliability': st[k][1]}
-    return {
+    out = {
         'format': 'music-lens-sheet/1', 'result_id': rid, 'worker': tool.get('version'), 'duration': v['duration'],
         'conventions': {
             'reliability': 'cand = worker reliability reference_candidate, low = low_reference; neither is a measured accuracy',
@@ -277,6 +278,10 @@ def build(v, rid=None):
         'drill_down': {'request': 'GET /timeline/%s?layer=<layer>&start=<s>&end=<s>&limit=<1-200>&cursor=<n>' % (rid or '<result_id>'),
                        'layers': LAYERS, 'range': '0-600 s; rows overlapping [start, end]', 'paging': 'follow continuation as the next cursor',
                        'zoom': 'GET /sheet/%s?start=<s>&end=<s> for a bar-by-bar reading of up to %.0f s' % (rid or '<result_id>', ZOOM_MAX)}}
+    if v.get('profile') == 'quick':  # server-added on a rhythm=quick result only
+        out['profile'] = {'name': 'quick', 'not_measured': list(QUICK_DROPPED),
+                          'note': 'no stem separation: sections from the beat method, melody from the mix; a full run (rhythm=1) replaces it'}
+    return out
 
 
 def select(sh, layers):
@@ -317,6 +322,9 @@ def render(sh):
             'melody  notes/s = ' + c['notes_per_note_s'] if 'notes_per_note_s' in c else None,
             'bars    ' + c['bars']]
     out = [x for x in out if x is not None]
+    if 'profile' in sh:
+        pr = sh['profile']
+        out.append('profile %s: %s not measured; %s' % (pr['name'], ', '.join(pr['not_measured']), pr['note']))
     if 'view' in sh:
         shown = sh['view']['layers']
         out.append('view    %s; full sheet: GET /sheet/%s' % ('section layers ' + ', '.join(shown) + ' only' if shown else

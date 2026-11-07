@@ -975,6 +975,8 @@ def check_rhythm(v):
         for k in ("worker_sha256", "words_sha256"):  # server-added identities
             if k in v and not (isinstance(v[k], str) and RE_HEX64.match(v[k])):
                 return None
+        if v.get("profile", "quick") != "quick":  # server-added: present only on a rhythm=quick result
+            return None
     except (TypeError, KeyError, OverflowError):
         return None
     return v
@@ -1918,7 +1920,20 @@ def bars_view(bars):
     return dict({k: x for k, x in bars.items() if k != "rows"}, bar_count=len(bars["rows"]))
 
 
+QUICK_NOTE = ("rhythm=quick: no stem separation, so bass, other, drums, parts, bars, downbeats, swing, mix, part "
+              "positions, tone and sung notes were not measured, sections come from the beat method and melody from "
+              "the mix; a later rhythm=1 run on the full-band audio replaces this result")
+
+
 def rhythm_summary(v, overview=None):
+    """The summary below, plus profile + profile_note only on a rhythm=quick result (other bodies unchanged)."""
+    out = _rhythm_summary(v, overview)
+    if v.get("profile") == "quick":
+        out.update(profile="quick", profile_note=QUICK_NOTE)
+    return out
+
+
+def _rhythm_summary(v, overview=None):
     """Compact view for analyze and /report; beats and chord rows stay in the stored file (/timeline).
     Fields from worker 0.2.0 (bpm_alternatives[_note], key_sections, key_change_count, chords_grid) and 0.2.1
     (double_tempo_evidence[_note]) and 0.2.2 (tempo_cnn) and 0.3.0 (energy_summary, sections, sections_method,
@@ -2490,6 +2505,7 @@ class Job:
         self.linked = False
         self.ml_started = False  # set just before `ml analyze` is spawned
         self.rhythm = False  # opt-in rhythm layer (POST /analyze?rhythm=1)
+        self.quick = False  # rhythm=quick: the worker without stems (never replaces a stored full result)
         self.deadline = None  # monotonic time by which the waiting handler gives up (handler_total)
         self.done = threading.Event()
         self.status, self.body, self.raw = 500, None, None
@@ -2648,6 +2664,8 @@ class Engine:
         words, words_sha = self.lyric_words(result_id)
         # reuse needs the same worker file and the same ASR words (a re-run ASR can change them for this result_id)
         separable = "demucs" in self.cfg["rhythm"] and not (job.kind == "wav" and strict_wav_check(job.src))
+        quick = job.quick and separable  # stems were possible and are skipped: the stored file says profile quick
+        separable = separable and not job.quick  # quick runs like a 16 kHz upload: no stems, and no stem replaced
         # a 16 kHz upload must not replace stems with nothing, whatever else would recompute: it serves the stored file as it is
         if state == "ok" and "demucs" in self.cfg["rhythm"] and not separable and _has_separated_layer(stored):
             return dict(rhythm_summary(stored, self.rhythm_overview(result_id, stored, words, words_sha)),
@@ -2696,6 +2714,8 @@ class Engine:
         if cur is not None:
             data["worker_sha256"] = cur
         data["words_sha256"] = words_sha
+        if quick:
+            data["profile"] = "quick"
         try:
             self.store_rhythm(result_id, data)
             stored = True
@@ -2758,7 +2778,7 @@ class Engine:
                 v = None
             if v is None:
                 return {"status": "failed", "code": "invalid_output"}
-            for k in ("status", "cache_hit", "stored", "code", "worker_sha256", "words_sha256"):  # server-owned
+            for k in ("status", "cache_hit", "stored", "code", "worker_sha256", "words_sha256", "profile"):  # server-owned
                 v.pop(k, None)
             return {"status": "done", "_data": v}
 
@@ -3484,9 +3504,9 @@ class Handler(BaseHTTPRequestHandler):
         if name is not None and not valid_name(name):
             raise HttpError("bad_request")
         rhythm = q.get("rhythm", "0")
-        if rhythm not in ("0", "1"):
+        if rhythm not in ("0", "1", "quick"):
             raise HttpError("bad_request")
-        rhythm = rhythm == "1"
+        quick, rhythm = rhythm == "quick", rhythm != "0"
         if rhythm and not app.cfg.get("rhythm"):
             raise HttpError("rhythm_unavailable")
         if cl > lim["max_body"]:
@@ -3519,7 +3539,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             job = Job(client, rid, op, kind, app.uploads + "/" + op + "/upload." + kind, q["language"], emotion_mode,
                       name, upload_sha)
-            job.rhythm, job.deadline = rhythm, self.t0 + lim["handler_total"]
+            job.rhythm, job.quick, job.deadline = rhythm, quick, self.t0 + lim["handler_total"]
             try:
                 app.receipts.update(client, rid, app.clock(), upload_sha256=upload_sha)
             except OSError:
