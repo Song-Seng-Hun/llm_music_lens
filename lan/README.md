@@ -96,10 +96,16 @@ same trust boundary as the `ml` wrapper: no TLS, no signing, no nonces, no recei
   or usage error.
 - Limits: there is no in-process API gate across processes. A CLI analyze beside a server analyze is serialised
   by the team flock (`ml` reports `busy`, and the rhythm layer reports `busy`). Events are logged to
-  `<root>/logs/local.log`. If the CLI process is killed mid-run, its `uploads/<op>/` directory can stay behind.
-  No receipt owns it, so remove it by hand.
+  `<root>/logs/local.log`.
+- Stopping: SIGTERM, SIGINT and SIGHUP kill the CLI's children, meaning the process groups of `ml`, afconvert
+  and the rhythm worker, the same way the server's timeout path does. The CLI waits for them, removes
+  `uploads/<op>/` and the inbox link `api-<op>.wav`, and exits 1 with `cancelled`. A cancelled run stores no rhythm
+  file. Only SIGKILL skips this. Then `uploads/<op>/` and `<inbox>/api-<op>.wav` stay behind, and the children
+  keep running, with the rhythm worker still holding the team flock. No receipt owns those paths, so remove them by
+  hand once the children have ended. An analyze with the rhythm layer can take minutes, so run it in the
+  background or with a long command timeout, not under a short agent timeout that kills it.
 
-Tests: `tests/test_local_cli.py` (fake `ml` and fake worker; checks the CLI output byte for byte against the served
+Tests: `tests/test_local_cli.py` (fake `ml` and fake worker; the stop-signal path; checks the CLI output byte for byte against the served
 `/report`, `/timeline` and `/sheet` bodies).
 
 ## Signing (summary)

@@ -2729,10 +2729,10 @@ class Engine:
                         sep += ["--singing-python", rh["yourmt3_python"]]
                 if "chord_model" in rh:
                     sep += ["--chord-model", rh["chord_model"]]
-                p = subprocess.Popen([rh["python"], "-I", rh["worker"], "--words-stdin", "--time-budget", "%.0f" % max(timeout, 1.0)]
-                                     + sep + [wav], stdin=inp, stdout=out,
-                                     stderr=err, env=self.child_env(), cwd="/", close_fds=True, pass_fds=(lock_fd,),
-                                     shell=False, start_new_session=True)
+                p = self.popen([rh["python"], "-I", rh["worker"], "--words-stdin", "--time-budget", "%.0f" % max(timeout, 1.0)]
+                               + sep + [wav], stdin=inp, stdout=out,
+                               stderr=err, env=self.child_env(), cwd="/", close_fds=True, pass_fds=(lock_fd,),
+                               shell=False, start_new_session=True)
             except OSError:
                 return {"status": "failed", "code": "server_misconfigured"}
             try:
@@ -2890,6 +2890,11 @@ class Engine:
         return {"result_id": rid, "format": sh["format"], "text": sheet.render(sh)}
 
 
+    def popen(self, argv, **kw):
+        """Every child of the pipeline starts here (ml, afconvert, rhythm worker, ear check); local_cli.py tracks
+        them so a signal can stop them."""
+        return subprocess.Popen(argv, **kw)
+
     def child_env(self):
         return {"PATH": CHILD_ENV_PATH, "HOME": HOME, "LANG": "en_US.UTF-8",
                 "TMPDIR": os.environ.get("TMPDIR", "/tmp")}
@@ -2900,9 +2905,9 @@ class Engine:
         lim = self.limits
         with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
             try:
-                p = subprocess.Popen([self.cfg["ml"]] + list(args), stdin=subprocess.DEVNULL, stdout=out, stderr=err,
-                                     env=self.child_env(), cwd="/", close_fds=True, shell=False,
-                                     start_new_session=True)
+                p = self.popen([self.cfg["ml"]] + list(args), stdin=subprocess.DEVNULL, stdout=out, stderr=err,
+                               env=self.child_env(), cwd="/", close_fds=True, shell=False,
+                               start_new_session=True)
             except OSError:
                 return False, None, "server_misconfigured"
             if timeout is None:
@@ -2942,8 +2947,8 @@ class Engine:
     def _run_capped(self, argv, timeout):
         """Run argv in its own session (cwd /, child env); stdout+stderr kept only up to convert_output and dropped;
         process group killed on timeout. Returns returncode, or None on timeout."""
-        p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                             env=self.child_env(), cwd="/", close_fds=True, start_new_session=True)
+        p = self.popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                       env=self.child_env(), cwd="/", close_fds=True, start_new_session=True)
         cap, kept = self.limits["convert_output"], []
 
         def drain():

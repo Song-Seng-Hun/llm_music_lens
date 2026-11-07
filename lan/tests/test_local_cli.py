@@ -4,7 +4,9 @@ checks its stdout against the served bodies byte for byte."""
 import fcntl
 import json
 import os
+import signal
 import subprocess
+import time
 import unittest
 
 from helpers import ANALYZE_OUT, PY, REPO, RID64, silent_wav_bytes
@@ -144,6 +146,80 @@ class CliAnalyzeTest(CliBase):
         self.assertIn("0600", b["error"]["detail"])
         os.chmod(self.env.config_path, 0o600)
         self.err(1, "invalid_id", "report", "abc")
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+class CliSignalTest(CliBase):
+    """A stop signal kills the CLI's children (own process groups), waits for them, then cleans up like a finished
+    run: no orphan holds the team flock, no uploads/<op>/, no inbox link."""
+
+    def start(self, *args):
+        return subprocess.Popen([PY, "-I", CLI, "--config", self.env.config_path] + list(args),
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    def wait_for(self, fn, what):
+        end = time.time() + 20
+        while time.time() < end:
+            v = fn()
+            if v:
+                return v
+            time.sleep(0.05)
+        self.fail("never saw " + what)
+
+    def stop(self, p, sig):
+        p.send_signal(sig)
+        out, err = p.communicate(timeout=20)
+        self.assertEqual((p.returncode, out), (1, b""), err)
+        self.assertEqual(json.loads(err.decode("utf-8"))["error"]["code"], "cancelled")
+
+    def assert_clean(self, pid):
+        self.assertFalse(alive(pid), "child still running")
+        fd = os.open(os.path.join(self.env.root, ".analyze.lock"), os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # raises BlockingIOError if an orphan still holds it
+        finally:
+            os.close(fd)
+        self.assertEqual(self.env.uploads_entries(), [])
+        self.assertEqual(os.listdir(self.env.inbox), [])
+
+    def ml_pid(self):
+        p = os.path.join(self.env.mldir, "pid.log")
+        if not os.path.exists(p):
+            return None
+        with open(p) as f:
+            rows = [json.loads(x) for x in f if x.strip()]
+        return next((r["pid"] for r in rows if r["cmd"] == "analyze"), None)
+
+    def test_signal_during_ml(self):
+        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            with self.subTest(sig=sig):
+                if os.path.exists(os.path.join(self.env.mldir, "pid.log")):
+                    os.unlink(os.path.join(self.env.mldir, "pid.log"))
+                self.env.write_control(analyze={"sleep": 60, "stdout": json.dumps(ANALYZE_OUT) + "\n"})
+                p = self.start("analyze", self.wav, "--language", "en")
+                pid = self.wait_for(self.ml_pid, "ml analyze")
+                self.wait_for(lambda: os.listdir(self.env.inbox), "inbox link")
+                self.stop(p, sig)
+                self.assert_clean(pid)
+                self.assertEqual(self.fw.calls(), [])  # nothing launched after the signal
+
+    def test_signal_during_rhythm(self):
+        self.fw.write(sleep=60)
+        p = self.start("analyze", self.wav, "--language", "en")
+        call = self.wait_for(lambda: self.fw.calls()[:1], "rhythm worker")[0]
+        self.assertTrue(alive(call["pid"]))
+        self.stop(p, signal.SIGTERM)
+        self.assert_clean(call["pid"])
+        self.assertFalse(os.path.exists(self.rhythm_file()))
+        with open(os.path.join(self.env.root, "logs", "local.log")) as f:
+            self.assertIn('"event":"rhythm_exit"', f.read())
 
 
 class CliReadTest(CliBase):

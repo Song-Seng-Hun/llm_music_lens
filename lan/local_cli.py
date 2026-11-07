@@ -4,7 +4,8 @@
 Trust boundary: the same OS user, like the `ml` wrapper (no TLS, no signing, no nonces, no receipts). It reads the
 server's api.json through server.load_config and runs the same code paths as the server (server.Engine): the same
 `ml analyze`, rhythm worker, team flock, results-rhythm directory and cache/reuse rules. Output is the server's JSON
-body on stdout; errors are {"error": {...}} on stderr. Exit 0 ok, 1 error, 2 config or usage error.
+body on stdout; errors are {"error": {...}} on stderr. Exit 0 ok, 1 error, 2 config or usage error. SIGTERM, SIGINT
+and SIGHUP kill the children (process groups), clean up, and exit 1 with code "cancelled".
 
 Usage:
   local_cli.py [--config PATH] analyze FILE --language {en,ko,ja,auto} [--emotion-mode {voice,music,none}]
@@ -19,6 +20,7 @@ import json
 import os
 import secrets
 import shutil
+import signal
 import stat
 import sys
 
@@ -31,6 +33,38 @@ LOG_NAME = "local.log"  # under <root>/logs, beside the server's api.log
 CLIENT = "local"
 
 
+class LocalEngine(server.Engine):
+    """server.Engine plus the children it started, so SIGTERM/SIGINT/SIGHUP can stop them before cleanup."""
+
+    def __init__(self, cfg, log_name):
+        self.children, self.cancelled = [], False
+        super().__init__(cfg, log_name)
+
+    def popen(self, argv, **kw):
+        if self.cancelled:  # no new child once a stop signal arrived
+            raise OSError("cancelled")
+        p = super().popen(argv, **kw)
+        self.children.append(p)
+        if self.cancelled:  # the signal landed while it was starting
+            self.kill_children()
+        return p
+
+    def cancel(self, signum, frame):
+        """Signal handler: kill each live child's process group like the server's timeout path (all children run
+        with start_new_session=True). The blocked wait then returns, the pipeline fails as usual, and the normal
+        cleanup removes uploads/<op>/ and the inbox link after the children are reaped."""
+        self.cancelled = self.stopping = True  # stopping: run_rhythm launches nothing more
+        self.kill_children()
+
+    def kill_children(self):
+        for p in self.children:
+            if p.returncode is None:
+                try:
+                    os.killpg(p.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+
+
 class Fail(Exception):
     def __init__(self, code, detail=None, **extra):
         super().__init__(code)
@@ -39,6 +73,8 @@ class Fail(Exception):
 
 def out_bytes(engine, data):
     """The server's response cap (send_raw): an oversized body becomes invalid_output."""
+    if engine.cancelled:
+        raise Fail("cancelled")
     if len(data) > engine.limits["response_max"]:
         raise Fail("invalid_output")
     sys.stdout.buffer.write(data + b"\n")
@@ -191,25 +227,29 @@ COMMANDS = {"analyze": cmd_analyze, "report": cmd_report, "timeline": cmd_timeli
 def main(argv=None):
     ns = parser().parse_args(argv)
     try:
-        engine = server.Engine(server.load_config(ns.config), LOG_NAME)
+        engine = LocalEngine(server.load_config(ns.config), LOG_NAME)
     except (server.ConfigError, OSError) as e:
         emit_error("server_misconfigured", detail=str(e) if isinstance(e, server.ConfigError) else type(e).__name__)
         return 2
+    for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(s, engine.cancel)
     try:
         COMMANDS[ns.command](engine, ns)
         return 0
     except Fail as e:
-        emit_error(e.code, detail=e.detail, **e.extra)
-        return 1
+        code, detail, extra = e.code, e.detail, e.extra
     except server.HttpError as e:
-        emit_error(e.code, detail=e.detail)
-        return 1
+        code, detail, extra = e.code, e.detail, {}
     except Exception as e:  # noqa: BLE001
         engine.log.event("local_error", command=ns.command, kind=type(e).__name__)
-        emit_error("internal_error")
-        return 1
+        code, detail, extra = "internal_error", None, {}
     finally:
         engine.log.close()
+    if engine.cancelled:  # whatever the killed children made the pipeline report
+        code, detail = "cancelled", None
+        extra = {k: v for k, v in extra.items() if k == "request_id"}
+    emit_error(code, detail=detail, **extra)
+    return 1
 
 
 if __name__ == "__main__":
