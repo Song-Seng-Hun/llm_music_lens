@@ -884,6 +884,8 @@ with the section model and reads the downbeats that model already finds, the cho
 - `rhythm.bars` is `{status: "done", method, reliability: "reference_candidate", beats_per_bar, steps, extended_rows, bar_count}`, or `null`. Read the rows with `/timeline`
   `layer=bars`: `{start, end, chord, split, scale, degree, kick, snare}`, one per pair of consecutive downbeats, then on at the median bar length to the song end. The last
   `extended_rows` rows are these added bars (the model gave no downbeat there), so only music before the first downbeat is in no bar.
+  On RWC-P, 29 of 100 songs had annotated downbeats before the first one (65 in all); a frozen test of filling bars backwards
+  failed on recall (55%), so those stay outside the bars.
   On RWC-P (100 songs, frozen test) the added bar starts matched annotated downbeats 77% of the time (the first added bar 91%,
   later ones less as they drift) and found 80% of the downbeats after the last one; added bars also run over a fade-out or
   silence at the end. Results stored before 0.23.0 have no `extended_rows` and end at the last downbeat. `chord` is the label sounding longest in the bar, `N` for none, `null` unless BTC made the chords. `kick` and
