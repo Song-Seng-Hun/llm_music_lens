@@ -1,4 +1,5 @@
 """LLM sheet (sheet.py): build/render from synthetic results, and the GET /sheet/<id> route on a stored result."""
+import hashlib
 import json
 import os
 import sys
@@ -367,6 +368,82 @@ class SheetRouteTest(RhythmBase):
             self.assertEqual("at most 30 s" in b["error"].get("detail", ""), q in ("start=0&end=30.5", "start=2&end=2", "start=3&end=2"), q)
         self.assertEqual(self.c.json("GET", "/sheet/%s?start=0&end=30" % RID64)[0], 200)
         self.assertEqual(self.c.json("GET", "/sheet/%s?start=2.2&end=32.2" % RID64)[0], 200)  # 30 s despite float error
+
+    # view=brief and layers= (no parameter stays byte-identical to the sheet before they existed)
+    GOLDEN = {"": (2577, "d801e67de9f65aafe88669827c751455a61cdb67f7b7beb5669457b346f7f9db"),
+              "?format=json": (4496, "788093840f4955be8462aca8e743fcee47a11210963229c0985a51289c2988d8")}
+
+    def raw(self, q):
+        st, _h, body = self.c.send("GET", "/sheet/" + RID64 + q)
+        return st, body
+
+    def test_default_unchanged(self):
+        self.store()
+        for q, (n, digest) in self.GOLDEN.items():
+            st, body = self.raw(q)
+            self.assertEqual((st, len(body), hashlib.sha256(body).hexdigest()), (200, n, digest), q)
+
+    def test_brief(self):
+        self.store()
+        st, b = self.c.json("GET", "/sheet/%s?view=brief" % RID64)
+        self.assertEqual((st, b["format"]), (200, "music-lens-sheet/1"))
+        lines = b["text"].splitlines()
+        self.assertEqual([l.split()[0] for l in lines if l.startswith("S0")], ["S01", "S02", "S03"])
+        self.assertFalse([l for l in lines if l.startswith("  ")], "no per-section detail lines")
+        for head in ("tempo ", "key ", "form ", "level ", "genre ", "layers ", "view    brief"):
+            self.assertTrue(any(l.startswith(head) for l in lines), head)
+        self.assertFalse(any(l.startswith(("parts ", "melody ", "groove ")) for l in lines))
+        st, j = self.c.json("GET", "/sheet/%s?view=brief&format=json" % RID64)
+        sh = j["sheet"]
+        self.assertEqual(sh["view"], {"layers": []})
+        self.assertEqual(set(sh["sections"][0]), {"id", "label", "function", "start", "end", "key_estimate", "level_db"})
+        self.assertNotIn("parts", sh["conventions"])
+        self.assertLess(len(self.raw("?view=brief")[1]), self.GOLDEN[""][0])
+
+    def test_layers(self):
+        self.store()
+        st, b = self.c.json("GET", "/sheet/%s?layers=melody,chords" % RID64)
+        self.assertEqual(st, 200, b)
+        lines = b["text"].splitlines()
+        self.assertEqual(sum(l.startswith("  chords") for l in lines), 3)
+        self.assertEqual(sum(l.startswith("  melody") for l in lines), 3)
+        self.assertFalse(any(l.startswith(("  parts", "  drums")) for l in lines))
+        self.assertIn("view    section layers chords, melody only; full sheet: GET /sheet/" + RID64, lines)
+        full = self.c.json("GET", "/sheet/%s?format=json" % RID64)[1]["sheet"]
+        sh = self.c.json("GET", "/sheet/%s?layers=chords,melody&format=json" % RID64)[1]["sheet"]
+        self.assertEqual([s["chords"] for s in sh["sections"]], [s["chords"] for s in full["sections"]])
+        self.assertEqual(sh["song"], {k: v for k, v in full["song"].items() if k != "grooves"})
+        st, b = self.c.json("GET", "/sheet/%s?layers=grid,key,chords,melody,parts,drums" % RID64)
+        all_lines = [l for l in b["text"].split("\n") if not l.startswith("view ")]  # all layers = the full text
+        self.assertEqual(all_lines, self.c.json("GET", "/sheet/" + RID64)[1]["text"].split("\n"))
+
+    def test_view_errors(self):
+        self.store()
+        for q in ("view=full", "view=", "layers=", "layers=chords,chords", "layers=beats", "layers=Chords",
+                  "view=brief&layers=chords", "view=brief&start=0&end=3", "layers=chords&start=0&end=3"):
+            st, b = self.c.json("GET", "/sheet/%s?%s" % (RID64, q))
+            self.assertEqual((st, b["error"]["code"]), (400, "bad_request"), q)
+            self.assertIn("view=brief or layers=", b["error"]["detail"], q)
+        st, b = self.c.json("GET", "/sheet/%s?view=brief&format=xml" % RID64)
+        self.assertEqual((st, b["error"]["code"]), (400, "bad_request"))
+
+
+class SelectTest(unittest.TestCase):
+    def test_select_is_a_subset_and_renders_without_layers(self):
+        v = BarsTest().v()
+        sh = json.loads(json.dumps(sheet.build(v, RID64)))
+        full = sheet.render(sh)
+        self.assertIn("groove  ", full)
+        brief = sheet.render(sheet.select(sh, []))
+        self.assertFalse([l for l in brief.splitlines() if l.startswith(("  ", "groove "))])
+        drums = sheet.render(sheet.select(sh, ["drums"]))
+        self.assertIn("groove  ", drums)
+        self.assertTrue(any(l.startswith("  drums") for l in drums.splitlines()))
+        grid = sheet.select(sh, ["grid"])["sections"]
+        self.assertEqual(grid[2]["uncovered"], [[5.0, 6.0]])
+        self.assertNotIn("chords", grid[2])
+        self.assertLess(len(brief), len(full))
+        self.assertEqual(sh, json.loads(json.dumps(sheet.build(v, RID64))))  # select() leaves the full sheet as it was
 
 
 if __name__ == "__main__":

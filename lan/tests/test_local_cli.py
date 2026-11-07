@@ -309,6 +309,15 @@ class CliReadTest(CliBase):
         self.err(1, "bad_request", "sheet", RID64, "--start", "0")
         self.err(2, "bad_request", "sheet", RID64, "--format", "xml")
 
+    def test_sheet_view_matches_server(self):
+        self.store()
+        for args, q in ((("--view", "brief"), "?view=brief"), (("--view", "brief", "--format", "json"), "?view=brief&format=json"),
+                        (("--layers", "chords,drums"), "?layers=chords,drums")):
+            self.assertEqual(self.ok("sheet", RID64, *args), self.served("/sheet/" + RID64 + q), args)
+        b = self.err(1, "bad_request", "sheet", RID64, "--layers", "chords,beats")
+        self.assertIn("view=brief or layers=", b["error"]["detail"])
+        self.err(1, "bad_request", "sheet", RID64, "--view", "brief", "--start", "0", "--end", "3")
+
     def test_timeline(self):
         self.store()
         for layer in ("beats", "chords", "melody"):
