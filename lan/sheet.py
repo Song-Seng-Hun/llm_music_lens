@@ -94,6 +94,25 @@ def timed(chords, a, b):
     return out
 
 
+def shown(chords, label, a, b):
+    """The display held longest in [a, b) among the chord rows labelled `label` (first seen on a tie); the label without one."""
+    if label is None:
+        return None
+    held = {}
+    for c in chords or []:
+        if c['label'] == label and c['start'] < b and c['end'] > a and 'display' in c:
+            held[c['display']] = held.get(c['display'], 0.0) + min(c['end'], b) - max(c['start'], a)
+    return max(held, key=held.get) if held else label
+
+
+def bar_chord(chords, r):
+    """A bar row's chord as shown: [first half, second half] when split, else one name."""
+    if r.get('split'):
+        m = (r['start'] + r['end']) / 2
+        return [shown(chords, r['split'][0], r['start'], m), shown(chords, r['split'][1], m, r['end'])]
+    return shown(chords, r.get('chord'), r['start'], r['end'])
+
+
 def drums_of(bs, idx, grooves):
     """Coverage first, then the most common non-empty pattern as a song-wide groove ID."""
     meas = [(i, r) for i, r in zip(idx, bs) if r.get('kick') is not None and r.get('snare') is not None]
@@ -142,7 +161,7 @@ def build(v, rid=None):
             sec['uncovered'] = uncovered(a, b, [(r['start'], r['end']) for r in bars])
         # chords: per bar when a bar grid with chords exists, else timed changes with N kept
         if bs and any(r.get('chord') is not None for r in bars):  # sections holding no bar fall back to timed changes
-            ch = [r['split'] if r.get('split') else r['chord'] for r in bs]
+            ch = [bar_chord(chords, r) for r in bs]
             sec['chords'] = {'status': 'detected', 'per_bar': ch}
             if chords and sec.get('uncovered'):
                 sec['chords']['outside_bars'] = [{'span': u, 'changes': timed(chords, u[0], u[1])} for u in sec['uncovered']]
@@ -196,6 +215,7 @@ def build(v, rid=None):
         'conventions': {
             'reliability': 'cand = worker reliability reference_candidate, low = low_reference; neither is a measured accuracy',
             'status': 'detected = measured and found; empty = measured, nothing found; unavailable = not measured or no row for this span; failed = the layer failed',
+            'chord_names': 'a chord row\'s display (key spelling, /bass when the bass layer holds one chord tone other than the root for half the row or more); a bar shows the display held longest among its chord\'s rows',
             'times': 'seconds from audio start, as in the source result',
             'key_estimate': 'the key_sections estimate with the longest overlap with the section',
             'level_db': 'section mean energy minus the song median, dB',
@@ -352,7 +372,7 @@ def zoom(v, a, b, rid=None):
     starts = [r['start'] for _, r in sel]
     for i, r in sel:
         zb.append({'n': i + 1, 'start': r['start'], 'end': r['end'], 'section': sec_of((r['start'] + r['end']) / 2),
-                   'partial': r['start'] < a or r['end'] > b, 'chord': r['split'] if r.get('split') else r.get('chord'),
+                   'partial': r['start'] < a or r['end'] > b, 'chord': bar_chord(v.get('chords'), r),
                    'scale': r.get('scale'), 'degree': r.get('degree'), 'kick': r.get('kick'), 'snare': r.get('snare'),
                    **{k: [] for k in rows if not isinstance(rows[k], str)}})
     for k, x in rows.items():
@@ -397,6 +417,7 @@ def zoom(v, a, b, rid=None):
             'duration': v['duration'], 'span': [a, b], 'meter': dict(zip(('beats_per_bar', 'steps'), meter(v))),
             'conventions': {
                 'bars': 'bars overlapping the span, numbered as in the full sheet; partial = the bar reaches outside the span',
+                'chord': 'the display held longest in the bar (or half bar when split) among the rows of the bar row\'s chord; the label when rows have no display',
                 'notes': 'a note belongs to the bar holding its onset (an onset in a bar\'s last half step goes to step 0 of the next bar, as in the kick/snare grid): [name, step, length], %d steps per bar of that bar\'s own length; rows starting outside the span are left out' % nsteps,
                 'drums': 'kick and snare are the bar row\'s %d-step pattern; hits counts the other drum classes in the bar' % nsteps,
                 'outside_bars': 'rows whose onset lies in no bar: notes [name, start s, duration s]; spans = gaps of %.0f s or more' % GAP,

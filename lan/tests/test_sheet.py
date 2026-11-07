@@ -77,6 +77,26 @@ class BarsTest(unittest.TestCase):
         self.assertEqual(s[2]["chords"]["outside_bars"], [{"span": [5.0, 6.0], "changes": [[5.0, "N.C."]]}])
         self.assertIn("chords outside bars 0:05.00-0:06.00: 0:05.00 N.C.", sheet.render(sheet.build(v)))
 
+    def test_bar_chord_uses_display(self):
+        v = self.v(chords=[{"start": 0, "end": 0.25, "label": "C", "display": "C"},          # bar 1: C/E held longer
+                           {"start": 0.25, "end": 1, "label": "C", "display": "C/E"},
+                           {"start": 1, "end": 2, "label": "G", "display": "G"},
+                           {"start": 2, "end": 3, "label": "A#", "display": "Bb"},          # key spelling
+                           {"start": 3, "end": 4, "label": "F", "display": "F/A"},
+                           {"start": 4, "end": 5, "label": "C"}])                           # older row: no display
+        v["bars"]["rows"][2]["chord"] = "A#"
+        s = sheet.build(v)["sections"]
+        self.assertEqual(s[0]["chords"]["per_bar"], ["C/E", "G"])
+        self.assertEqual(s[1]["chords"]["per_bar"], ["Bb", "F/A"])
+        self.assertEqual(s[2]["chords"]["per_bar"], ["C"])
+        self.assertIn("chords | C/E | G |", sheet.render(sheet.build(v)))
+
+    def test_bar_chord_tie_and_no_display(self):
+        rows = [{"start": 0, "end": 0.5, "label": "C", "display": "C/G"}, {"start": 0.5, "end": 1, "label": "C", "display": "C"}]
+        self.assertEqual(sheet.bar_chord(rows, bar(0.0, 1.0, "C")), "C/G")    # tie: first seen
+        self.assertEqual(sheet.bar_chord([{"start": 0, "end": 1, "label": "C"}], bar(0.0, 1.0, "C")), "C")
+        self.assertIsNone(sheet.bar_chord(rows, bar(0.0, 1.0, None)))
+
     def test_drums_detected_empty_unmeasured(self):
         sh = sheet.build(self.v())
         s = sh["sections"]
@@ -170,6 +190,14 @@ class ZoomTest(unittest.TestCase):
         self.assertIn("  drums  kick/snare not measured; hits kick 1", t)
         self.assertIn("outside the bar grid, gaps 0:04.00-0:05.00 (onset", t)
         self.assertIn("  melody E4 0:04.20+0.40", t)
+
+    def test_split_halves_use_display(self):
+        v = self.v(chords=[{"start": 0, "end": 2, "label": "C", "display": "C"},
+                           {"start": 2, "end": 3, "label": "G", "display": "G/B"},
+                           {"start": 3, "end": 4, "label": "Am", "display": "Am"}])
+        z = sheet.zoom(v, 0.0, 6.0, RID64)
+        self.assertEqual(z["bars"][1]["chord"], ["G/B", "Am"])
+        self.assertIn("bar 2 | 0:02.00-0:04.00 | S02 | G/B>Am", sheet.render_zoom(z))
 
     def test_three_beat_grid(self):
         v = self.v()

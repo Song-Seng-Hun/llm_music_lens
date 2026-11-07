@@ -924,7 +924,9 @@ heard by a person, was found about where they heard it.
 ### Chord display (worker 0.10.0)
 
 Every `/timeline` `layer=chords` row gets `display`, the name to show a person: `Bb7`, `F#m`, `C/E`, `Bbm7/Db`. No config is needed.
-`label` is unchanged and stays the value to compare, with the sharps-only BTC names; section `top_chord` and the overview use it.
+`label` is unchanged and stays the value to compare, with the sharps-only BTC names; section `top_chord`, the overview and the
+`/timeline` bar rows use it. The sheet and its zoom show `display`: a bar (or each half of a split bar) shows the `display` held
+longest among the rows of the bar's chord, and the `label` for rows stored without one.
 
 - Spelling: the root and the slash note follow the key section at the middle of the segment. A key whose relative major is
   F, Bb, Eb, Ab or Db uses flats; C major and A minor use Db, Eb, F#, Ab and Bb; the others use sharps. A wrong key
@@ -932,7 +934,8 @@ Every `/timeline` `layer=chords` row gets `display`, the name to show a person: 
 - Slash: added when one bass pitch class from the bass layer sounds for at least half of the segment and is a chord tone other
   than the root. Without a bass layer, as on a 16 kHz upload, no slash appears.
 
-Limits: slashes are conservative, so many real inversions get none, and some that appear are wrong. A bass note outside
+Limits: slashes are conservative, so many real inversions get none, and some that appear are wrong. On RWC-P songs 51-100
+the bass under a slash matched the annotation on 75% of the slashed length, and 29% of the annotated inversions got the right slash. A bass note outside
 the chord, such as `C/D`, is never written. These were measured with BTC chords only. `N` and `X` are copied as they are.
 
 ### Drum hits (worker 0.9.0)
