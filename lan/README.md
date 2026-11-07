@@ -224,7 +224,7 @@ API:
   config) and a `note` to read the sheet first.
 - `GET /sheet/<id>?format=text|json` (default `text`) builds the LLM sheet (`sheet.py`, format `music-lens-sheet/1`) from the
   stored file: `{"result_id", "format", "text"}`, or `{"result_id", "sheet"}` with the JSON the text is rendered from.
-  One block per source section (ID, times, bars, key estimate and in-section key changes, level, chords per bar or
+  One block per source section (ID, times, bars, key estimate and in-section scale changes over bars, or key changes from `key_sections` in a section with no scaled bar, level, chords per bar or
   timed with N.C., melody, parts, drum coverage and groove ID), each layer marked detected / empty / unavailable /
   failed. The tempo line gives Essentia's bpm, or the bar tempo when the two differ about 2x (on RWC-P the bar tempo
   matched the annotated beat on 10 of 12 such songs, Essentia on 2). Give an LLM the sheet first and let it drill down with `/timeline` for exact rows. No stored file: 404
@@ -274,7 +274,7 @@ count before the beat vote, stored file only), `chords_reliability` (`low_refere
 chords), `chord_vocabulary`, `sample_rate` 44100 (input
 resampled from 16 kHz because RhythmExtractor2013 assumes 44.1 kHz), `duration`, `tool` (name, version,
 `essentia_version`), `warnings` (`short_audio` < 10 s, `near_silent`, `no_beats`, `low_bpm_confidence` < 1.5,
-`low_key_strength` < 0.5, `key_changes` when there is more than one key section, `no_chords`,
+`low_key_strength` < 0.5, `key_changes` (from 0.24.0, when bars carry a scale: the number of bars whose scale differs from the bar before, none when it never changes; otherwise when there is more than one key section), `no_chords`,
 `double_tempo_evidence_unavailable`, `no_sections`, `sections_single`, `tempo_cnn_patch_count_mismatch` (0.3.1-0.4.0
 only), `no_melody`, `melody_failed`, `melody_scale_degrees_unavailable`,
 `melody_notes_capped`, `lyric_repeats_capped` (0.4.3), `lyric_repeats_approx_capped` (0.4.4)), `energy`, `energy_summary`, `sections`, `sections_method`, `sections_reliability`
@@ -922,7 +922,7 @@ owner's decision. Answers with `split` were right 87.4% of the time and 2.5% of 
 So `split` is worth reading, and `null` does not mean one chord. A half-bar reading of the root agreed 84.0% of the time, against 77.3% with one chord per bar. A change away from the middle of the bar, or a third chord, cannot show.
 
 Scale and degree differ from `key`, one estimate for the whole song, and from `key_sections`, which comes from fixed 20 s windows of audio
-and can change more often; they may disagree. They were evaluated on RWC-P against a reference built from the MIDI notes and annotated chords, and they passed the bars set
+and can change more often; they may disagree. On the same RWC-P reference, the 20 s windows changed key about three times per song where the reference had no change and the scale path did not, so from 0.24.0 the `key_changes` warning and the sheet's per-section changes follow the scale path when bars carry one; `key_sections` itself is unchanged. They were evaluated on RWC-P against a reference built from the MIDI notes and annotated chords, and they passed the bars set
 beforehand, on a second try after the first failed, so those songs were no longer blind. The reference shares the method's pitch-class
 idea and holds clear changes only, not checked by ear, so subtle changes are unmeasured. Most songs were right throughout, but in a few the
 whole path was one scale off, and then every degree in that stretch is wrong. Treat both as an estimate. A real song's half-step rise,

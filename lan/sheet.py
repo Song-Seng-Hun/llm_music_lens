@@ -156,6 +156,7 @@ def drums_of(bs, idx, grooves):
 def build(v, rid=None):
     secs = v.get('sections') or []
     bars = (done(v, 'bars') or {}).get('rows')
+    scaled = bool(bars) and all(r.get('scale') for r in bars)  # key path per bar (worker 0.15.0+)
     es = v.get('energy_summary') or {}
     med = es.get('median')
     st = {k: layer_state(v, k) for k in ('melody', 'parts', 'bars', 'drums', 'genre', 'swing')}
@@ -177,6 +178,9 @@ def build(v, rid=None):
         # bars: a bar belongs to the section holding its midpoint
         idx = [i for i, r in enumerate(bars or []) if a <= (r['start'] + r['end']) / 2 < b]
         bs = [bars[i] for i in idx]
+        if scaled and idx:  # a section with no bar keeps the key_sections changes
+            sec['scale_changes'] = [[bars[i]['start'], bars[i]['scale']] for i in idx if i and bars[i]['scale'] != bars[i - 1]['scale']]
+            sec['key_changes'] = []
         if bars is not None:
             sec['bars'] = [idx[0] + 1, idx[-1] + 1] if idx else None
             sec['straddling_bars'] = [i + 1 for i, r in zip(idx, bs)
@@ -241,6 +245,7 @@ def build(v, rid=None):
             'chord_names': 'a chord row\'s display (key spelling, /bass when the bass layer holds one chord tone other than the root for half the row or more); a bar shows the display held longest among its chord\'s rows',
             'times': 'seconds from audio start, as in the source result',
             'key_estimate': 'the key_sections estimate with the longest overlap with the section',
+            'scale_changes': 'bars whose key-path scale (12 major scales; C also stands for A minor) differs from the bar before; in a section holding bars that carry a scale it replaces key_changes from the 20 s key_sections, which report false changes',
             'level_db': 'section mean energy minus the song median, dB',
             'bars': 'a bar belongs to the section that holds its midpoint; straddling = more than %d%% of the bar lies outside; uncovered = spans of %.0f s or more with no bar' % (100 * STRADDLE, GAP),
             'parts': 'share of 2 s windows where the stem is within 15 dB of the mix; crossed_50 compares with the previous section only when both were measured',
@@ -310,6 +315,8 @@ def render(sh):
             out.append('  grid   ' + '; '.join(extra))
         if s.get('key_changes'):
             out.append('  key    changes ' + ' '.join('%s %s' % (mm(t), k) for t, k in s['key_changes']))
+        if s.get('scale_changes'):
+            out.append('  scale  changes ' + ' '.join('%s %s' % (mm(t), k) for t, k in s['scale_changes']))
         ch = s['chords']
         for ob in ch.get('outside_bars', []):
             out.append('  chords outside bars %s: %s' % (rng(ob['span']), ' '.join('%s %s' % (mm(t), c) for t, c in ob['changes']) or 'none'))
