@@ -198,7 +198,7 @@ import time
 import unicodedata
 import wave
 
-TOOL = {"name": "music-lens-rhythm-worker", "version": "0.22.0"}
+TOOL = {"name": "music-lens-rhythm-worker", "version": "0.23.0"}
 SRC_RATE = 16000
 RATE = 44100
 MAX_SECONDS = 600.0
@@ -387,8 +387,8 @@ BAR_STEPS = {3: 12, 4: 16}  # steps per bar by beats per bar; 16 when the count 
 # Beats per bar (0.22.0): the median count of the model's beats in a bar, kept only when it is 3 or 4. Ballroom (2026-11-07,
 # frozen bars): 154 of 175 3/4 excerpts read 3, 0 of 77 4/4 excerpts read 3. 6/8 is not tested.
 DOWNBEAT_METHOD = "All-In-One 8-fold ensemble on Demucs htdemucs_ft stems. A wrong downbeat shifts every bar built on it."
-BAR_METHOD = ("Between consecutive downbeats: the chord sounding longest; kick and snare on equal steps (12 if 3 beats per "
-              "bar, else 16); scale and degree from chord tones; split = each half's chord.")
+BAR_METHOD = ("Between downbeats, then median-length bars to the song end: longest chord; kick and snare on equal steps "
+              "(12 if 3 beats per bar, else 16); scale, degree from chord tones; split = each half's chord.")
 # Two chords in a bar (0.18.0): each half's chord must hold this share of its half. Evaluated at this value.
 BAR_SPLIT_SHARE = 0.6
 # Swing (0.16.0): where hi-hat and cymbal hits fall between two beats. Evaluated at these values.
@@ -1900,12 +1900,18 @@ def bars_to_song_end(downbeats, duration):
     return spans + [(t, duration)]
 
 
-def bar_scales(downbeats, chords, duration):
+def bar_spans(downbeats, duration):
+    """The bar rows' spans: bars_to_song_end, at most BAR_MAX. Tail test (RWC-P, frozen, 2026-11-07): the added bar starts
+    matched annotated downbeats 77% of the time (first added bar 91%) and found 80% of the downbeats after the last one."""
+    return [(a, b) for a, b in ((r3(a), r3(b)) for a, b in bars_to_song_end(downbeats, duration)) if b > a][:BAR_MAX]
+
+
+def bar_scales(spans, chords):
     """(scale name, degree name) per bar row; degree None for a bar with no chord, both None with no chords at all."""
-    labels = [top_chord(chords, a, b) for a, b in bars_to_song_end(downbeats, duration)]
+    labels = [top_chord(chords, a, b) for a, b in spans]
     path = scale_path(labels)
     out = []
-    for i in range(len(downbeats) - 1):
+    for i in range(len(spans)):
         t = chord_tones(labels[i])
         out.append((SCALE_NAMES[path[i]] if path else None,
                     DEGREE_NAMES[(t[0] - path[i]) % 12] if path and t else None))
@@ -1938,16 +1944,20 @@ def bars_field(downbeats, chords, drums, drum_hits, chords_ok, duration, beats=N
         return None
     meter = beats_per_bar(beats, downbeats)
     n = BAR_STEPS.get(meter, 16)
-    scales = bar_scales(downbeats, chords, duration) if chords_ok else [(None, None)] * (len(downbeats) - 1)
+    spans = bar_spans(downbeats, duration)
+    size = statistics.median(b - a for a, b in zip(downbeats, downbeats[1:]))
+    edges = [a for a, _ in spans] + [max(spans[-1][1], spans[-1][0] + size)]  # a cut last bar keeps full-bar steps
+    scales = bar_scales(spans, chords) if chords_ok else [(None, None)] * len(spans)
     done = bool(drums) and drums.get("status") == "done"
-    steps = {c: bar_steps([h["time"] for h in drum_hits if h["class"] == c], downbeats, n) if done else None
+    steps = {c: bar_steps([h["time"] for h in drum_hits if h["class"] == c], edges, n) if done else None
              for c in ("kick", "snare")}
     return {"status": "done", "method": BAR_METHOD, "reliability": "reference_candidate", "beats_per_bar": meter, "steps": n,
+            "extended_rows": len(spans) - (len(downbeats) - 1),
             "rows": [{"start": a, "end": b, "chord": top_chord(chords, a, b) if chords_ok else None,
                       "split": bar_split(chords, a, b) if chords_ok else None,
                       "scale": scales[i][0], "degree": scales[i][1],
                       **{c: steps[c].get(i, []) if done else None for c in steps}}
-                     for i, (a, b) in enumerate(zip(downbeats, downbeats[1:]))]}
+                     for i, (a, b) in enumerate(spans)]}
 
 
 def swing_field(downbeats, drums, drum_hits, meter=None):
@@ -2703,7 +2713,7 @@ def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None, genre_di
         "double_tempo_evidence_note": DTE_NOTE,
         "tempo_cnn": tc,
         "downbeats": ({"status": "done", "method": DOWNBEAT_METHOD, "reliability": "reference_candidate",
-                       "count": len(bars["rows"]) + 1} if bars else
+                       "count": len(bars["rows"]) - bars["extended_rows"] + 1} if bars else
                       {"status": "not_provided", "reason": "Essentia has no native downbeat tracker"}),
         "key": {"tonic": str(tonic), "scale": str(scale), "strength": round(kstrength, 3), "profile": KEY_PROFILE},
         "key_sections": key_sections,

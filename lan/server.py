@@ -1621,6 +1621,7 @@ BAR_MAX = 2000  # worker cap
 BAR_ROW_KEYS = {"start", "end", "chord", "kick", "snare"}  # stored by worker 0.14.0
 BAR_KEYS = {"status", "method", "reliability", "rows"}
 BAR_KEYS_V220 = BAR_KEYS | {"beats_per_bar", "steps"}
+BAR_KEYS_V230 = BAR_KEYS_V220 | {"extended_rows"}
 BAR_ROW_KEYS_V150 = BAR_ROW_KEYS | {"scale", "degree"}
 BAR_ROW_KEYS_V180 = BAR_ROW_KEYS_V150 | {"split"}
 SCALE_NAMES = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"}
@@ -1639,16 +1640,18 @@ def _unit_rows_ok(rows, dur):
 
 def _rhythm_v140_ok(v, dur):
     """Worker 0.14.0: downbeats and the bars, which exist only together. Worker 0.15.0: scale and degree in every row. Worker 0.18.0: split.
-    Worker 0.22.0: beats_per_bar (3, 4 or null) and steps (12 for 3, else 16)."""
+    Worker 0.22.0: beats_per_bar (3, 4 or null) and steps (12 for 3, else 16). Worker 0.23.0: extended_rows, the rows after the
+    last downbeat (bars run on to the song end)."""
     d, bars = v["downbeats"], v.get("bars")
     if d.get("status") != "done":
         return bars is None and "count" not in d
     if not (set(d) == {"status", "method", "reliability", "count"} and d["reliability"] == "reference_candidate"
-            and isinstance(bars, dict) and set(bars) in (BAR_KEYS, BAR_KEYS_V220) and bars["status"] == "done"
+            and isinstance(bars, dict) and set(bars) in (BAR_KEYS, BAR_KEYS_V220, BAR_KEYS_V230) and bars["status"] == "done"
             and bars["reliability"] == "reference_candidate" and _short_str(bars["method"], 200)
-            and _unit_rows_ok(bars["rows"], dur) and d["count"] == len(bars["rows"]) + 1):
+            and _unit_rows_ok(bars["rows"], dur) and _int(bars.get("extended_rows", 0), 0, len(bars["rows"]) - 1)
+            and d["count"] == len(bars["rows"]) - bars.get("extended_rows", 0) + 1):
         return False
-    if set(bars) == BAR_KEYS_V220 and (bars["beats_per_bar"], bars["steps"]) not in ((3, 12), (4, 16), (None, 16)):
+    if set(bars) != BAR_KEYS and (bars["beats_per_bar"], bars["steps"]) not in ((3, 12), (4, 16), (None, 16)):
         return False
     last = bars.get("steps", 16) - 1
     keys = set(bars["rows"][0])
