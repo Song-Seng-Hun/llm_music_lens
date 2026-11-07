@@ -28,12 +28,12 @@ class ReasonTest(Base):
         return st, b, h["X-ML-Nonce"]
 
     def test_empty_output_detail_and_hint(self):
-        for mode, message in (("none", NO_LAYER), ("voice", NO_WORDS)):
-            self.fail_with("analyze", "empty_output", message)
+        for mode in ("none", "voice"):  # ml analyze emits NO_LAYER at top level (NO_WORDS is caught inside)
+            self.fail_with("analyze", "empty_output", NO_LAYER)
             st, b, nonce = self.analyze(mode)
             self.assertEqual(st, 500)
             self.assertEqual(b, {"error": {"code": "empty_output", "message": "Analyzer returned no output",
-                                           "detail": message, "hint": server.NO_WORDS_HINT}, "request_id": nonce})
+                                           "detail": NO_LAYER, "hint": server.NO_WORDS_HINT}, "request_id": nonce})
             r = self.c.json("GET", "/receipt/" + nonce)[1]
             self.assertEqual((r["state"], r["error_code"]), ("failed", "empty_output"))
         self.assertIn("emotion_mode=music", server.NO_WORDS_HINT)

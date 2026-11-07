@@ -136,8 +136,9 @@ ML_REASONS = {
                   "Analysis cancelled before inference", "Analysis cancelled between stages",
                   "Analysis cancelled before publication", "Inference cancelled", "Inference cancelled before publication"),
 }
-NO_WORDS_HINT = ("no sung or spoken words were recognized; for instrumental audio use emotion_mode=music "
-                 "(local CLI: --emotion-mode music) so the music-mood layer succeeds and the rhythm layer runs")
+NO_WORDS_HINT = ("no layer succeeded (no words recognized, or speech recognition failed); for instrumental audio try "
+                 "emotion_mode=music (local CLI: --emotion-mode music) so the music-mood layer succeeds and the rhythm "
+                 "layer runs")
 
 RE_IFACE = re.compile(r"\A[a-z]{1,8}[0-9]{1,3}\Z")
 RE_TIME = re.compile(r"\A(0|[1-9][0-9]{0,11})\Z")
@@ -3090,7 +3091,7 @@ class Engine:
         ok, data, code, detail = self.run_ml(["analyze", dst_name, "--language", job.language, "--emotion-mode",
                                               job.emotion_mode], None)
         self.log.event("analyze_exit", id=job.rid, ok=ok, code=code)
-        if not ok:  # ml's own empty_output (detail set): no words and no emotion layer; music mood needs no words
+        if not ok:  # ml's own empty_output (detail set): no words (none recognized, or ASR failed) and no emotion layer
             hint = NO_WORDS_HINT if code == "empty_output" and detail and job.emotion_mode != "music" else None
             return fail(code, detail, hint)
         native = json.loads(data.decode("utf-8"))

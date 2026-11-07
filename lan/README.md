@@ -120,11 +120,11 @@ When `ml` fails with one of its own fixed reasons (ml 0.2.6 `Failure` texts, lis
 code), the error body keeps its fixed `message` and adds that text as `error.detail`. This applies to the server and
 the local CLI (stderr JSON), on analyze and on reads. Other stderr text (paths, OS errors, diagnostics, a code the
 server remaps) is never passed on: those bodies stay `{code, message}`. An analyze that ml fails as `empty_output`
-(no words and no emotion layer, e.g. instrumental audio) with `emotion_mode` `none` or `voice` also gets
-`error.hint`: use `emotion_mode=music` (CLI `--emotion-mode music`) so the music-mood layer succeeds and the rhythm
-layer runs. Example:
+(no layer succeeded: no words recognized, e.g. instrumental audio, or speech recognition failed; and no emotion
+layer) with `emotion_mode` `none` or `voice` also gets `error.hint`: for instrumental audio try `emotion_mode=music`
+(CLI `--emotion-mode music`) so the music-mood layer succeeds and the rhythm layer runs. Example:
 `{"error":{"code":"empty_output","message":"Analyzer returned no output","detail":"No requested analysis layer
-succeeded; no result published","hint":"no sung or spoken words were recognized; ..."},"request_id":"..."}`.
+succeeded; no result published","hint":"no layer succeeded (no words recognized, or speech recognition failed); ..."},"request_id":"..."}`.
 
 ## Quick rhythm profile (`rhythm=quick`, `analyze --quick`)
 
