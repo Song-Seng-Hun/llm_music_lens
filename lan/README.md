@@ -138,8 +138,12 @@ mix, part positions, tone and sung notes.
     stereo separation 10, bass 8, vocal melody 7, other notes 6, drums 4.5.
   - Mix-only stages took about 5 s: Essentia about 2.6, BTC chords 1.5, genre 0.6, TempoCNN 0.3.
   - Quick therefore needs about 5 s of rhythm time, so the whole analyze takes about 18 s instead of 120 s.
-- Accuracy caveat: quick chords, melody and sections come from the mix, not from stems. Their accuracy against the
-  full run was not measured here. Use quick for a first look, then run `rhythm=1` for the layers that need stems.
+- Chords: the full run also reads BTC chords from the mix with the same mix beats, so quick chord labels and
+  segments are the same as a full run's. Quick only lacks the `/bass` slash in "display" (needs the bass stem) and
+  the two-chords-per-bar split (needs bars).
+- Accuracy caveat: quick melody (Melodia on the mix, not RMVPE on the vocal stem) and sections (beat method, not the
+  section model) differ from a full run; their accuracy against it was not measured here. Use quick for a first look,
+  then run `rhythm=1` for the layers that need stems.
 
 ## Signing (summary)
 
