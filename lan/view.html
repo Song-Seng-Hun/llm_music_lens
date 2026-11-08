@@ -157,7 +157,7 @@ function follow() {
   const p = audio.currentTime, a = t0(), span = W / pxs;
   if (p < a + 0.05 * span || p > a + 0.7 * span) scroll.scrollLeft = Math.max(0, (p - 0.3 * span) * pxs);
 }
-function tick() { follow(); draw(); if (!audio.paused) requestAnimationFrame(tick); }
+function tick() { if (!dragging) follow(); draw(); if (!audio.paused) requestAnimationFrame(tick); }  // a drag owns the view
 function toggle() { if (audio.paused) audio.play(); else audio.pause(); }
 audio.addEventListener("play", () => { $("play").textContent = "Pause"; requestAnimationFrame(tick); });
 audio.addEventListener("pause", () => { $("play").textContent = "Play"; draw(); });
@@ -171,7 +171,10 @@ $("zoom").addEventListener("change", (e) => {
   const mid = t0() + W / pxs / 2; pxs = Number(e.target.value); resize(); scroll.scrollLeft = Math.max(0, (mid - W / pxs / 2) * pxs); draw();
 });
 scroll.addEventListener("scroll", draw);
-cv.addEventListener("wheel", (e) => { scroll.scrollLeft += e.deltaX || e.deltaY; e.preventDefault(); }, { passive: false });
+cv.addEventListener("wheel", (e) => {  // deltaMode 1: lines (Firefox), 2: pages
+  const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? W : 1;
+  scroll.scrollLeft += (e.deltaX || e.deltaY) * unit; e.preventDefault();
+}, { passive: false });
 function seekAt(e) { const r = cv.getBoundingClientRect(); audio.currentTime = Math.min(D.duration, Math.max(0, tOf(e.clientX - r.left))); draw(); }
 cv.addEventListener("mousedown", (e) => { dragging = true; seekAt(e); });
 window.addEventListener("mouseup", () => { dragging = false; });

@@ -19,7 +19,7 @@ Nothing here is installed. No LaunchAgent, firewall rule, certificate or key is 
 | `bass_onsets.py` | Optional bass layer: Basic Pitch note starts, run by `rhythm_worker.py` in its own environment |
 | `other_notes.py` | Optional accompaniment layer: Basic Pitch notes of the other stem, run by `rhythm_worker.py` in its own environment |
 | `adtof_model.py` | Optional drum layer: ADTOF Frame_RNN inference on CPU, run by `rhythm_worker.py` as its own process (separate implementation, reads the official checkpoint) |
-| `limit_exec.py` | Sets RLIMIT_CPU 60 s / FSIZE 24 MiB / NOFILE 32, then `execv /usr/bin/afconvert -f WAVE -d LEI16@16000 -c 1 src dst`. Two more fixed modes for the ear check: `--listen SRC DST` (`-d LEI16@44100 -c 1`, FSIZE 56 MiB) and `--earcheck PYTHON SCRIPT RESULT SRC START END OUT LAYERS` (FSIZE 16 MiB, NOFILE 64, `execv PYTHON -I SCRIPT ...`), and `--roll PYTHON SCRIPT RESULT SRC PAGE OUT`, `--roll-marks ... PAGE OUT MARKS` and `--roll-poster ... START END OUT TITLE CREDIT` for the sheet PNG (FSIZE 8 MiB, NOFILE 64), and for the sheet HTML `--aac SRC DST` (`-f m4af -d aac@44100 -b 96000`, FSIZE 12 MiB) and `--view` / `--view-marks PYTHON SCRIPT RESULT SRC AAC OUT` (CPU 150 s, FSIZE 25 MiB, NOFILE 64) |
+| `limit_exec.py` | Sets RLIMIT_CPU 60 s / FSIZE 24 MiB / NOFILE 32, then `execv /usr/bin/afconvert -f WAVE -d LEI16@16000 -c 1 src dst`. Two more fixed modes for the ear check: `--listen SRC DST` (`-d LEI16@44100 -c 1`, FSIZE 56 MiB) and `--earcheck PYTHON SCRIPT RESULT SRC START END OUT LAYERS` (FSIZE 16 MiB, NOFILE 64, `execv PYTHON -I SCRIPT ...`), and `--roll PYTHON SCRIPT RESULT SRC PAGE OUT`, `--roll-marks ... PAGE OUT MARKS` and `--roll-poster ... START END OUT TITLE CREDIT` for the sheet PNG (FSIZE 8 MiB, NOFILE 64), and for the sheet HTML `--aac SRC DST` (`-f m4af -d aac@44100 -b 96000 -c 2`, FSIZE 12 MiB) and `--view` / `--view-marks PYTHON SCRIPT RESULT SRC AAC OUT` (CPU 150 s, FSIZE 25 MiB, NOFILE 64) |
 | `local_cli.py` | Mac-local CLI (no network): analyze + rhythm layer, report, timeline and sheet through the server's own code (`server.Engine`); see "Local CLI (this Mac)" |
 | `sign.py` | Shared canonical-string and HMAC helper (server, tests, Python clients) |
 | `sheet.py` | LLM sheet: compact section-indexed text/JSON of a stored rhythm result, served at `/sheet/<id>`, with a bar-by-bar zoom (stdlib only) |
@@ -219,7 +219,7 @@ the corner note says "marks: unvalidated heuristics, not accuracy".
   /usr/bin/python3 -I local_cli.py sheet <result_id> --html ~/Pictures/roll --audio song.m4a --marks
   ```
 
-Audio: the upload is converted to AAC 96 kbps at 44.1 kHz (`limit_exec.py --aac`, afconvert, channels kept) and
+Audio: the upload is converted to stereo AAC 96 kbps at 44.1 kHz (`limit_exec.py --aac`, afconvert; mono is doubled, 5.1 is downmixed) and
 embedded as a `data:audio/mp4` URI; the spectrogram is drawn from the 44.1 kHz mono conversion as for the PNG.
 **The file contains the audio**: share it only where the audio itself may go.
 

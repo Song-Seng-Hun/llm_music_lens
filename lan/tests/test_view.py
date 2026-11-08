@@ -147,6 +147,18 @@ class LimitExecViewTest(unittest.TestCase):
         self.assertIsNone(limit_exec.view_command(["x", "--roll"] + a))
         self.assertEqual(limit_exec.aac_command("/a", "/b")[:6], [limit_exec.AFCONVERT, "-f", "m4af", "-d", "aac@44100", "-b"])
 
+    @unittest.skipUnless(os.path.exists(AFCONVERT), "afconvert missing")
+    def test_aac_any_channels(self):  # PR 65 review: a 6-channel 48 kHz WAV failed with the channels kept
+        d = tempfile.mkdtemp()
+        for ch, rate in ((6, 48000), (1, 16000), (2, 44100)):
+            src, dst = os.path.join(d, "in%d.wav" % ch), os.path.join(d, "out%d.m4a" % ch)
+            with open(src, "wb") as f:
+                f.write(make_wav_bytes(1.0, rate=rate, channels=ch))
+            p = subprocess.run([PY, "-I", os.path.join(REPO, "limit_exec.py"), "--aac", src, dst], stderr=subprocess.PIPE)
+            self.assertEqual(p.returncode, 0, (ch, p.stderr))
+            with open(dst, "rb") as f:
+                self.assertEqual(f.read(8)[4:], b"ftyp")
+
 
 EVIL = "</script><img src=x onerror=alert(1)>& "
 

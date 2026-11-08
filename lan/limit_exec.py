@@ -11,7 +11,7 @@ Usage: limit_exec.py SRC DST            afconvert to WAVE 16 kHz mono s16 (analy
                                         PYTHON -I SCRIPT RESULT SRC PAGE OUT MARKS (page with marks + JSON)
        limit_exec.py --roll-poster PYTHON SCRIPT RESULT SRC START END OUT TITLE CREDIT
                                         PYTHON -I SCRIPT --poster RESULT SRC START END OUT TITLE CREDIT
-       limit_exec.py --aac SRC DST      afconvert to AAC 44.1 kHz 96 kbps in M4A (sheet HTML)
+       limit_exec.py --aac SRC DST      afconvert to AAC 44.1 kHz stereo 96 kbps in M4A (sheet HTML)
        limit_exec.py --view PYTHON SCRIPT RESULT SRC AAC OUT
                                         PYTHON -I SCRIPT RESULT SRC AAC OUT (sheet HTML, view.py)
        limit_exec.py --view-marks PYTHON SCRIPT RESULT SRC AAC OUT
@@ -82,7 +82,8 @@ def roll_command(argv):
 
 
 def aac_command(src, dst):
-    return [AFCONVERT, "-f", "m4af", "-d", "aac@44100", "-b", "96000", src, dst]  # @44100: 96 kbps needs >= 32 kHz
+    # @44100: 96 kbps needs >= 32 kHz; -c 2: a 5.1 input cannot be encoded at 96 kbps with its own channels
+    return [AFCONVERT, "-f", "m4af", "-d", "aac@44100", "-b", "96000", "-c", "2", src, dst]
 
 
 def view_command(argv):
