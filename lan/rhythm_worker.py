@@ -210,7 +210,7 @@ START = time.monotonic()  # reset in main; sing_input counts the server's time f
 BUDGET = 300.0  # s; --time-budget, else SING_BUDGET (set in main)
 WALL_SECONDS = 330  # self-bound in case the parent never kills us (server wall timeout is 300 s)
 CPU_SECONDS = 600
-SING_CPU_SECONDS = 1800  # hard CPU limit; only sing_notes.py raises its soft limit to it (600 s vocal: 995 s CPU)
+SING_CPU_SECONDS = 1800  # hard CPU limit; only sing_notes.py raises its soft limit to it (600 s vocal: 550 s CPU)
 HOP = 2048
 FRAME = 4096
 KEY_PROFILE = "bgate"
@@ -443,19 +443,19 @@ MEL_METHOD_VOCAL = ("Demucs htdemucs_ft vocal at 44.1 kHz, then RMVPE threshold 
                     "same note segmentation and merge as the mix method, then scoop join. The vocal stem can include backing vocals.")
 # Sung notes (0.21.0, optional): YourMT3+ on the same Demucs vocal, program 100 (singing voice). RWC-P songs 76-100 against
 # MIDI vocal notes (Goal V, bars fixed before scoring): pitch F 30.5 -> 54.2, rhythm F 61.0 -> 75.7; songs 51-75 38.0 -> 60.6
-# and 63.3 -> 80.1. About 80 s and 14.3 GB for a 600 s vocal on CPU, so it runs last, inside what is left of the server's
+# and 63.3 -> 80.1. About 45 s and 3.9 GB for a 600 s vocal on CPU, so it runs last, inside what is left of the server's
 # 300 s, and RMVPE notes stay the fallback.
 SING_DIR = os.path.expanduser("~/tools/music-lens/models/yourmt3")
 SING_CKPT = "amt/logs/2024/mc13_256_g4_all_v7_mt3f_sqr_rms_moe_wf4_n8k2_silu_rope_rp_b36_nops/checkpoints/last.ckpt"
 SING_CKPT_SHA256 = "bd7b9b6e609c05478eff4b9f5c574e6635fd6e6b306036eed1cb1466e775e5c4"  # weights-only copy (state_dict)
 SING_CKPT_MAX_BYTES = 512 * 1024 * 1024
 SING_CODE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sing_notes.py")
-SING_CODE_SHA256 = "82806f9225a98e3041eb689d6e8a09169ad1414fe2a2eb272fa3030e4f55c505"
+SING_CODE_SHA256 = "f2264d13dfb2ce4ae54c1152a3f1c8eaaae8ba4b3d317d0b532d371fc939274f"
 SING_CODE_MAX_BYTES = 16 * 1024
 SING_BUDGET = 300.0  # s; the server's default rhythm_timeout, used when --time-budget is absent
 SING_RESERVE = 10.0  # s kept for the steps after it (600 s file: the worker ended under 1 s after this step) and the server
 SING_MIN = 20.0  # s; with less left the model is not started
-SING_MAX = 150.0  # s; the most it may take (600 s vocal: about 80 s)
+SING_MAX = 150.0  # s; the most it may take (600 s vocal: about 45 s)
 SING_FAIL_REASONS = ("models_invalid", "notes_failed", "timeout", "no_time", "too_many_notes", "no_notes")
 MEL_METHOD_SING = ("Demucs htdemucs_ft vocal at 44.1 kHz, then YourMT3+ (mc13 MoE, CPU) notes on program 100, singing voice; "
                    "no merge. The vocal stem can include backing vocals.")
