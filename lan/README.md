@@ -1054,6 +1054,13 @@ kick. Limits: a tom with a clear pitch is a note to Basic Pitch too and can stay
 and one drum-only song, with no real recording of bass to confirm that no true notes are lost. Results stored before 0.25.0
 keep their notes until analysed again.
 
+From worker 0.26.0 two more steps follow the check. RMVPE's pitch can split one plucked note into same-pitch pieces, and it
+starts late on hard attacks. Same-pitch rows split by up to 50 ms join, unless a Basic Pitch note within a semitone starts
+within 30 ms of the second. A row's start then moves back to the latest such Basic Pitch start up to 250 ms before it, unless
+one starts within 30 ms after it, and never before the row ahead ends. The two values were picked on half of a real bass
+recording set (single bass tracks, some with added synthetic drums) and checked on the other half; slap and harmonic notes
+stay weak.
+
 `rhythm.bass` is `{status: "done", method, reliability: "low_reference", note_count}` or `{status: "skipped", reason}`. Read
 the rows with `/timeline` `layer=bass`: `{start, end, midi, note}`, where `midi` is the sounding pitch. Reasons:
 `canonical_16k`, `band_limited`, and the failures `models_invalid`, `decode_failed`, `separation_failed`, `rmvpe_failed`,

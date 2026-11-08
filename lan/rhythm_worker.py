@@ -22,7 +22,8 @@ Usage: <essentia python> -I rhythm_worker.py [--words-stdin] WAV
        --drum-model /abs/checkpoint.index (0.9.0; with the Demucs options: a drum layer, see "Drum hits" in README.md)
        With the Demucs options, 0.13.0 adds part activity per section, see "Part activity" in README.md.
        With the section model, 0.14.0 adds downbeats and bars, and 0.15.0 a scale and degree per bar, and 0.16.0 swing, and 0.18.0 a bar's two chords, and 0.22.0 beats per bar, and 0.23.0 bars to the song end (extended_rows), and 0.24.0 the key_changes warning from bar scales, see "Musical units" in README.md.
-       0.25.0 keeps a bass note only where Basic Pitch hears a note within a semitone of it, see "Bass notes" in README.md.
+       0.25.0 keeps a bass note only where Basic Pitch hears a note within a semitone of it, and 0.26.0 joins split notes and
+       moves late starts back to Basic Pitch's, see "Bass notes" in README.md.
 WAV is the server's already-validated canonical file (PCM mono 16 kHz s16, 0 < duration <= 600 s).
 --words-stdin (0.4.3; the server always passes it): stdin holds one JSON object {"words": [[text, start, end], ...]}
 (the ASR words of the same result) or {"words": null, "reason": code} (the server could not provide them), at most
@@ -199,7 +200,7 @@ import time
 import unicodedata
 import wave
 
-TOOL = {"name": "music-lens-rhythm-worker", "version": "0.25.0"}
+TOOL = {"name": "music-lens-rhythm-worker", "version": "0.26.0"}
 SRC_RATE = 16000
 RATE = 44100
 MAX_SECONDS = 600.0
@@ -325,9 +326,15 @@ BASS_ONSETS_SHA256 = "6a8842bc6bb14b111959020f7354b183c598e247a87ee6b825f61b3c35
 BASS_ONSETS_MAX_BYTES = 16 * 1024
 BASS_MIN_FRAMES, BASS_JOIN_FRAMES = 8, 20  # at RMVPE's 10 ms: shortest note 80 ms, same pitch joins across 200 ms
 BASS_CONFIRM_SEMIS = 1  # Basic Pitch and RMVPE may round a detuned note to neighbouring semitones
+# 0.26.0, after the check: RMVPE's pitch splits one plucked note into same-pitch pieces and starts late on hard attacks.
+# Same-pitch rows split by up to BASS_JOIN_GAP_S join unless a Basic Pitch note (within BASS_CONFIRM_SEMIS) starts within
+# BASS_JOIN_BLOCK_S of the second; a row's start moves back to the latest such Basic Pitch start up to BASS_SNAP_S before
+# it, unless one starts within BASS_JOIN_BLOCK_S after it (never before the row ahead ends; the earliest, or a latest that
+# skips a start just after the row, picked up short early fragments). Both values were picked on half of a real bass set and checked on the other half.
+BASS_JOIN_GAP_S, BASS_JOIN_BLOCK_S, BASS_SNAP_S = 0.05, 0.03, 0.25
 BASS_MAX_NOTES = 7500  # 600 s / the 80 ms shortest note
-BASS_METHOD = ("Demucs htdemucs_ft bass at 44.1 kHz, RMVPE pitch on CPU, split at Basic Pitch note starts, kept where a "
-               "Basic Pitch note is within a semitone. Sounding pitch; note ends are weak.")
+BASS_METHOD = ("Demucs htdemucs_ft bass, RMVPE pitch on CPU, split at Basic Pitch starts, kept where a Basic Pitch note "
+               "is within a semitone, pieces joined, starts at Basic Pitch's. Sounding pitch; ends are weak.")
 BASS_FAIL_REASONS = ("models_invalid", "decode_failed", "separation_failed", "rmvpe_failed", "onsets_failed")
 # Drum hits (0.9.0, optional): Demucs drum stem, then ADTOF Frame_RNN. Measured on 23 songs of MDB Drums; tom is weak.
 DRUM_DEMUCS_ARGS = ("-n", "htdemucs_ft", "--stem", "drums", "-b", "1", "--seed", "0")
@@ -1635,6 +1642,32 @@ def bass_confirmed(rows, notes):
     return out
 
 
+def bass_tidied(rows, notes):
+    """Joins same-pitch pieces, then moves late starts back to Basic Pitch's (see BASS_JOIN_GAP_S). notes: [start, end, midi]."""
+    import bisect
+    notes = sorted(notes)
+    starts = [n[0] for n in notes]
+
+    def near(t0, t1, midi):  # Basic Pitch starts in [t0, t1] within BASS_CONFIRM_SEMIS of midi, in time order
+        return [s for s, _, m in notes[bisect.bisect_left(starts, t0 - 1e-9):bisect.bisect_right(starts, t1 + 1e-9)]
+                if abs(m - midi) <= BASS_CONFIRM_SEMIS]
+    joined = []
+    for r in rows:
+        last = joined[-1] if joined else None
+        if (last and r["midi"] == last["midi"] and r["start"] - last["end"] <= BASS_JOIN_GAP_S + 1e-9
+                and not near(r["start"] - BASS_JOIN_BLOCK_S, r["start"] + BASS_JOIN_BLOCK_S, r["midi"])):
+            joined[-1] = dict(last, end=r["end"])
+        else:
+            joined.append(dict(r))
+    out = []
+    for r in joined:
+        c = near(r["start"] - BASS_SNAP_S, r["start"] + BASS_JOIN_BLOCK_S, r["midi"])
+        if c and c[-1] < r["start"]:  # a start at or just after the row's means the row's start is already right
+            r["start"] = r3(max(c[-1], out[-1]["end"] if out else 0.0))
+        out.append(r)
+    return out
+
+
 def bass_stem_notes(sep, n16):
     """(rows, None) or (None, reason). The scratch already holds full.wav."""
     import numpy as np
@@ -1667,7 +1700,7 @@ def bass_stem_notes(sep, n16):
     if not (isinstance(notes, list) and all(isinstance(n, list) and len(n) == 3 and all(
             isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) for x in n) for n in notes)):
         return None, "onsets_failed"
-    return bass_confirmed(bass_rows(f0, [n[0] for n in notes]), notes), None
+    return bass_tidied(bass_confirmed(bass_rows(f0, [n[0] for n in notes]), notes), notes), None
 
 
 def bass_input(sep, n16, vocal_reason):
