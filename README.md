@@ -11,6 +11,9 @@
 
 음원에서 박자·화음·음표·가사·에너지 단서를 뽑아, AI(LLM)가 근거를 들어 음악을 분석할 수 있게 넘겨 주는 프로그램입니다.
 
+<p align="center"><img src="assets/music-viz.png" width="800" alt="Music Lens 포스터 이미지. 음높이 축 위에 스펙트로그램을 깔고, 찾아낸 반주 음표를 하늘색, 베이스 음표를 주황색 선으로 겹쳐 그렸습니다. 위에는 A7·A·E 같은 코드 이름이, 아래에는 스네어와 킥 타격이 표시되고, 102 BPM·D 단조·4–19초라고 적혀 있습니다."></p>
+<p align="center"><sub>Music Lens로 50초 발췌 음원 중 4–19초를 그린 이미지입니다. 음원: <a href="https://www.incompetech.com/music/royalty-free/index.html?isrc=USUAN1100763">“Aces High”</a> by Kevin MacLeod (incompetech.com), <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a></sub></p>
+
 ## 이게 뭔가요
 
 곡을 넣으면 "몇 BPM인지, 박이 어디에 있는지, 어떤 코드와 음이 언제 울렸는지, 가사 단어가 박의 어디에 걸리는지"를 시간과 함께 정리합니다. 결과는 화면으로 보고 원음과 맞춰 볼 수 있고, JSON이나 Markdown, AI에게 건넬 요약 문서로 내보내거나 MCP로 AI에게 바로 넘길 수 있습니다. 음악 분석의 근거, 작곡 참고, 스타일 읽기, 영상 연출에 쓰려고 만들었습니다.

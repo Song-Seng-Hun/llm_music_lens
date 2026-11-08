@@ -30,7 +30,13 @@ Run from this `lan/` folder. `--quick` skips stem separation, so it takes second
 /usr/bin/python3 -I local_cli.py sheet <result_id> --view brief
 ```
 
-The first command prints a summary with the `result_id`. The second prints one line per section: its label and role,
+This is the poster view of one result (`sheet <result_id> --png DIR --audio FILE --style poster --start 4 --end 19`):
+
+![Music Lens poster: a spectrogram on a pitch axis with the detected accompaniment notes in cyan and the bass notes in orange, chord names along the top, and snare and kick hits along the bottom. The header reads 102 BPM, D minor, 4–19 s.](../assets/music-viz.png)
+
+<sub>Music Lens visualization of 4–19 s of a 50 s excerpt. Music: <a href="https://www.incompetech.com/music/royalty-free/index.html?isrc=USUAN1100763">“Aces High”</a> by Kevin MacLeod (incompetech.com), <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a></sub>
+
+In the commands above, the first prints a summary with the `result_id` and the second prints one line per section: its label and role,
 times, bars, key and level. From there:
 
 ```sh

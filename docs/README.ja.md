@@ -11,6 +11,9 @@
 
 音源からリズム・和音・音符・歌詞・エネルギーの手がかりを取り出し、AI（LLM）が根拠を挙げながら音楽を分析できるように渡すプログラムです。
 
+<p align="center"><img src="../assets/music-viz.png" width="800" alt="Music Lens のポスター画像。音高の軸に沿ったスペクトログラムの上に、検出した伴奏の音符を水色、ベースの音符をオレンジの線で重ねています。上には A7・A・E などのコード名、下にはスネアとキックの打点が並び、102 BPM・ニ短調・4–19 秒と書かれています。"></p>
+<p align="center"><sub>50 秒の抜粋音源のうち 4–19 秒を Music Lens で描いた画像です。音源：<a href="https://www.incompetech.com/music/royalty-free/index.html?isrc=USUAN1100763">“Aces High”</a> by Kevin MacLeod (incompetech.com), <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a></sub></p>
+
 ## これは何？
 
 曲を入れると、「何 BPM か、拍がどこにあるか、どのコードと音がいつ鳴ったか、歌詞の単語が拍のどこにかかるか」を時間とともに整理します。結果は画面で見て原音と照らし合わせられ、JSON や Markdown、AI に渡すための要約メモとして書き出したり、MCP で AI に直接渡したりできます。音楽分析の根拠、作曲の参考、スタイルの読み取り、映像演出のために作りました。

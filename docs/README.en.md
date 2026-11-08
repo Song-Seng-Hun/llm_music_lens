@@ -11,6 +11,9 @@
 
 A program that pulls beat, harmony, note, lyric and energy cues out of audio and hands them to an AI (LLM), so it can analyze music while citing evidence.
 
+<p align="center"><img src="../assets/music-viz.png" width="800" alt="Music Lens poster: a spectrogram on a pitch axis with the detected accompaniment notes drawn as cyan lines and the bass notes as orange lines. Chord names such as A7, A and E run along the top, snare and kick hits along the bottom, and the header reads 102 BPM, D minor, 4–19 s."></p>
+<p align="center"><sub>Music Lens visualization of 4–19 s of a 50 s excerpt. Music: <a href="https://www.incompetech.com/music/royalty-free/index.html?isrc=USUAN1100763">“Aces High”</a> by Kevin MacLeod (incompetech.com), <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a></sub></p>
+
 ## What is it?
 
 Give it a song, and it lays out, along the timeline, the BPM, where the beats are, which chords and notes sounded when, and where each lyric word falls against the beat. You can look at the results on screen and check them against the original audio, export them as JSON, Markdown or a summary note for an AI, or hand them straight to an AI over MCP. It is made for evidence in music analysis, composition references, reading a style and planning video.
