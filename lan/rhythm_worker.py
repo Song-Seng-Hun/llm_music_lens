@@ -1553,9 +1553,18 @@ def band_db(x):
     return 10.0 * math.log10(high / total) if high > 0.0 else -math.inf
 
 
+def tool_io():
+    return dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                env=dict(os.environ, DEMUCS_MLX_NO_DOWNLOAD="1", HF_HUB_OFFLINE="1"), cwd="/")
+
+
 def run_tool(argv):
-    return subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                          env=dict(os.environ, DEMUCS_MLX_NO_DOWNLOAD="1", HF_HUB_OFFLINE="1"), cwd="/").returncode
+    return subprocess.run(argv, **tool_io()).returncode
+
+
+def start_tool(argv):
+    """run_tool without the wait: the Popen, for a stage that runs beside the next one."""
+    return subprocess.Popen(argv, **tool_io())
 
 
 def mono_stem(sep, stem):
@@ -2315,8 +2324,9 @@ def tone_field(sep, sections):
     return {"status": "done", "method": TONE_METHOD, "reliability": "low_reference", "sections": [tone_row(s, m) for s in sections]}
 
 
-def section_segments(sep, duration):
-    """(segments, None) or (None, reason). The scratch already holds full.wav and any stems made so far."""
+def sections_start(sep):
+    """(Popen, out path) or (None, reason): starts allin1 on the four stems and does not wait. melody_input starts it
+    after the bass stage, so it runs beside the Basic Pitch other notes (two tools at once, about 1 GB more)."""
     model = sep["sections_model"]
     root = os.path.dirname(model)
     if os.path.basename(model) != ALLIN1_WEIGHTS[0][0]:
@@ -2331,7 +2341,15 @@ def section_segments(sep, duration):
         if not mono_stem(sep, s):
             return None, "separation_failed"
     out = os.path.join(d, "sections.json")
-    if run_tool([sep["sections_python"], "-I", ALLIN1_CODE, root, stems, out]):
+    return start_tool([sep["sections_python"], "-I", ALLIN1_CODE, root, stems, out]), out
+
+
+def section_segments(sep, duration):
+    """(segments, None) or (None, reason). Waits for the allin1 run sections_start began (or starts it now)."""
+    proc, out = sep.pop("sections_run", None) or sections_start(sep)
+    if proc is None:
+        return None, out
+    if proc.wait():
         return None, "sections_failed"
     with open(out) as f:
         got = json.load(f)
@@ -2534,16 +2552,26 @@ def melody_input(sep, n16):
     try:
         if sep.get("basic_pitch"):
             bass_input(sep, n16, reason)
+        if sep.get("sections_python") and os.path.isfile(os.path.join(sep["scratch"], "full.wav")):
+            try:  # allin1 runs beside other_input only: on a long song it is one of the heaviest steps (14 GB)
+                sep["sections_run"] = sections_start(sep)
+            except Exception:
+                sep["sections_run"] = (None, "sections_failed")
+        if sep.get("basic_pitch"):
             other_input(sep, n16, reason)
-        if sep.get("drum_model"):
-            drum_input(sep, n16, reason)
         if sep.get("sections_python"):
             sections_input(sep, n16, reason)
+        if sep.get("drum_model"):
+            drum_input(sep, n16, reason)
         parts_input(sep, reason)
         stereo_input(sep, reason)
         if sep.get("singing_python"):
             sing_input(sep, n16, reason)
     finally:
+        proc = sep.pop("sections_run", (None, None))[0]
+        if proc is not None:  # sections_input never ran: stop allin1 before its stems go
+            proc.kill()
+            proc.wait()
         shutil.rmtree(sep["scratch"], ignore_errors=True)
     return pitch, stem, {"status": "done"} if reason is None else {"status": "skipped", "reason": reason}
 
