@@ -13,8 +13,10 @@ Usage:
   local_cli.py [--config PATH] report ID
   local_cli.py [--config PATH] timeline ID [--layer L] [--start S] [--end E] [--limit N] [--cursor C]
   local_cli.py [--config PATH] sheet ID [--start S --end E | --view brief | --layers L,...] [--format {text,json}]
-  local_cli.py [--config PATH] sheet ID --png DIR --audio FILE [--page N]
+  local_cli.py [--config PATH] sheet ID --png DIR --audio FILE [--page N] [--marks]
                one PNG per page (spectrogram + piano roll, roll.py) into DIR as <id12>-pNN.png; prints the page list
+               (--marks: <id12>-pNN-marks.png and .json, suspect notes and missed energy)
+  local_cli.py [--config PATH] sheet ID --png DIR --audio FILE --style poster --start S --end E [--title T] [--credit C]
 """
 import argparse
 import hashlib
@@ -198,27 +200,57 @@ def cmd_timeline(engine, ns):
     out_bytes(engine, data)
 
 
+PNG_OPTS = ("png", "audio", "page", "marks", "style", "title", "credit")
+
+
 def cmd_sheet(engine, ns):
     rid = check_id(ns.result_id)
-    if ns.png is not None or ns.audio is not None or ns.page is not None:
+    if any(getattr(ns, k) not in (None, False) for k in PNG_OPTS):
         return sheet_png(engine, rid, ns)
     q = {k: getattr(ns, k) for k in ("format", "start", "end", "view", "layers") if getattr(ns, k) is not None}
     out_json(engine, engine.sheet_view(rid, q))
 
 
+def write_new(path, data):
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    except FileExistsError:
+        raise Fail("invalid_path", "output file exists: " + os.path.basename(path))
+    except OSError:
+        raise Fail("storage_error")
+    try:
+        server.write_all(fd, data)
+    finally:
+        os.close(fd)
+
+
 def sheet_png(engine, rid, ns):
-    """As POST /sheet/<id>?format=png&page=N for each page (or --page N), written to DIR; nothing else is stored."""
-    if (ns.png is None or ns.audio is None or any(getattr(ns, k) is not None for k in ("format", "start", "end", "view", "layers"))
-            or (ns.page is not None and not server.RE_PAGE.match(ns.page))):
-        raise Fail("bad_request", "--png DIR and --audio FILE go together, with optional --page N and no other option")
+    """As POST /sheet/<id>?format=png for each page (or --page N, optionally --marks) or one --style poster span,
+    written to DIR; nothing else is stored."""
+    usage = ("--png DIR --audio FILE, then [--page N] [--marks] or --style poster --start S --end E [--title T] "
+             "[--credit C]; no other sheet option")
+    poster = ns.style == "poster"
+    if (ns.png is None or ns.audio is None or ns.format or ns.view or ns.layers
+            or (poster and (ns.page is not None or ns.marks))
+            or (not poster and any(x is not None for x in (ns.start, ns.end, ns.title, ns.credit)))):
+        raise Fail("bad_request", usage)
     if not os.path.isdir(ns.png):
         raise Fail("invalid_path", "--png must be an existing directory")
     v = engine.rhythm_or_error(rid)
-    pages = engine.roll_index(rid, v)["pages"]
-    if ns.page is not None:
-        if int(ns.page) > len(pages):
-            raise Fail("invalid_argument", "page is past the last page")
-        pages = [pages[int(ns.page) - 1]]
+    base = os.path.join(os.path.abspath(ns.png), rid[:12])
+    if poster:
+        q = {"format": "png", "style": "poster", "start": ns.start or "", "end": ns.end or ""}
+        q.update({k: getattr(ns, k) for k in ("title", "credit") if getattr(ns, k) is not None})
+        job = engine.roll_job(v, q)
+        jobs = [({"start": job["poster"][0], "end": job["poster"][1], "title": job["title"], "credit": job["credit"]},
+                 job, "%s-poster-%g-%g" % (base, job["poster"][0], job["poster"][1]))]
+    else:
+        pages = engine.roll_index(rid, v)["pages"]
+        if ns.page is not None:
+            q = {"format": "png", "page": ns.page}
+            pages = [pages[engine.roll_job(v, q)["page"] - 1]]
+        jobs = [(p, {"page": p["page"], "marks": ns.marks}, "%s-p%02d%s" % (base, p["page"], "-marks" if ns.marks else ""))
+                for p in pages]
     if not (engine.cfg.get("rhythm") or {}).get("roll_python"):
         raise Fail("roll_unavailable")
     if shutil.disk_usage(engine.cfg["root"]).free < engine.limits["disk_floor"]:
@@ -229,28 +261,32 @@ def sheet_png(engine, rid, ns):
         lfd = engine.team_flock()
         d = engine.uploads + "/" + op
         engine.roll_audio(d + "/upload." + kind, d + "/listen.wav", v)
-        for p in pages:
-            png = engine.roll_page(rid, d + "/listen.wav", p["page"], d + "/roll.png")
-            os.unlink(d + "/roll.png")  # roll.py never overwrites; the next page renders to the same name
-            path = os.path.join(os.path.abspath(ns.png), "%s-p%02d.png" % (rid[:12], p["page"]))
-            try:
-                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
-            except FileExistsError:
-                raise Fail("invalid_path", "output file exists: " + os.path.basename(path))
-            except OSError:
-                raise Fail("storage_error")
-            try:
-                server.write_all(fd, png)
-            finally:
-                os.close(fd)
-            out.append(dict(p, path=path))
+        for entry, job, stem in jobs:
+            png, marks = engine.roll_render(rid, d + "/listen.wav", job, d)
+            for n in ("roll.png", "roll-marks.json"):  # roll.py never overwrites; the next page uses the same names
+                if os.path.lexists(d + "/" + n):
+                    os.unlink(d + "/" + n)
+            write_new(stem + ".png", png)
+            entry = dict(entry, path=stem + ".png")
+            if marks is not None:
+                write_new(stem + ".json", json.dumps(marks, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+                entry.update(marks_path=stem + ".json", suspects=marks["suspects"], missed=marks["missed"])
+            out.append(entry)
             if engine.cancelled:
                 raise Fail("cancelled")
     finally:
         if lfd is not None:
             os.close(lfd)
         engine.cleanup(op, False)
-    out_json(engine, {"result_id": rid, "format": "png", "pages": out})
+    body = {"result_id": rid, "format": "png"}
+    body.update({"poster": out[0]} if poster else {"pages": out})
+    if ns.marks:
+        body["marks_note"] = MARKS_NOTE
+    out_json(engine, body)
+
+
+MARKS_NOTE = ("suspects and missed are unvalidated heuristics (thresholds tuned by eye on a few clips): places to look, "
+              "not an accuracy measure")
 
 
 def check_id(rid):
@@ -299,6 +335,10 @@ def parser():
     s.add_argument("--png", metavar="DIR", help="write one PNG per page (spectrogram + piano roll) into DIR")
     s.add_argument("--audio", metavar="FILE", help="with --png: the analysed audio (the server keeps none)")
     s.add_argument("--page", help="with --png: only page N (1-based)")
+    s.add_argument("--marks", action="store_true", help="with --png: suspect-note and missed-energy marks, plus their JSON")
+    s.add_argument("--style", choices=("poster",), help="with --png: one 2400x1350 poster of --start..--end (<= 30 s)")
+    s.add_argument("--title", help="poster title (<= 80 printable characters)")
+    s.add_argument("--credit", help="poster credit line (<= 80 printable characters)")
     return ap
 
 

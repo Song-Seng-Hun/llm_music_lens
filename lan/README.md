@@ -19,7 +19,7 @@ Nothing here is installed. No LaunchAgent, firewall rule, certificate or key is 
 | `bass_onsets.py` | Optional bass layer: Basic Pitch note starts, run by `rhythm_worker.py` in its own environment |
 | `other_notes.py` | Optional accompaniment layer: Basic Pitch notes of the other stem, run by `rhythm_worker.py` in its own environment |
 | `adtof_model.py` | Optional drum layer: ADTOF Frame_RNN inference on CPU, run by `rhythm_worker.py` as its own process (separate implementation, reads the official checkpoint) |
-| `limit_exec.py` | Sets RLIMIT_CPU 60 s / FSIZE 24 MiB / NOFILE 32, then `execv /usr/bin/afconvert -f WAVE -d LEI16@16000 -c 1 src dst`. Two more fixed modes for the ear check: `--listen SRC DST` (`-d LEI16@44100 -c 1`, FSIZE 56 MiB) and `--earcheck PYTHON SCRIPT RESULT SRC START END OUT LAYERS` (FSIZE 16 MiB, NOFILE 64, `execv PYTHON -I SCRIPT ...`), and `--roll PYTHON SCRIPT RESULT SRC PAGE OUT` for the sheet PNG (FSIZE 8 MiB, NOFILE 64) |
+| `limit_exec.py` | Sets RLIMIT_CPU 60 s / FSIZE 24 MiB / NOFILE 32, then `execv /usr/bin/afconvert -f WAVE -d LEI16@16000 -c 1 src dst`. Two more fixed modes for the ear check: `--listen SRC DST` (`-d LEI16@44100 -c 1`, FSIZE 56 MiB) and `--earcheck PYTHON SCRIPT RESULT SRC START END OUT LAYERS` (FSIZE 16 MiB, NOFILE 64, `execv PYTHON -I SCRIPT ...`), and `--roll PYTHON SCRIPT RESULT SRC PAGE OUT`, `--roll-marks ... PAGE OUT MARKS` and `--roll-poster ... START END OUT TITLE CREDIT` for the sheet PNG (FSIZE 8 MiB, NOFILE 64) |
 | `local_cli.py` | Mac-local CLI (no network): analyze + rhythm layer, report, timeline and sheet through the server's own code (`server.Engine`); see "Local CLI (this Mac)" |
 | `sign.py` | Shared canonical-string and HMAC helper (server, tests, Python clients) |
 | `sheet.py` | LLM sheet: compact section-indexed text/JSON of a stored rhythm result, served at `/sheet/<id>`, with a bar-by-bar zoom (stdlib only) |
@@ -77,7 +77,8 @@ re-uploaded (see "Optional rhythm layer"); spans there are at most 30 s.
 One image per sheet page, to check a stored result's notes against the audio's real energy (a drum boom read as a
 long bass note shows as a note outline with no matching line in the spectrogram) and to show a result to people.
 Each page is one source section (S01, S02, ... as in the sheet); a section longer than 22 s (1.1 x 20 s) is split
-into k pages at the beats nearest equal cuts and labelled `A 1/3`, `A 2/3`, ...; a result with no section layer
+into k pages and labelled `A 1/3`, `A 2/3`, ... (each cut is the beat nearest the equal cut among the beats after the
+previous cut and before the next equal cut, else the equal cut, so pages always move forward); a result with no section layer
 gives one page `all` over the whole song. Layout, top to bottom:
 
 - spectrogram of the audio on a semitone axis (STFT 8192/256, 1/3-semitone rows, MIDI 24-96, 70 dB below the
@@ -121,8 +122,59 @@ not group or world writable), for example the All-In-One runtime:
 "rhythm": {"python": "...", "worker": "...", "roll_python": "/Users/YOU/tools/music-lens/runtime/allin1/bin/python3"}
 ```
 
-Without it the index still answers (`available: false`) and rendering is `503 roll_unavailable`. `roll.py` also
-runs by hand: `ROLL_PYTHON -I roll.py RESULT.json AUDIO.wav PAGE OUT.png` (16-bit PCM WAV, any rate and channels).
+Without it the index still answers (`available: false`) and rendering is `503 roll_unavailable` (also when the
+config has no `rhythm` block at all). `roll.py` also runs by hand (16-bit PCM WAV, any rate and channels):
+`ROLL_PYTHON -I roll.py RESULT.json AUDIO.wav PAGE OUT.png [MARKS.json]` or
+`ROLL_PYTHON -I roll.py --poster RESULT.json AUDIO.wav START END OUT.png TITLE CREDIT`.
+
+### Marks (opt-in): suspect notes and missed energy
+
+`POST /sheet/<id>?format=png&page=N&marks=1` (CLI: add `--marks`) draws the same page with checks of the result's
+notes against the audio. The spectrogram shows the harmonic part only (a median-filter harmonic/percussive split:
+about 0.2 s along time, 25 rows along pitch, soft mask), and the drum lane shows the percussive energy behind the
+drum hits. Without `marks` the page is byte-identical to the plain one.
+
+- Suspect notes (red dashed outline, faded in the roll), flags per note:
+  `weak` (the note's row is less than 3 dB above the rows 2.5 semitones away), `drum` (more than 60% of the energy
+  within 1 semitone is percussive), `quiet` (more than 45 dB below the page's 99.5th percentile), `reattackN` (N >= 2
+  separate rises of more than 6 dB within 30 ms in a 2048-point STFT band f0/1.26..2.5 f0, more than 0.1 s apart,
+  the note's own attack excluded: a held note that is really N strikes).
+- Missed energy (green dotted box): harmonic peaks more than 12 dB above the rows 4 away (8 below MIDI 48), within
+  20 dB of the page's 99.5th percentile, not explained by any note +-1 semitone or its harmonics (+0, 12, 19, 24, 28,
+  31 semitones), held at least 0.4 s; harmonics of a lower missed run are dropped.
+- Each page is analysed on its own span plus 1 s on each side, so the levels are relative to that page.
+
+These thresholds were tuned by eye on a few clips. They are unvalidated rules of thumb: a mark says "look here",
+and the counts are not an accuracy measure. On clear synthetic cases (a sustained tone with drums, nine stabs
+written as one note, one note left out) they behave as intended; that is all the tests pin.
+
+The server returns the PNG only. The CLI also writes `<id12>-pNN-marks.json` beside `<id12>-pNN-marks.png` and
+prints the lists: `{"result_id", "format": "png", "pages": [{"page", "section", "label", "start", "end", "path",
+"marks_path", "suspects": [{"start", "end", "lane", "note", "midi", "flags", "contrast_db", "perc_ratio",
+"level_db", "reattacks"}], "missed": [{"start", "end", "midi", "note"}]}], "marks_note"}`. Example:
+
+```sh
+/usr/bin/python3 -I local_cli.py sheet <result_id> --png DIR --audio song.wav --page 1 --marks
+```
+
+### Poster (opt-in)
+
+`POST /sheet/<id>?format=png&style=poster&start=S&end=E[&title=T&credit=C]` (CLI: `--style poster --start S --end E
+[--title T] [--credit C]`) draws one span of at most 30 s, inside the result's duration, as a 2400 x 1350 image
+for people: glowing note lines (width from the semitone height, opacity from the note's harmonic energy) over a
+faint harmonic spectrogram, a keyboard strip, a chord band, kick and snare ticks, the title, the tempo and key
+line, and the credit. The legend lists only parts with at least 0.5 s visible; the pitch range reaches down to
+strong sustained low energy that has no note (a bass pedal, say). Title and credit: at most 80 printable
+characters each (any script; no control characters), empty when left out. The CLI writes
+`<id12>-poster-<start>-<end>.png` and prints `{"result_id", "format": "png", "poster": {"start", "end", "title",
+"credit", "path"}}`. Example:
+
+```sh
+/usr/bin/python3 -I local_cli.py sheet <result_id> --png DIR --audio song.wav --style poster --start 40 --end 60 --title "My take"
+```
+
+Cost on a 20 s span (Apple Silicon, under `limit_exec.py`): a plain page about 0.5 s and 230 MB, marks about
+0.9 s and 460 MB, a poster about 1 s and 510 MB (PNG about 2.4 MB); all well inside CPU 60 s and FSIZE 8 MiB.
 
 ## Local CLI (this Mac)
 
@@ -140,6 +192,8 @@ same trust boundary as the `ml` wrapper: no TLS, no signing, no nonces, no recei
 /usr/bin/python3 -I local_cli.py sheet <result_id> --view brief                            # one line per section
 /usr/bin/python3 -I local_cli.py sheet <result_id> --layers chords,drums                   # only those section layers
 /usr/bin/python3 -I local_cli.py sheet <result_id> --png DIR --audio song.wav            # PNG pages (see "Sheet PNG")
+/usr/bin/python3 -I local_cli.py sheet <result_id> --png DIR --audio song.wav --marks    # with suspect/missed marks
+/usr/bin/python3 -I local_cli.py sheet <result_id> --png DIR --audio song.wav --style poster --start 40 --end 60
 ```
 
 - It reads the server's config (`--config`, default `~/.music-lens/api.json`) through `server.load_config`, so the

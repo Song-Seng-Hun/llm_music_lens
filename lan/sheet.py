@@ -585,12 +585,11 @@ def pages(v):
     out = []
     for sid, label, a, b in secs:
         k = max(1, -int(-(b - a) // (PAGE_MAX * 1.1)))
-        beats = [t for t in v.get('beats') or [] if a < t < b]
         cuts = [a]
-        for i in range(1, k):
-            t = a + i * (b - a) / k
-            t = min(beats, key=lambda x: abs(x - t)) if beats else t
-            cuts.append(t if t > cuts[-1] else a + i * (b - a) / k)
+        for i in range(1, k):  # a beat between the last cut and the next equal cut, else the equal cut: increasing
+            t, nxt = a + i * (b - a) / k, a + (i + 1) * (b - a) / k
+            near = [x for x in v.get('beats') or [] if cuts[-1] < x < nxt]
+            cuts.append(min(near, key=lambda x: abs(x - t)) if near else t)
         cuts.append(b)
         for i in range(k):
             out.append({'page': len(out) + 1, 'section': sid, 'label': label + (' %d/%d' % (i + 1, k) if k > 1 else ''),
@@ -599,7 +598,7 @@ def pages(v):
 
 
 if __name__ == '__main__':
-    stem =os.path.basename(sys.argv[1])[:-5]
+    stem = os.path.basename(sys.argv[1])[:-5]
     rid = stem if re.fullmatch('[0-9a-f]{64}', stem) else None
     v = json.load(open(sys.argv[1]))
     sh = zoom(v, float(sys.argv[4]), float(sys.argv[5]), rid) if len(sys.argv) > 4 else build(v, rid)

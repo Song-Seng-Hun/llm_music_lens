@@ -161,16 +161,23 @@ ROUTE_EARCHECK = re.compile(r"\A/earcheck/([0-9a-f]{64})\Z")
 M4A_BRANDS = (b"M4A ", b"M4B ", b"mp42", b"mp41", b"isom", b"iso2")
 PCM_GUID = b"\x01\x00\x00\x00\x00\x00\x10\x00\x80\x00\x00\xaa\x00\x38\x9b\x71"
 UPLOAD_NAMES = ("upload.part", "upload.wav", "upload.mp3", "upload.m4a", "converted.wav", "listen.wav", "earcheck.wav",
-                "roll.png", "roll.png.part")
+                "roll.png", "roll.png.part", "roll-marks.json")
 ROLL = os.path.join(HERE, "roll.py")  # run by rhythm roll_python (numpy, matplotlib); never imported here
 EAR_CHECK = os.path.join(HERE, "ear_check.py")  # run by the rhythm python (numpy); never imported here
 EARCHECK_LAYERS = ("melody", "bass", "other", "chords", "drums", "clicks")  # ear_check.LAYERS
 EARCHECK_DEFAULT = ("melody", "bass", "other", "chords", "drums")  # ear_check.DEFAULT
 RE_PAGE = re.compile(r"\A[1-9][0-9]{0,3}\Z")  # limit_exec.RE_PAGE
-ROLL_RENDER = "POST /sheet/<result_id>?format=png&page=N with the analysed audio as the body returns that page as image/png"
+ROLL_RENDER = ("POST /sheet/<result_id>?format=png&page=N with the analysed audio as the body returns that page as image/png; "
+               "add marks=1 for suspect-note and missed-energy marks; style=poster&start=S&end=E[&title=T&credit=C] "
+               "for a 2400x1350 poster of at most 30 s")
+ROLL_POSTER_MAX = 30.0  # s; roll.py POSTER_MAX
+ROLL_TEXT_MAX = 80  # roll.py TEXT_MAX
+ROLL_POSTER_DETAIL = "poster span: 0 < end - start <= 30 s, end within the result's duration"
+ROLL_TEXT_DETAIL = "title and credit: at most 80 printable characters"
 ROLL_DURATION_TOL = 0.5  # s; the posted audio must have the result's duration
 ROLL_AUDIO_DETAIL = "audio duration differs from the result's by more than %g s: not this result's audio" % ROLL_DURATION_TOL
-ROLL_DETAIL = "format=png takes no other parameter on GET (page index); POST it with page=N and the audio to render"
+ROLL_DETAIL = ("format=png takes no other parameter on GET (page index); POST it with the audio and either page=N[&marks=1] "
+               "or style=poster&start=S&end=E[&title=T&credit=C]")
 SPAN_DETAIL = "end - start must be more than 0 and at most %g s"
 VIEW_DETAIL = ("view=brief or layers=<comma list of %s>, one of them, not with start/end"
                % ",".join(sheet.SECTION_LAYERS))
@@ -3107,7 +3114,7 @@ class Engine:
     def roll_audio(self, src, listen, v):
         """Convert the analysed audio (any upload kind) to 44.1 kHz mono s16 at listen; it must be this result's audio
         (duration within ROLL_DURATION_TOL), so the spectrogram never shows another file under these notes."""
-        if not self.cfg.get("rhythm", {}).get("roll_python") or not os.path.isfile(ROLL):
+        if not (self.cfg.get("rhythm") or {}).get("roll_python") or not os.path.isfile(ROLL):
             raise HttpError("roll_unavailable")
         rc = self.convert(src, listen, listen=True)
         self.log.event("convert_exit", rc=rc, use="roll")
@@ -3120,23 +3127,61 @@ class Engine:
         if abs(duration - v["duration"]) > ROLL_DURATION_TOL:
             raise HttpError("invalid_argument", detail=ROLL_AUDIO_DETAIL)
 
-    def roll_page(self, rid, listen, page, out):
-        """roll.py under limit_exec.py --roll with rhythm roll_python; returns the PNG bytes, never a partial image."""
-        argv = [PYTHON, "-I", self.cfg["limit_exec"], "--roll", self.cfg["rhythm"]["roll_python"], ROLL,
-                self.rhythm_path(rid), listen, str(page), out]
+    def roll_job(self, v, q):
+        """The render a POST /sheet?format=png query (or the CLI's options) asks for, validated against stored result v:
+        {"page": N, "marks": bool} or {"poster": (start, end), "title", "credit"}."""
+        if q.get("style") == "poster":
+            if not set(q) <= {"format", "style", "start", "end", "title", "credit"} or "start" not in q or "end" not in q:
+                raise HttpError("bad_request", detail=ROLL_DETAIL)
+            for k in ("start", "end"):
+                if not RE_NUM.match(q[k]) or q[k].startswith("-"):
+                    raise HttpError("bad_request", detail=ROLL_DETAIL)
+            a, b = float(q["start"]), float(q["end"])
+            if not 0 < round(b - a, 6) <= ROLL_POSTER_MAX or b > v["duration"] + 0.01:
+                raise HttpError("invalid_argument", detail=ROLL_POSTER_DETAIL)
+            text = [q.get(k, "") for k in ("title", "credit")]
+            if not all(len(t) <= ROLL_TEXT_MAX and t.isprintable() for t in text):
+                raise HttpError("bad_request", detail=ROLL_TEXT_DETAIL)
+            return {"poster": (a, min(b, v["duration"])), "title": text[0], "credit": text[1]}
+        if (not set(q) <= {"format", "page", "marks"} or not RE_PAGE.match(q.get("page", ""))
+                or q.get("marks", "1") != "1"):
+            raise HttpError("bad_request", detail=ROLL_DETAIL)
+        if int(q["page"]) > len(sheet.pages(v)):
+            raise HttpError("invalid_argument", detail="page is past the last page (GET /sheet/<id>?format=png lists them)")
+        return {"page": int(q["page"]), "marks": "marks" in q}
+
+    def roll_render(self, rid, listen, job, d):
+        """roll.py under limit_exec.py --roll / --roll-marks / --roll-poster with rhythm roll_python. Returns (PNG
+        bytes, marks dict or None); never a partial image. Outputs go to d (the request's upload directory)."""
+        out, mk = d + "/roll.png", d + "/roll-marks.json"
+        head = [PYTHON, "-I", self.cfg["limit_exec"]]
+        tail = [self.cfg["rhythm"]["roll_python"], ROLL, self.rhythm_path(rid), listen]
+        if "poster" in job:
+            argv = head + ["--roll-poster"] + tail + ["%.6f" % job["poster"][0], "%.6f" % job["poster"][1], out,
+                                                      job["title"], job["credit"]]
+        else:
+            argv = head + (["--roll-marks"] if job["marks"] else ["--roll"]) + tail + [str(job["page"]), out] + (
+                [mk] if job["marks"] else [])
         t0 = time.monotonic()
         rc = self._run_capped(argv, self.limits["roll_timeout"])
-        self.log.event("roll_exit", result_id=rid, page=page, rc=rc, seconds=round(time.monotonic() - t0, 3))
+        self.log.event("roll_exit", result_id=rid, mode=argv[3], rc=rc, seconds=round(time.monotonic() - t0, 3))
         if rc is None:
             raise HttpError("timeout")
         try:
             with open(out, "rb") as f:
                 png = f.read(self.limits["response_max"] + 1)
-        except OSError:
+            marks = None
+            if job.get("marks"):
+                with open(mk, "rb") as f:
+                    marks = json.loads(f.read(self.limits["response_max"] + 1))
+        except (OSError, ValueError):
             png = b""
         if rc != 0 or not png.startswith(b"\x89PNG\r\n\x1a\n") or len(png) > self.limits["response_max"]:
             raise HttpError("roll_failed")
-        return png
+        if job.get("marks") and not (isinstance(marks, dict) and isinstance(marks.get("suspects"), list)
+                                     and isinstance(marks.get("missed"), list)):
+            raise HttpError("roll_failed")
+        return png, marks
 
     # analyze job (staged upload -> inbox link -> ml analyze)
     def _job(self, job):
@@ -3781,18 +3826,14 @@ class Handler(BaseHTTPRequestHandler):
     def do_roll(self, app, result_id, rid, query, cl, rest, body_sha, expect_continue):
         """POST /sheet/<id>?format=png&page=N, body = the analysed audio: that page as image/png. As /earcheck:
         synchronous, nothing stored, API gate and team flock held, upload removed before the reply."""
-        q = parse_query(query, ("format", "page", "start", "end", "view", "layers"))
+        q = parse_query(query, ("format", "page", "marks", "style", "start", "end", "title", "credit", "view", "layers"))
         if q.get("format") != "png":
             raise HttpError("method_not_allowed")  # the text and JSON sheets are GET only, as before
-        if set(q) != {"format", "page"} or not RE_PAGE.match(q["page"]):
-            raise HttpError("bad_request", detail=ROLL_DETAIL)
         if cl > app.limits["max_body"]:
             raise HttpError("payload_too_large")
         v = app.rhythm_or_error(result_id)  # refused before any byte of the upload is read
-        page = int(q["page"])
-        if page > len(sheet.pages(v)):
-            raise HttpError("invalid_argument", detail="page is past the last page (GET /sheet/<id>?format=png lists them)")
-        if not app.cfg.get("rhythm", {}).get("roll_python"):
+        job = app.roll_job(v, q)
+        if not (app.cfg.get("rhythm") or {}).get("roll_python"):
             raise HttpError("roll_unavailable")
         if not app.gate.acquire(blocking=False):
             raise HttpError("busy")
@@ -3803,7 +3844,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise HttpError("shutting_down")
             if shutil.disk_usage(app.cfg["root"]).free < app.limits["disk_floor"]:
                 raise HttpError("insufficient_storage")
-            app.log.event("roll_start", id=rid, op=op, result_id=result_id, page=page)
+            app.log.event("roll_start", id=rid, op=op, result_id=result_id, page=job.get("page"))
             if expect_continue:
                 self.sock.settimeout(app.limits["send_timeout"])
                 self.sock.sendall(b"HTTP/1.1 100 Continue\r\n\r\n")
@@ -3813,7 +3854,7 @@ class Handler(BaseHTTPRequestHandler):
             lfd = app.team_flock()
             d = app.uploads + "/" + op
             app.roll_audio(d + "/upload." + kind, d + "/listen.wav", v)
-            png = app.roll_page(result_id, d + "/listen.wav", page, d + "/roll.png")
+            png = app.roll_render(result_id, d + "/listen.wav", job, d)[0]
         finally:
             if lfd is not None:
                 os.close(lfd)
