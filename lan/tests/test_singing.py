@@ -162,6 +162,9 @@ if mode == "fail":
     sys.exit(3)
 if mode == "sleep":
     time.sleep(30)
+if mode == "full":
+    sys.stderr.write("UserWarning: noise\nsing_notes: model structure differs; full decode\n")
+    mode = "ok"
 rows = {"ok": [[0.5, 1.0, 72], [0.1, 0.4, 60], [3.9, 9.0, 64], [5.0, 6.0, 65]], "empty": [[5.0, 6.0, 65]]}.get(mode, [[None, 1.0, 60]])
 json.dump(rows, open(sys.argv[3], "w"))
 '''
@@ -214,6 +217,7 @@ class SingingWorkerTest(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stderr[-800:])
         out = json.loads(p.stdout)
         self.assertFalse(out["scratch_left"])
+        out["stderr"] = p.stderr.decode()
         return out
 
     def assert_rmvpe(self, out, reason, warned=True):
@@ -233,6 +237,12 @@ class SingingWorkerTest(unittest.TestCase):
         self.assertEqual(out["warns"], [])
         v = json.loads(json.dumps(dict(RHYTHM_OUT_V40, melody=m, melody_notes=out["notes"])))
         self.assertIs(server.check_rhythm(v), v)  # what the worker writes passes the server's check
+
+    def test_fallback_line_reaches_the_worker_stderr(self):
+        out = self.run_sing("full")
+        self.assertEqual(out["melody"]["singing"], DONE)
+        self.assertIn("sing_notes: model structure differs; full decode\n", out["stderr"])
+        self.assertNotIn("UserWarning", out["stderr"])  # only sing_notes' own lines
 
     def test_failures_keep_rmvpe_notes(self):
         self.assert_rmvpe(self.run_sing("fail"), "notes_failed")

@@ -1824,12 +1824,15 @@ def sing_stem_notes(sep, duration, left):
     env = {"PATH": "/usr/bin:/bin", "HOME": os.path.expanduser("~"), "LANG": "en_US.UTF-8", "TMPDIR": tmp, "MPLCONFIGDIR": tmp,
            "NUMBA_CACHE_DIR": tmp, "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "WANDB_MODE": "disabled"}
     try:
-        code = subprocess.run([sep["singing_python"], "-I", "-W", "ignore", SING_CODE, SING_DIR, os.path.join(d, "full", "vocals.wav"), out],
-                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env, cwd="/",
-                              timeout=min(left, SING_MAX)).returncode
+        p = subprocess.run([sep["singing_python"], "-I", "-W", "ignore", SING_CODE, SING_DIR, os.path.join(d, "full", "vocals.wav"), out],
+                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=env, cwd="/",
+                           timeout=min(left, SING_MAX))
     except subprocess.TimeoutExpired:
         return None, "timeout"
-    if code:
+    for line in p.stderr.decode("utf-8", "replace").splitlines():  # e.g. the full-decode fallback; the rest is noise
+        if line.startswith("sing_notes: "):
+            sys.stderr.write(line[:200] + "\n")
+    if p.returncode:
         return None, "notes_failed"
     with open(out) as f:
         v = json.load(f)
