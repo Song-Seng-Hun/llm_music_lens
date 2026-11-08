@@ -48,6 +48,9 @@ times, bars, key and level. From there:
 
 Give an AI the sheet first and let it ask for exact rows with `timeline`.
 
+`report <result_id>` also gives an overview: the song cut into parts in order, built on the lyric repeats when
+there are any, with each part's loudness, main chords and melody range.
+
 ## Quick or full analysis
 
 - **Quick** (`--quick`): beats, tempo, key, chords, energy, genre, lyric repeats, sections and a melody read from the

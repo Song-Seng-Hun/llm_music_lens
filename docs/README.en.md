@@ -25,15 +25,40 @@ There are two ways to use it.
 
 ## Features
 
+### Web app
+
 - **Detailed analysis**: BPM and the beat grid, half/double-tempo candidates, low/mid/high attacks, chord and key candidates, the start, end and pitch of polyphonic notes, and energy changes
+- **Quick signal analysis**: waveform, rhythm and pitch cues only, computed fast without models.
 - **Solo-voice notes (optional)**: the SOME model for unaccompanied singing extracts notes and a continuous pitch curve.
 - **Lyric word transcription (optional)**: Whisper estimates when each word starts and ends, and finds the nearest beat and the notes and chords sounding at the same time.
 - **Check against the original**: piano roll, clickable words and change regions, playback and seeking in the original audio
+- **Reattach the original**: add the same audio file back to a saved result to listen to its spans. A different file is refused.
+- **YouTube reference**: paste a public video link to open the video next to the result. The link alone is not analyzed.
 - **Hand-off to AI**: JSON, a Markdown summary, a summary note for an AI, and MCP tools
-- **Save and import**: a per-user library for signed-in users (up to 1.9 MB of UTF-8 JSON). Audio is not stored.
-- **Mac analysis server (`lan/`)**: a separate server that analyzes songs on the Mac and lets other computers on your home network use it through signed requests
-- **Reading the arrangement by part (Mac analysis server, optional)**: separates vocals, bass and drums to read their notes and hits, and adds accompaniment notes, chords and the song's sections. Each section also says which parts are on, so you can see how the arrangement builds.
-- **Genre estimate (Mac analysis server, optional)**: Discogs styles (e.g. Pop---J-pop) and parent genres (Pop, Rock, ...) with scores, for the whole song and every 30 s window.
+- **Save and import**: a per-user library for signed-in users (up to 1.9 MB of UTF-8 JSON) and import of analysis JSON files. Audio is not stored.
+- **View Mac local results**: open word timings and emotion or mood results exported from `local/` in the web app.
+
+### Mac analysis server (`lan/`)
+
+Use it from the command line on the Mac, or from other computers on your home network through signed requests. Details: [Mac analysis server](../lan/README.md).
+
+- **A score summary an AI can read**: text, from one line per section down to a bar-by-bar zoom.
+- **Quick first look**: beats, chords, key, sections and melody without splitting the parts.
+- **Reading the arrangement by part (optional)**: separates vocals, bass and drums to read their notes and hits, and adds accompaniment notes, chords and the song's sections. Each section also says which parts are on, so you can see how the arrangement builds.
+- **Sung notes (optional)**: reads the sung pitches of the separated vocal as notes.
+- **Bars and rhythm (optional)**: downbeats, beats per bar, each bar's chord with its scale and degree, two chords in one bar, and swing
+- **Mix and tone (optional)**: loudness, stereo width and position, and each part's position and tone
+- **Lyric repeats and song overview**: where the lyrics repeat (chorus candidates), and an ordered outline of the song built on them
+- **Genre estimate (optional)**: Discogs styles (e.g. Pop---J-pop) and parent genres (Pop, Rock, ...) with scores, for the whole song and every 30 s window.
+- **Check by eye**: spectrogram and piano-roll images per section (with optional suspect-note marks), a poster to show people, and an HTML page that plays with the audio
+- **Check by ear**: a file with the original in the left ear and a synth replay of the result in the right
+
+### Mac local analysis (`local/`)
+
+Details: [local analysis](../local/README.md).
+
+- **Word timings**: Whisper large-v3 finds when each sung word starts and ends.
+- **Voice emotion and music mood (optional)**: scores the singer's emotion or the music's mood over short windows.
 
 ## Quick start
 
@@ -93,6 +118,10 @@ Once the site is published and connected to an AI, the AI calls these tools duri
 - Lyric transcription can make up or miss words in singing, fast rap and multiple voices.
 - Instruments and emotion are not decided automatically. Genre comes only as a model estimate from the Mac analysis server's rhythm layer, not from the web app or the site's MCP tools. Reading the style is up to the AI, which should name the sources and time ranges it relies on.
 - Publishing the site, connecting it to an AI, and per-user report access have not yet been confirmed over a real authenticated connection.
+
+## Built with AI
+
+This project was built by AI agents under human direction. People decided what to build, what accuracy to aim for and what to adopt; Claude (Anthropic) and Codex (OpenAI) agents shared the implementation, measurement and code review. The [measurement notes](../lan/docs/evaluation.md) are the record the agents kept along the way.
 
 ## Models and licenses
 
