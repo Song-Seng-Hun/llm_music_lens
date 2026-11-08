@@ -1309,8 +1309,6 @@ What happens on a rhythm request: Demucs gives all four stems from the 44.1 kHz 
 drum layers made, and the model gives the sections from them.
 
 Cost of the model step for a 600 s file on an M4 Max: 20 s, 150 CPU seconds and 14.5 GB, after the Demucs step, not alongside it.
-The model starts after the bass layer and runs alongside the accompaniment layer's Basic Pitch step (about 1 GB). The
-drum layer waits until it ends: on a 600 s file its model takes 8.8 GB, so the two together would raise the run's peak.
 
 Each row of `sections` gains `function`: `start`, `end`, `intro`, `outro`, `break`, `bridge`, `inst`, `solo`, `verse` or
 `chorus`. `label` is still a letter, and equal functions share one, so every verse is the same letter. Mostly silent rows

@@ -150,31 +150,8 @@ root = os.path.dirname(cfg["sep"]["sections_model"])
 rw.ALLIN1_WEIGHTS = tuple((n, cfg.get("weight_sha", sha(os.path.join(root, n)))) for n in cfg["weights"])
 rw.ALLIN1_CODE, rw.ALLIN1_CODE_SHA256 = cfg["helper"], sha(cfg["helper"])
 sep = cfg["sep"]
-probe = {}
-if cfg.get("probe"):  # was allin1 already running when sections_input began?
-    real = rw.sections_input
-    marker = os.path.join(os.path.dirname(cfg["helper"]), "allin1.pid")
-    def sections_input(*a):
-        import time
-        for _ in range(100):
-            if os.path.exists(marker):
-                break
-            time.sleep(0.05)
-        probe["running_before"] = os.path.exists(marker)
-        if cfg["probe"] == "raise":
-            raise RuntimeError("stage failed")
-        return real(*a)
-    rw.sections_input = sections_input
-try:
-    _, _, field = rw.melody_input(sep, 16000 * 2)
-except RuntimeError:
-    field = "raised"
-    try:
-        os.kill(int(open(marker).read()), 0)
-        probe["allin1_left"] = True
-    except ProcessLookupError:
-        probe["allin1_left"] = False
-print(json.dumps({"separation": field, "sections": sep.get("sections"), "downbeats": sep.get("downbeats"), "beats": sep.get("model_beats"), "scratch_left": os.path.exists(sep["scratch"]), "probe": probe}))
+_, _, field = rw.melody_input(sep, 16000 * 2)
+print(json.dumps({"separation": field, "sections": sep.get("sections"), "downbeats": sep.get("downbeats"), "beats": sep.get("model_beats"), "scratch_left": os.path.exists(sep["scratch"])}))
 '''
 FAKE_DEMUCS = r'''#!%s -I
 import os, shutil, sys
@@ -205,13 +182,9 @@ np.save(sys.argv[3], np.full(n, 440.0))
 FAKE_HELPER = r'''import json, os, sys
 mode, model_dir, stems, out = "%s", sys.argv[1], sys.argv[2], sys.argv[3]
 assert all(os.path.isfile(os.path.join(stems, s + ".wav")) for s in ("vocals", "bass", "drums", "other"))
-with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "allin1.pid"), "w") as f:
-    f.write(str(os.getpid()))
 if mode == "fail":
     sys.exit(4)
-if mode == "slow":
-    import time
-    time.sleep(60)
+
 if mode == "bad":
     rows = [{"start": 0, "end": 1, "label": "hook"}]
 elif mode == "many":
@@ -287,16 +260,6 @@ class SectionFallbackTest(unittest.TestCase):
         self.assert_skipped(self.run_it(demucs_fail="other"), "separation_failed")
         with open(self.log) as f:  # the failed run's files go; each stem then has its own run, as before
             self.assertEqual(f.read().split(), ["all", "vocals", "bass", "drums", "other"])
-
-    def test_allin1_runs_beside_other_notes(self):
-        r = self.run_it(probe="wait")
-        self.assertTrue(r["probe"]["running_before"])  # started after the bass stage, not in sections_input
-        self.assertEqual(r["sections"][0], {"status": "done"})
-
-    def test_allin1_stopped_when_a_stage_raises(self):
-        r = self.run_it(helper="slow", probe="raise")
-        self.assertEqual(r["separation"], "raised")
-        self.assertFalse(r["probe"]["allin1_left"])  # killed and reaped before the scratch went
 
     def test_failures(self):
         self.assert_skipped(self.run_it(helper="fail"), "sections_failed")
