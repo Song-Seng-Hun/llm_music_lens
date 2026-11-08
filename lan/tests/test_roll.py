@@ -17,6 +17,7 @@ from test_earcheck_route import AFCONVERT
 from test_rhythm import RHYTHM_OUT_V40, FakeWorker, RhythmBase
 
 import limit_exec  # noqa: E402
+import roll  # noqa: E402  (stdlib at import; numpy only inside the render functions)
 
 sheet = server.sheet
 ROLL_PY = os.environ.get("MUSIC_LENS_ROLL_PYTHON", "")
@@ -430,6 +431,30 @@ class RealMarksTest(unittest.TestCase):
         self.assertEqual(m["suspects"], [])
         self.assertEqual([x["note"] for x in m["missed"]], ["A3"])
 
+    def test_semitone_off_note(self):  # written a semitone above the tone: the row below is stronger
+        m = self.marks([(60, 0.5, 3.0, None), (67, 3.0, 5.0, None)], [], [(61, 0.5, 3.0), (67, 3.0, 5.0)])
+        self.assertEqual([(s["note"], "semitone" in s["flags"]) for s in m["suspects"]], [("C#4", True)])
+
+    def test_short_removed_note_is_missed(self):  # 0.25 s: under the old 0.4 s minimum
+        m = self.marks([(60, 0.5, 2.0, None), (64, 2.3, 2.55, None), (60, 3.0, 5.0, None)], [],
+                       [(60, 0.5, 2.0), (60, 3.0, 5.0)])
+        self.assertEqual([x["note"] for x in m["missed"]], ["E4"])
+
+    def test_chromatic_bass_passing_not_semitone(self):  # PR 64 review: low-band smear of written neighbours
+        passing = [(36, 0.5, 1.5), (37, 1.5, 1.65), (38, 1.65, 2.65), (39, 2.65, 2.8), (36, 2.8, 3.8), (37, 3.8, 3.95),
+                   (38, 3.95, 4.95), (39, 4.95, 5.1)]
+        m = self.marks([(n, a, b, None) for n, a, b in passing], [], passing)
+        self.assertEqual([s["flags"] for s in m["suspects"] if "semitone" in s["flags"]], [])
+
+    def test_chromatic_bass_eighths_not_missed(self):  # PR 64 review: short low runs between written eighths
+        eighths = [(n, 0.5 + i * 0.22, 0.72 + i * 0.22) for i, n in enumerate([36, 37, 38, 39, 40, 39, 38, 37] * 3)]
+        m = self.marks([(n, a, b, None) for n, a, b in eighths], [], eighths)
+        self.assertEqual(m["missed"], [])
+
+    def test_ringing_tail_not_missed(self):  # the tone rings 0.25 s past the written end
+        m = self.marks([(57, 0.5, 3.0, None), (64, 3.5, 5.0, None)], [], [(57, 0.5, 2.75), (64, 3.5, 5.0)])
+        self.assertEqual(m["missed"], [])
+
     def poster(self, d, res, wav, start, end, title="", name="poster.png"):
         out = os.path.join(d, name)
         p = subprocess.run([ROLL_PY, "-I", os.path.join(REPO, "roll.py"), "--poster", res, wav, start, end, out, title,
@@ -486,6 +511,62 @@ class RealMarksTest(unittest.TestCase):
             p = subprocess.run([ROLL_PY, "-I", os.path.join(REPO, "roll.py"), "--poster", res, wav] + args,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
             self.assertEqual(p.returncode, 2, bad)
+
+
+class GridTest(unittest.TestCase):
+    """Page bar lines: at the stored downbeats when the bar layer is done, else every 4th beat with a page note."""
+
+    def test_three_four_downbeats(self):
+        bars = [{"start": 1.0 + 1.5 * i, "end": 2.5 + 1.5 * i} for i in range(4)]  # 3/4 at 120 BPM from 1.0 s
+        v = {"beats": [1.0 + 0.5 * i for i in range(13)],
+             "bars": {"status": "done", "beats_per_bar": 3, "rows": bars}}
+        lines, note = roll.grid(v, 0.0, 10.0)
+        self.assertEqual([t for t, bar in lines if bar], [1.0, 2.5, 4.0, 5.5, 7.0])
+        self.assertEqual(len([t for t, bar in lines if not bar]), 8)  # the two inner beats of each bar
+        self.assertEqual(note, "bar lines at downbeats (3 beats per bar)")
+        self.assertEqual([t for t, bar in roll.grid(v, 3.0, 6.0)[0] if bar], [4.0, 5.5])
+
+    def test_no_downbeats_fallback_note(self):
+        v = {"beats": [0.5 * i for i in range(1, 13)], "bars": {"status": "not_provided"}}
+        lines, note = roll.grid(v, 0.0, 10.0)
+        self.assertEqual([t for t, bar in lines if bar], [0.5, 2.5, 4.5])
+        self.assertIn("no downbeats", note)
+        self.assertEqual([t for t, bar in roll.grid(v, 1.2, 10.0)[0] if bar], [2.5, 4.5])  # counted from the song start
+        self.assertIn("no downbeats", roll.grid({"beats": []}, 0.0, 1.0)[1])
+
+    def test_bars_ending_before_page(self):  # older results: the bar layer stops short of the song's end
+        v = {"beats": [0.5 * i for i in range(1, 41)],
+             "bars": {"status": "done", "beats_per_bar": 4, "rows": [{"start": 0.5, "end": 2.5}, {"start": 2.5, "end": 4.5}]}}
+        lines, note = roll.grid(v, 10.0, 20.0)
+        self.assertEqual([t for t, bar in lines if bar], [10.5, 12.5, 14.5, 16.5, 18.5])
+        self.assertEqual(note, "beats counted from the first beat (every 4th darker); no downbeats on this page")
+        self.assertEqual(roll.grid(v, 0.0, 5.0)[1], "bar lines at downbeats (4 beats per bar)")
+
+
+@unittest.skipUnless(os.path.isfile(ROLL_PY), "unverified: set MUSIC_LENS_ROLL_PYTHON to a python with numpy and matplotlib")
+class RealLowToneTest(unittest.TestCase):
+    def test_semitone_apart_low_tones_split(self):
+        """A1 (55 Hz) and A#1 (58.27 Hz) together: two peak rows a semitone apart with a dip between them (the single
+        8192-point STFT gave one merged peak near 34.2)."""
+        d = tempfile.mkdtemp()
+        wav = os.path.join(d, "a.wav")
+        with wave.open(wav, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(SR)
+            w.writeframes(b"".join(struct.pack("<h", int(12000 * (math.sin(2 * math.pi * 55 * i / SR) +
+                                                                     math.sin(2 * math.pi * 58.27 * i / SR))))
+                                   for i in range(4 * SR)))
+        code = ("import sys, json, numpy as np; sys.path.insert(0, sys.argv[1]); import roll; "
+                "t, r, db = roll.spectrogram(np, sys.argv[2], 1.0, 3.0); p = db.mean(1); s = (r >= 31) & (r <= 36); "
+                "r, p = r[s], p[s]; print(json.dumps({'peaks': [round(float(r[i]), 2) for i in range(1, len(r) - 1) "
+                "if p[i] >= p[i - 1] and p[i] >= p[i + 1]], 'dip': float(p.max() - p[(r > 33.2) & (r < 33.8)].min())}))")
+        p = subprocess.run([ROLL_PY, "-I", "-c", code, REPO, wav], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           timeout=60)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        out = json.loads(p.stdout)
+        self.assertEqual(out["peaks"], [33.0, 34.0])
+        self.assertGreater(out["dip"], 2.0)
 
 
 if __name__ == "__main__":

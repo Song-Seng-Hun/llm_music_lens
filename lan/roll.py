@@ -4,16 +4,17 @@ Usage: PYTHON -I roll.py RESULT.json AUDIO.wav PAGE OUT.png                 page
        PYTHON -I roll.py RESULT.json AUDIO.wav PAGE OUT.png MARKS.json      page with marks + their JSON
        PYTHON -I roll.py --poster RESULT.json AUDIO.wav START END OUT.png TITLE CREDIT   poster, <= 30 s
 
-Page: top: spectrogram of AUDIO on a semitone axis (STFT 8192/256, 1/3-semitone rows, MIDI 24-96, 70 dB below the page
-peak) with the result's note outlines over it, to check notes against real energy. Middle: piano roll by part
-(melody, bass, other), beat lines (every 4th darker, counted from the first beat; not downbeats), chord labels.
+Page: top: spectrogram of AUDIO on a semitone axis (multi-resolution STFT, see BANDS; 1/3-semitone rows, MIDI 24-96,
+70 dB below the page peak) with the result's note outlines over it, to check notes against real energy. Middle: piano
+roll by part (melody, bass, other), bar lines at the result's downbeats (else every 4th beat, with a note), chords.
 Bottom: drum hits (hidden when the result has no drum hits). AUDIO is 16-bit PCM WAV, any rate and channel count.
-Marks (opt-in): suspect notes (weak, drum, quiet, reattackN) and missed harmonic energy, from a median-filter
+Marks (opt-in): suspect notes (weak, semitone, drum, quiet, reattackN) and missed harmonic energy, from a median-filter
 harmonic/percussive split; thresholds are unvalidated rules of thumb. Poster (opt-in): 2400 x 1350 for people.
 Exit 0 with OUT written, 2 on bad arguments, 1 on any other failure; OUT is never left half-written.
 Run by server.py / local_cli.py under limit_exec.py --roll; never imported by them.
 """
 import json
+import math
 import os
 import sys
 import wave
@@ -21,39 +22,103 @@ import wave
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # -I drops the script dir; sheet.py is pure stdlib
 import sheet  # noqa: E402
 
-NFFT, HOP, MLO, MHI, RANGE_DB = 8192, 256, 24, 96, 70
+HOP, MLO, MHI, RANGE_DB = 256, 24, 96, 70
 LANES = (("melody_notes", "#ff5fd2", "melody"), ("bass_notes", "#ffb040", "bass"), ("other_notes", "#58d6ff", "other"))
 DRUMS = ("kick", "snare", "hihat", "tom", "cymbal")
 DRUM_COLORS = ("#ff4d4d", "#ffd84d", "#5cf2b0", "#b28cff", "#cccccc")
 
 
-def spectrogram(np, path, t0, t1):
-    """(times, semitone rows, dB) of [t0, t1] only; frames centred on t0 + j*HOP/sr."""
+# Multi-resolution STFT: each pitch band gets a longer window lower down, so two tones a semitone apart show as two
+# peaks (a Hann main lobe's half width, 2 sr/N Hz, is under a semitone, 0.0595 f, from about MIDI 42 / 54 in the
+# upper bands and from about MIDI 29 in the lowest; below 29 neighbours merge); frames share centres and hop, so
+# the time axis matches the note boxes; magnitudes are divided by the window sum, so a steady tone reads the same
+# level in every band. Low rows trade time detail for pitch detail (the 0.74 s window smears onsets by ~0.3 s).
+BANDS = ((45, 0.743), (57, 0.372), (MHI + 1, 0.186))  # (below MIDI, window s): 32768 / 16384 / 8192 at 44.1 kHz
+
+
+def smear(m):
+    """Half the window (s) of the band pitch m is in: energy shows this long before an onset and after an end."""
+    return next((sec for top, sec in BANDS if m < top), BANDS[-1][1]) / 2
+
+
+def window(sr, sec):
+    return 1 << max(8, int(round(math.log2(sec * sr))))
+
+
+def stft_rows(np, path, a, b, short=0):
+    """(sr, times, rows, M) for frames centred on a + j*HOP/sr up to b: M[row, frame] the multi-resolution magnitude
+    on 1/3-semitone rows MIDI 24-96 (silence beyond the audio's ends); with short=N also S[frame, bin], a plain
+    N-point STFT at the same centres (re-attack timing)."""
     with wave.open(path) as w:
         if w.getsampwidth() != 2:
             raise ValueError("not 16-bit PCM")
         sr, ch, total = w.getframerate(), w.getnchannels(), w.getnframes()
-        s0, s1 = int(t0 * sr) - NFFT // 2, int(t1 * sr) + NFFT // 2
-        if int(t0 * sr) >= total:
+        if int(a * sr) >= total:
             raise ValueError("page outside the audio")
+        half = max(window(sr, sec) for _, sec in BANDS) // 2
+        s0, s1 = int(a * sr) - half, int(b * sr) + half
         w.setpos(max(0, s0))
         raw = w.readframes(min(s1, total) - max(0, s0))
     x = np.frombuffer(raw, dtype="<i2").astype(np.float32).reshape(-1, ch).mean(1) / 32768
-    x = np.pad(x, (max(0, -s0), max(0, s1 - total)))  # silence beyond the audio's ends
-    n = (len(x) - NFFT) // HOP + 1
-    freqs = np.fft.rfftfreq(NFFT, 1.0 / sr)
-    rows = np.arange(MLO - 0.5, MHI + 0.5, 1 / 3)
-    pos = np.interp(440 * 2 ** ((rows - 69) / 12), freqs, np.arange(len(freqs)))
-    i0 = np.floor(pos).astype(int)
-    i1, wt = np.minimum(i0 + 1, len(freqs) - 1), (pos - i0).astype(np.float32)
-    win = np.hanning(NFFT).astype(np.float32)
-    out = np.empty((len(rows), n), np.float32)
-    for j in range(0, n, 256):  # chunks keep memory near 256 x NFFT floats
-        idx = np.arange(j, min(n, j + 256))[:, None] * HOP + np.arange(NFFT)[None, :]
-        s = np.abs(np.fft.rfft(x[idx] * win, axis=1))
-        out[:, j:j + len(idx)] = (s[:, i0] * (1 - wt) + s[:, i1] * wt).T
-    db = 20 * np.log10(out + 1e-6)
-    return t0 + np.arange(n) * HOP / sr, rows, np.clip(db, db.max() - RANGE_DB, None)
+    x = np.pad(x, (max(0, -s0), max(0, s1 - total)))
+    n = (int(b * sr) - int(a * sr)) // HOP + 1
+    rows = MLO - 1 / 3 + np.arange(3 * (MHI - MLO + 1)) / 3  # centred on each semitone and its thirds, as drawn
+    M = np.empty((len(rows), n), np.float32)
+    lo = MLO - 1
+    for top, sec in BANDS:
+        sel = np.where((rows >= lo) & (rows < top))[0] if top <= MHI else np.where(rows >= lo)[0]
+        lo = top
+        N = window(sr, sec)
+        freqs = np.fft.rfftfreq(N, 1.0 / sr)
+        pos = np.interp(440 * 2 ** ((rows[sel] - 69) / 12), freqs, np.arange(len(freqs)))
+        i0 = np.floor(pos).astype(int)
+        i1, wt = np.minimum(i0 + 1, len(freqs) - 1), (pos - i0).astype(np.float32)
+        win = np.hanning(N).astype(np.float32)
+        win /= win.sum()
+        step = max(16, (1 << 21) // N)  # frames per chunk: about 2M samples (8 MB float32) per chunk at any N
+        for j in range(0, n, step):
+            idx = np.arange(j, min(n, j + step))[:, None] * HOP + (half - N // 2) + np.arange(N)[None, :]
+            s = np.abs(np.fft.rfft(x[idx] * win, axis=1))
+            M[sel, j:j + len(idx)] = (s[:, i0] * (1 - wt) + s[:, i1] * wt).T
+    times = int(a * sr) / sr + np.arange(n) * HOP / sr
+    if not short:
+        return sr, times, rows, M
+    ws = np.hanning(short).astype(np.float32)
+    S = np.empty((n, short // 2 + 1), np.float32)
+    for j in range(0, n, 256):
+        idx = np.arange(j, min(n, j + 256))[:, None] * HOP + (half - short // 2) + np.arange(short)[None, :]
+        S[j:j + len(idx)] = np.abs(np.fft.rfft(x[idx] * ws, axis=1))
+    return sr, times, rows, M, S
+
+
+def spectrogram(np, path, t0, t1):
+    """(times, semitone rows, dB) of [t0, t1] only, RANGE_DB below the page peak."""
+    _, times, rows, M = stft_rows(np, path, t0, t1)
+    db = 20 * np.log10(M + 1e-9)
+    return times, rows, np.clip(db, db.max() - RANGE_DB, None)
+
+
+def grid(v, t0, t1):
+    """(lines [(time, bar start?)], note) inside [t0, t1]: bar lines at the stored bars' starts (downbeats) and the
+    other beats lighter when the result has a bar layer; else every 4th beat counted from the first beat, said so."""
+    beats = v.get("beats") or []
+    rows = (sheet.done(v, "bars") or {}).get("rows") or []
+    bars = sorted({r["start"] for r in rows} | {rows[-1]["end"]}) if rows else []
+    if any(t0 <= t <= t1 for t in bars[:-1]):  # bars that end before the page (older results) leave it to the beats
+        lines = [(t, True) for t in bars if t0 <= t <= t1]
+        lines += [(t, False) for t in beats if t0 <= t <= t1 and all(abs(t - u) > 0.06 for u in bars)]
+        bpb = sheet.meter(v)[0]
+        return sorted(lines), "bar lines at downbeats" + (" (%d beats per bar)" % bpb if bpb else "")
+    first = sum(1 for t in beats if t < t0)  # beat count from the song's first beat
+    lines = [(t, i % 4 == 0) for i, t in enumerate([t for t in beats if t0 <= t <= t1], first)]
+    return lines, "beats counted from the first beat (every 4th darker); no downbeats " + (
+        "on this page" if bars else "in this result")
+
+
+def draw_grid(axes, lines):
+    for ax in axes:
+        for t, bar in lines:
+            ax.axvline(t, color="#555" if bar else "#2e2e2e", lw=0.8 if bar else 0.5, zorder=1)
 
 
 def render(v, audio, page, out):
@@ -66,8 +131,7 @@ def render(v, audio, page, out):
     p = sheet.pages(v)[page - 1]
     t0, t1 = p["start"], p["end"]
     times, rows, db = spectrogram(np, audio, t0, t1)
-    beats = [b for b in v.get("beats") or [] if t0 <= b <= t1]
-    first = sum(1 for b in v.get("beats") or [] if b < t0)  # beat count from the song's first beat
+    lines, grid_note = grid(v, t0, t1)
     notes = [(n, c, nm) for key, c, nm in LANES for n in v.get(key) or [] if n["end"] > t0 and n["start"] < t1]
     ms = [n["midi"] for n, _, _ in notes]
     lo, hi = max(MLO, (min(ms) if ms else 48) - 5), min(MHI, (max(ms) if ms else 72) + 5)
@@ -81,8 +145,7 @@ def render(v, audio, page, out):
         ax.tick_params(colors="#aaaaaa")
         for sp in ax.spines.values():
             sp.set_color("#333")
-        for i, b in enumerate(beats, first):
-            ax.axvline(b, color="#555" if i % 4 == 0 else "#2e2e2e", lw=0.8 if i % 4 == 0 else 0.5, zorder=1)
+    draw_grid((axs, axr, axd), lines)
     keep = (rows >= lo - 0.5) & (rows <= hi + 0.5)
     axs.imshow(db[keep], origin="lower", aspect="auto", cmap="magma", extent=[times[0], times[-1], lo - 0.5, hi + 0.5],
                zorder=0)
@@ -113,6 +176,7 @@ def render(v, audio, page, out):
     axd.set_yticks(range(len(DRUMS)), DRUMS)
     axd.tick_params(labelsize=6)
     axd.set_xlabel("seconds", color="#aaaaaa")
+    axr.text(0.005, 0.015, grid_note, transform=axr.transAxes, color="#bbbbbb", fontsize=7, va="bottom", zorder=5)
     used = [nm for _, _, nm in LANES if any(x == nm for _, _, x in notes)]
     key = v.get("key") or {}
     head = "%s%s   %.1f-%.1f s   %s BPM (mlr)   key %s   notes: %s" % (
@@ -138,9 +202,14 @@ def render(v, audio, page, out):
 MARGIN = 1.0  # s analysed on each side of the page, so notes and runs crossing its edges are judged on more frames
 NFFT_SHORT = 2048  # re-attack timing
 HARM = (0, 12, 19, 24, 28, 31)  # a note explains energy at these semitone offsets (harmonics 1-6)
-WEAK_DB, DRUM_RATIO, QUIET_DB = 3.0, 0.6, 45.0
+WEAK_DB, SEMITONE_DB = 3.0, 6.0  # weak: row vs rows 2.5 semitones away; semitone: a row 1 semitone away is stronger
+DRUM_ABOVE, QUIET_BELOW_DB = 0.25, 20.0  # vs the median percussive share / level of the page's notes
 REATTACK_DB, REATTACK_LAG, REATTACK_GAP = 6.0, 0.03, 0.1
-MISSED_LEVEL_DB, MISSED_PROMINENCE_DB, MISSED_MIN_S, MISSED_BRIDGE_S = 20.0, 12.0, 0.4, 0.05
+MISSED_LEVEL_DB, MISSED_PROMINENCE_DB, MISSED_MIN_S, MISSED_BRIDGE_S = 20.0, 12.0, 0.15, 0.05
+MISSED_TAIL_S = 0.3  # after a note ends, its pitches (and harmonics) still ring: not missed for this long
+MISSED_LOW_MIN_S = 0.4  # below BANDS[0][0] the 0.74 s window cannot place shorter runs: treat them as smear
+MISSED_DRUM_S = 0.4, 0.2  # a run shorter than [0] within the smear of a drum hit (+[1] s after) is the drum
+MISSED_NEIGHBOUR = 4  # rows (1/3 semitone) each side a missed peak is compared with
 
 
 def name(m):
@@ -148,49 +217,27 @@ def name(m):
 
 
 def analyse(np, path, t0, t1):
-    """Long (NFFT) and short (NFFT_SHORT) STFTs with the same frame centres over [t0 - MARGIN, t1 + MARGIN] inside
-    the audio, the long one on 1/3-semitone rows, then a median-filter harmonic/percussive split."""
+    """The multi-resolution rows (stft_rows) and a short NFFT_SHORT STFT at the same frame centres over
+    [t0 - MARGIN, t1 + MARGIN] inside the audio, then a median-filter harmonic/percussive split."""
     from numpy.lib.stride_tricks import sliding_window_view as swv
     with wave.open(path) as w:
-        if w.getsampwidth() != 2:
-            raise ValueError("not 16-bit PCM")
-        sr, ch, total = w.getframerate(), w.getnchannels(), w.getnframes()
-        c0, c1 = max(0, int((t0 - MARGIN) * sr)), min(total, int((t1 + MARGIN) * sr))
-        s0, s1 = c0 - NFFT // 2, c1 + NFFT // 2
-        w.setpos(max(0, s0))
-        raw = w.readframes(min(s1, total) - max(0, s0))
-    x = np.frombuffer(raw, dtype="<i2").astype(np.float32).reshape(-1, ch).mean(1) / 32768
-    x = np.pad(x, (max(0, -s0), max(0, s1 - total)))
-    n = (len(x) - NFFT) // HOP + 1
-    freqs, fs = np.fft.rfftfreq(NFFT, 1.0 / sr), np.fft.rfftfreq(NFFT_SHORT, 1.0 / sr)
-    rows = np.arange(MLO - 0.5, MHI + 0.5, 1 / 3)
-    pos = np.interp(440 * 2 ** ((rows - 69) / 12), freqs, np.arange(len(freqs)))
-    i0 = np.floor(pos).astype(int)
-    i1, wt = np.minimum(i0 + 1, len(freqs) - 1), (pos - i0).astype(np.float32)
-    win, wins = np.hanning(NFFT).astype(np.float32), np.hanning(NFFT_SHORT).astype(np.float32)
-    off = (NFFT - NFFT_SHORT) // 2
-    M = np.empty((len(rows), n), np.float32)
-    S = np.empty((n, len(fs)), np.float32)
-    for j in range(0, n, 256):
-        idx = np.arange(j, min(n, j + 256))[:, None] * HOP
-        s = np.abs(np.fft.rfft(x[idx + np.arange(NFFT)[None, :]] * win, axis=1))
-        M[:, j:j + len(idx)] = (s[:, i0] * (1 - wt) + s[:, i1] * wt).T
-        S[j:j + len(idx)] = np.abs(np.fft.rfft(x[idx + off + np.arange(NFFT_SHORT)[None, :]] * wins, axis=1))
+        dur = w.getnframes() / w.getframerate()
+    sr, times, rows, M, S = stft_rows(np, path, max(0.0, t0 - MARGIN), min(dur, t1 + MARGIN), short=NFFT_SHORT)
 
     def med(a, k, axis):
         p = [(0, 0), (0, 0)]
         p[axis] = (k // 2, k // 2)
         return np.median(swv(np.pad(a, p, mode="edge"), k, axis=axis), axis=-1)
     H, P = med(M, int(round(0.2 * sr / HOP)) | 1, 1), med(M, 25, 0)  # ~0.2 s along time; 25 rows along pitch
-    mask = H ** 2 / (H ** 2 + P ** 2 + 1e-12)
+    mask = H ** 2 / (H ** 2 + P ** 2 + 1e-30)
     Pm = M * (1 - mask)
-    return {"sr": sr, "times": c0 / sr + np.arange(n) * HOP / sr, "rows": rows, "fs": fs, "M": M, "Pm": Pm,
-            "Hdb": 20 * np.log10(M * mask + 1e-6), "S": S}
+    return {"sr": sr, "times": times, "rows": rows, "fs": np.fft.rfftfreq(NFFT_SHORT, 1.0 / sr), "M": M, "Pm": Pm,
+            "Hdb": 20 * np.log10(M * mask + 1e-9), "S": S}
 
 
 def marks(np, v, an, t0, t1):
-    """(suspects, missed) for page [t0, t1]: notes overlapping it with flags weak/drum/quiet/reattackN, and harmonic
-    energy no note (or its harmonics) explains, held >= MISSED_MIN_S."""
+    """(suspects, missed) for page [t0, t1]: notes overlapping it with flags weak/semitone/drum/quiet/reattackN, and
+    harmonic energy no note (or its harmonics) explains, held >= MISSED_MIN_S."""
     tf, rows, Hdb, M, Pm, S, fs, sr = (an[k] for k in ("times", "rows", "Hdb", "M", "Pm", "S", "fs", "sr"))
     page = (tf >= t0) & (tf <= t1)
     ref = float(np.percentile(Hdb[:, page], 99.5))  # the page's level: thresholds are relative to it
@@ -198,54 +245,79 @@ def marks(np, v, an, t0, t1):
     def near(m, half):
         return np.where(np.abs(rows - m) <= half + 1e-6)[0]
     lag, gap = max(1, int(round(REATTACK_LAG * sr / HOP))), int(round(REATTACK_GAP * sr / HOP))
-    suspects, allnotes = [], []
+    allnotes = [nt for key, _, _ in LANES for nt in v.get(key) or []]
+    onsets = [(nt["start"], nt["midi"]) for nt in allnotes]
+    stats = []
     for key, _, lane in LANES:
         for nt in v.get(key) or []:
-            allnotes.append(nt)
             if not (nt["end"] > t0 and nt["start"] < t1):
                 continue
             fm = (tf >= nt["start"]) & (tf <= nt["end"])
-            on_r = near(nt["midi"], 1 / 3)
-            if fm.sum() < 2 or len(on_r) == 0:
+            if fm.sum() < 2 or len(near(nt["midi"], 1 / 3)) == 0:
                 continue
+
+            def level(m, frames=fm):
+                return float(Hdb[near(m, 1 / 3)][:, frames].max(0).mean())
+            on = level(nt["midi"])
             nb_r = np.concatenate([near(nt["midi"] - 2.5, 0.5), near(nt["midi"] + 2.5, 0.5)])
-            on = float(Hdb[on_r][:, fm].max(0).mean())
             contrast = on - (float(Hdb[nb_r][:, fm].mean()) if len(nb_r) else on)
+            # a semitone neighbour is compared only on frames no other note (or its harmonics) at that pitch reaches,
+            # widened by the band's smear: the long low windows spread a written neighbour into this note's span
+            sm, side = smear(nt["midi"]), []
+            for d in (-1, 1):
+                nm = nt["midi"] + d
+                if not MLO <= nm <= MHI:
+                    continue
+                keep = fm.copy()
+                for o in allnotes:
+                    if o is not nt and any(abs(o["midi"] + h - nm) < 0.5 for h in HARM):
+                        keep &= ~((tf >= o["start"] - sm) & (tf <= o["end"] + sm))
+                if keep.sum() >= 2:
+                    side.append(level(nm, keep) - level(nt["midi"], keep))
+            semi = max(side) if side else -99.0
             band = near(nt["midi"], 1)
             pr = float(Pm[band][:, fm].sum() / (M[band][:, fm].sum() + 1e-12))
             f0 = 440 * 2 ** ((nt["midi"] - 69) / 12)
             e = 20 * np.log10(S[fm][:, (fs >= f0 / 1.26) & (fs <= f0 * 2.5)].sum(1) + 1e-6)
             rises = np.where(e[lag:] - e[:-lag] > REATTACK_DB)[0] + lag
             rises = rises[rises > gap]  # the note's own attack
+            # a rise where another note (any lane) with a harmonic in this band starts is that note, not a re-strike
+            ft = tf[fm]
+            rises = [i for i in rises if not any(abs(st - ft[i]) <= REATTACK_GAP and -4 <= m + h - nt["midi"] <= 16
+                                                 for st, m in onsets if st > nt["start"] for h in HARM)]
             nre = int(1 + (np.diff(rises) > gap).sum()) if len(rises) else 0
-            flags = (["weak"] if contrast < WEAK_DB else []) + (["drum"] if pr > DRUM_RATIO else []) + (
-                ["quiet"] if on < ref - QUIET_DB else []) + (["reattack%d" % nre] if nre >= 2 else [])
-            if flags:
-                suspects.append({"start": nt["start"], "end": nt["end"], "lane": lane, "note": nt.get("note") or
-                                 name(nt["midi"]), "midi": nt["midi"], "flags": flags,
-                                 "contrast_db": round(contrast, 1), "perc_ratio": round(pr, 2),
-                                 "level_db": round(on - ref, 1), "reattacks": nre})
-    nbm = (np.roll(Hdb, 4, 0) + np.roll(Hdb, -4, 0)) / 2
-    low = rows < 48  # 8192-point bins span about 2 semitones down here: compare further out
-    nbm[low] = ((np.roll(Hdb, 8, 0) + np.roll(Hdb, -8, 0)) / 2)[low]
+            stats.append((lane, nt, on, contrast, semi, pr, nre))
+    mid_on = float(np.median([x[2] for x in stats])) if stats else 0.0
+    mid_pr = float(np.median([x[5] for x in stats])) if stats else 0.0
+    suspects = []
+    for lane, nt, on, contrast, semi, pr, nre in stats:
+        flags = (["weak"] if contrast < WEAK_DB else []) + (["semitone"] if semi > SEMITONE_DB else []) + (
+            ["drum"] if pr > mid_pr + DRUM_ABOVE else []) + (["quiet"] if on < mid_on - QUIET_BELOW_DB else []) + (
+            ["reattack%d" % nre] if nre >= 2 else [])
+        if flags:
+            suspects.append({"start": nt["start"], "end": nt["end"], "lane": lane, "note": nt.get("note") or
+                             name(nt["midi"]), "midi": nt["midi"], "flags": flags,
+                             "contrast_db": round(contrast, 1), "semitone_db": round(semi, 1),
+                             "perc_ratio": round(pr, 2), "level_db": round(on - ref, 1), "reattacks": nre})
+    nbm = (np.roll(Hdb, MISSED_NEIGHBOUR, 0) + np.roll(Hdb, -MISSED_NEIGHBOUR, 0)) / 2
     pk = ((Hdb >= np.roll(Hdb, 1, 0)) & (Hdb >= np.roll(Hdb, -1, 0)) & (Hdb - nbm > MISSED_PROMINENCE_DB)
           & (Hdb > ref - MISSED_LEVEL_DB))
     pk[:8] = pk[-8:] = False
     semi = np.rint(rows).astype(int)
     cover = np.zeros((MHI + 40, len(tf)), bool)
     for nt in allnotes:
-        fm = (tf >= nt["start"] - 0.05) & (tf <= nt["end"] + 0.05)
-        if fm.any():
-            for h in HARM:
-                m = int(nt["midi"]) + h
-                if m < cover.shape[0]:
-                    cover[max(0, m - 1):m + 2, fm] = True  # +-1 semitone slack
+        for h in HARM:
+            m = int(nt["midi"]) + h
+            if m < cover.shape[0]:
+                fm = (tf >= nt["start"] - 0.05 - smear(m)) & (tf <= nt["end"] + smear(m) + MISSED_TAIL_S)
+                cover[max(0, m - 1):m + 2, fm] = True  # +-1 semitone slack
     grid = np.zeros((MHI + 1, len(tf)), bool)
     for r in np.where(pk.any(1))[0]:
         grid[semi[r]] |= pk[r]
     grid &= ~cover[:MHI + 1]
     minlen, bridge = int(round(MISSED_MIN_S * sr / HOP)), int(round(MISSED_BRIDGE_S * sr / HOP))
-    runs = []
+    lowlen = int(round(MISSED_LOW_MIN_S * sr / HOP))
+    runs, hits = [], [h["time"] for h in v.get("drum_hits") or []]
     for m in range(MLO, MHI + 1):
         idx = np.where(grid[m])[0]
         if not len(idx):
@@ -255,8 +327,10 @@ def marks(np, v, an, t0, t1):
             if i is not None and i - pv <= bridge:
                 pv = i
                 continue
-            if pv - st + 1 >= minlen:
-                runs.append((m, float(tf[st]), float(tf[pv])))
+            a, b = float(tf[st]), float(tf[pv])
+            if pv - st + 1 >= (lowlen if m < BANDS[0][0] else minlen) and not (b - a < MISSED_DRUM_S[0] and any(
+                    h - smear(m) <= b and a <= h + smear(m) + MISSED_DRUM_S[1] for h in hits)):
+                runs.append((m, a, b))
             if i is not None:
                 st = pv = i
     missed = [{"start": round(a, 3), "end": round(b, 3), "midi": m, "note": name(m)} for m, a, b in sorted(runs, key=lambda r: (r[1], r[0]))
@@ -279,8 +353,7 @@ def render_marks(v, audio, page, out, out_json):
     sus, missed = marks(np, v, an, t0, t1)
     bad = {(s["lane"], s["start"], s["midi"]) for s in sus}
     tf, rows, Hdb = an["times"], an["rows"], an["Hdb"]
-    beats = [b for b in v.get("beats") or [] if t0 <= b <= t1]
-    first = sum(1 for b in v.get("beats") or [] if b < t0)
+    lines, grid_note = grid(v, t0, t1)
     notes = [(n, c, nm) for key, c, nm in LANES for n in v.get(key) or [] if n["end"] > t0 and n["start"] < t1]
     ms = [n["midi"] for n, _, _ in notes] + [r["midi"] for r in missed]
     lo, hi = max(MLO, (min(ms) if ms else 48) - 5), min(MHI, (max(ms) if ms else 72) + 5)
@@ -294,8 +367,7 @@ def render_marks(v, audio, page, out, out_json):
         ax.tick_params(colors="#aaaaaa")
         for sp in ax.spines.values():
             sp.set_color("#333")
-        for i, b in enumerate(beats, first):
-            ax.axvline(b, color="#555" if i % 4 == 0 else "#2e2e2e", lw=0.8 if i % 4 == 0 else 0.5, zorder=1)
+    draw_grid((axs, axr, axd), lines)
     m = (tf >= t0) & (tf <= t1)
     keep = (rows >= lo - 0.5) & (rows <= hi + 0.5)
     img = Hdb[keep][:, m]
@@ -339,6 +411,7 @@ def render_marks(v, audio, page, out, out_json):
     axd.text(0.005, 0.92, "percussive energy" + ("" if v.get("drum_hits") else " (no drum layer in the result)"),
              transform=axd.transAxes, color="#bbbbbb", fontsize=7, va="top")
     axd.set_xlabel("seconds   (marks: unvalidated heuristics, not accuracy)", color="#aaaaaa")
+    axr.text(0.005, 0.015, grid_note, transform=axr.transAxes, color="#bbbbbb", fontsize=7, va="bottom", zorder=5)
     used = [nm for _, _, nm in LANES if any(x == nm for _, _, x in notes)]
     nbad = sum(1 for n, _, nm in notes if (nm, n["start"], n["midi"]) in bad)
     fig.text(0.125, 0.92, "%s%s   %.1f-%.1f s   suspect (red dashed) %d/%d   missed (green dotted) %d" % (
@@ -410,8 +483,8 @@ def render_poster(v, audio, t0, t1, out, title, credit):
         ax.set_xlim(t0, t1)
     axr.imshow(img, origin="lower", aspect="auto", cmap="inferno", vmin=vmax - 50, vmax=vmax, alpha=0.55,
                interpolation="bilinear", extent=[tf[m][0], tf[m][-1], lo - 0.5, hi + 0.5])
-    for i, b in enumerate([b for b in v.get("beats") or [] if t0 <= b <= t1], sum(1 for b in v.get("beats") or [] if b < t0)):
-        axr.axvline(b, color=POSTER["grid"], lw=1.2 if i % 4 == 0 else 0.5, alpha=1 if i % 4 == 0 else 0.6, zorder=1)
+    for t, bar in grid(v, t0, t1)[0]:
+        axr.axvline(t, color=POSTER["grid"], lw=1.2 if bar else 0.5, alpha=1 if bar else 0.6, zorder=1)
     axr.set_ylim(lo - 0.5, hi + 0.5)
     fig.canvas.draw()
     bb = axr.get_window_extent()
