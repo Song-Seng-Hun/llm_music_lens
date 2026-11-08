@@ -28,11 +28,17 @@ DRUMS = ("kick", "snare", "hihat", "tom", "cymbal")
 DRUM_COLORS = ("#ff4d4d", "#ffd84d", "#5cf2b0", "#b28cff", "#cccccc")
 
 
-# Multi-resolution STFT: each pitch band gets a window long enough to split semitones there (a Hann main lobe of
-# 2 bins = 4 sr/N Hz is under one semitone, 0.0595 f, near each band's low end); frames share centres and hop, so
+# Multi-resolution STFT: each pitch band gets a longer window lower down, so two tones a semitone apart show as two
+# peaks (a Hann main lobe's half width, 2 sr/N Hz, is under a semitone, 0.0595 f, from about MIDI 42 / 54 in the
+# upper bands and from about MIDI 29 in the lowest; below 29 neighbours merge); frames share centres and hop, so
 # the time axis matches the note boxes; magnitudes are divided by the window sum, so a steady tone reads the same
 # level in every band. Low rows trade time detail for pitch detail (the 0.74 s window smears onsets by ~0.3 s).
 BANDS = ((45, 0.743), (57, 0.372), (MHI + 1, 0.186))  # (below MIDI, window s): 32768 / 16384 / 8192 at 44.1 kHz
+
+
+def smear(m):
+    """Half the window (s) of the band pitch m is in: energy shows this long before an onset and after an end."""
+    return next((sec for top, sec in BANDS if m < top), BANDS[-1][1]) / 2
 
 
 def window(sr, sec):
@@ -97,15 +103,16 @@ def grid(v, t0, t1):
     other beats lighter when the result has a bar layer; else every 4th beat counted from the first beat, said so."""
     beats = v.get("beats") or []
     rows = (sheet.done(v, "bars") or {}).get("rows") or []
-    if rows:
-        bars = sorted({r["start"] for r in rows} | {rows[-1]["end"]})
+    bars = sorted({r["start"] for r in rows} | {rows[-1]["end"]}) if rows else []
+    if any(t0 <= t <= t1 for t in bars[:-1]):  # bars that end before the page (older results) leave it to the beats
         lines = [(t, True) for t in bars if t0 <= t <= t1]
         lines += [(t, False) for t in beats if t0 <= t <= t1 and all(abs(t - u) > 0.06 for u in bars)]
         bpb = sheet.meter(v)[0]
         return sorted(lines), "bar lines at downbeats" + (" (%d beats per bar)" % bpb if bpb else "")
     first = sum(1 for t in beats if t < t0)  # beat count from the song's first beat
     lines = [(t, i % 4 == 0) for i, t in enumerate([t for t in beats if t0 <= t <= t1], first)]
-    return lines, "beats counted from the first beat (every 4th darker); no downbeats in this result"
+    return lines, "beats counted from the first beat (every 4th darker); no downbeats " + (
+        "on this page" if bars else "in this result")
 
 
 def draw_grid(axes, lines):
@@ -200,6 +207,7 @@ DRUM_ABOVE, QUIET_BELOW_DB = 0.25, 20.0  # vs the median percussive share / leve
 REATTACK_DB, REATTACK_LAG, REATTACK_GAP = 6.0, 0.03, 0.1
 MISSED_LEVEL_DB, MISSED_PROMINENCE_DB, MISSED_MIN_S, MISSED_BRIDGE_S = 20.0, 12.0, 0.15, 0.05
 MISSED_TAIL_S = 0.3  # after a note ends, its pitches (and harmonics) still ring: not missed for this long
+MISSED_LOW_MIN_S = 0.4  # below BANDS[0][0] the 0.74 s window cannot place shorter runs: treat them as smear
 MISSED_DRUM_S = 0.4, 0.2  # a run shorter than [0] within the smear of a drum hit (+[1] s after) is the drum
 MISSED_NEIGHBOUR = 4  # rows (1/3 semitone) each side a missed peak is compared with
 
@@ -248,16 +256,24 @@ def marks(np, v, an, t0, t1):
             if fm.sum() < 2 or len(near(nt["midi"], 1 / 3)) == 0:
                 continue
 
-            def level(m):
-                return float(Hdb[near(m, 1 / 3)][:, fm].max(0).mean())
+            def level(m, frames=fm):
+                return float(Hdb[near(m, 1 / 3)][:, frames].max(0).mean())
             on = level(nt["midi"])
             nb_r = np.concatenate([near(nt["midi"] - 2.5, 0.5), near(nt["midi"] + 2.5, 0.5)])
             contrast = on - (float(Hdb[nb_r][:, fm].mean()) if len(nb_r) else on)
-            # a semitone neighbour that another sounding note (or its harmonics) explains is not evidence
-            sounding = [o["midi"] + h for o in allnotes if o is not nt and o["start"] < nt["end"] and o["end"] >
-                        nt["start"] for h in HARM]
-            side = [level(nt["midi"] + d) - on for d in (-1, 1) if MLO <= nt["midi"] + d <= MHI and
-                    not any(abs(nt["midi"] + d - m) < 0.5 for m in sounding)]
+            # a semitone neighbour is compared only on frames no other note (or its harmonics) at that pitch reaches,
+            # widened by the band's smear: the long low windows spread a written neighbour into this note's span
+            sm, side = smear(nt["midi"]), []
+            for d in (-1, 1):
+                nm = nt["midi"] + d
+                if not MLO <= nm <= MHI:
+                    continue
+                keep = fm.copy()
+                for o in allnotes:
+                    if o is not nt and any(abs(o["midi"] + h - nm) < 0.5 for h in HARM):
+                        keep &= ~((tf >= o["start"] - sm) & (tf <= o["end"] + sm))
+                if keep.sum() >= 2:
+                    side.append(level(nm, keep) - level(nt["midi"], keep))
             semi = max(side) if side else -99.0
             band = near(nt["midi"], 1)
             pr = float(Pm[band][:, fm].sum() / (M[band][:, fm].sum() + 1e-12))
@@ -288,9 +304,6 @@ def marks(np, v, an, t0, t1):
           & (Hdb > ref - MISSED_LEVEL_DB))
     pk[:8] = pk[-8:] = False
     semi = np.rint(rows).astype(int)
-
-    def smear(m):  # half the window of the band row m is in: energy shows this long before an onset / after an end
-        return next((sec for top, sec in BANDS if m < top), BANDS[-1][1]) / 2
     cover = np.zeros((MHI + 40, len(tf)), bool)
     for nt in allnotes:
         for h in HARM:
@@ -303,6 +316,7 @@ def marks(np, v, an, t0, t1):
         grid[semi[r]] |= pk[r]
     grid &= ~cover[:MHI + 1]
     minlen, bridge = int(round(MISSED_MIN_S * sr / HOP)), int(round(MISSED_BRIDGE_S * sr / HOP))
+    lowlen = int(round(MISSED_LOW_MIN_S * sr / HOP))
     runs, hits = [], [h["time"] for h in v.get("drum_hits") or []]
     for m in range(MLO, MHI + 1):
         idx = np.where(grid[m])[0]
@@ -314,7 +328,7 @@ def marks(np, v, an, t0, t1):
                 pv = i
                 continue
             a, b = float(tf[st]), float(tf[pv])
-            if pv - st + 1 >= minlen and not (b - a < MISSED_DRUM_S[0] and any(
+            if pv - st + 1 >= (lowlen if m < BANDS[0][0] else minlen) and not (b - a < MISSED_DRUM_S[0] and any(
                     h - smear(m) <= b and a <= h + smear(m) + MISSED_DRUM_S[1] for h in hits)):
                 runs.append((m, a, b))
             if i is not None:

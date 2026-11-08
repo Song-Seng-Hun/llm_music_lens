@@ -440,6 +440,17 @@ class RealMarksTest(unittest.TestCase):
                        [(60, 0.5, 2.0), (60, 3.0, 5.0)])
         self.assertEqual([x["note"] for x in m["missed"]], ["E4"])
 
+    def test_chromatic_bass_passing_not_semitone(self):  # PR 64 review: low-band smear of written neighbours
+        passing = [(36, 0.5, 1.5), (37, 1.5, 1.65), (38, 1.65, 2.65), (39, 2.65, 2.8), (36, 2.8, 3.8), (37, 3.8, 3.95),
+                   (38, 3.95, 4.95), (39, 4.95, 5.1)]
+        m = self.marks([(n, a, b, None) for n, a, b in passing], [], passing)
+        self.assertEqual([s["flags"] for s in m["suspects"] if "semitone" in s["flags"]], [])
+
+    def test_chromatic_bass_eighths_not_missed(self):  # PR 64 review: short low runs between written eighths
+        eighths = [(n, 0.5 + i * 0.22, 0.72 + i * 0.22) for i, n in enumerate([36, 37, 38, 39, 40, 39, 38, 37] * 3)]
+        m = self.marks([(n, a, b, None) for n, a, b in eighths], [], eighths)
+        self.assertEqual(m["missed"], [])
+
     def test_ringing_tail_not_missed(self):  # the tone rings 0.25 s past the written end
         m = self.marks([(57, 0.5, 3.0, None), (64, 3.5, 5.0, None)], [], [(57, 0.5, 2.75), (64, 3.5, 5.0)])
         self.assertEqual(m["missed"], [])
@@ -522,6 +533,14 @@ class GridTest(unittest.TestCase):
         self.assertIn("no downbeats", note)
         self.assertEqual([t for t, bar in roll.grid(v, 1.2, 10.0)[0] if bar], [2.5, 4.5])  # counted from the song start
         self.assertIn("no downbeats", roll.grid({"beats": []}, 0.0, 1.0)[1])
+
+    def test_bars_ending_before_page(self):  # older results: the bar layer stops short of the song's end
+        v = {"beats": [0.5 * i for i in range(1, 41)],
+             "bars": {"status": "done", "beats_per_bar": 4, "rows": [{"start": 0.5, "end": 2.5}, {"start": 2.5, "end": 4.5}]}}
+        lines, note = roll.grid(v, 10.0, 20.0)
+        self.assertEqual([t for t, bar in lines if bar], [10.5, 12.5, 14.5, 16.5, 18.5])
+        self.assertEqual(note, "beats counted from the first beat (every 4th darker); no downbeats on this page")
+        self.assertEqual(roll.grid(v, 0.0, 5.0)[1], "bar lines at downbeats (4 beats per bar)")
 
 
 @unittest.skipUnless(os.path.isfile(ROLL_PY), "unverified: set MUSIC_LENS_ROLL_PYTHON to a python with numpy and matplotlib")
