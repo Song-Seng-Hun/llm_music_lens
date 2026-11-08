@@ -11,33 +11,40 @@
 
 A program that pulls beat, harmony, note, lyric and energy cues out of audio and hands them to an AI (LLM), so it can analyze music while citing evidence.
 
+<p align="center"><img src="../assets/music-viz.png" width="800" alt="Music Lens poster: a spectrogram on a pitch axis with the detected accompaniment notes drawn as cyan lines and the bass notes as orange lines. Chord names such as A7, A and E run along the top, snare and kick hits along the bottom, and the header reads 102 BPM, D minor, 4–19 s."></p>
+<p align="center"><sub>Music Lens visualization of 4–19 s of a 50 s excerpt. Music: <a href="https://www.incompetech.com/music/royalty-free/index.html?isrc=USUAN1100763">“Aces High”</a> by Kevin MacLeod (incompetech.com), <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a></sub></p>
+
 ## What is it?
 
-Give it a song, and it lays out, along the timeline, the BPM, where the beats are, which chords and notes sounded when, and where each lyric word falls against the beat. You can look at the results on screen and check them against the original audio, export them as JSON, Markdown or an "AI 팀 전달문" (AI team hand-off note), or hand them straight to an AI over MCP. It is made for evidence in music analysis, composition references, reading a style and planning video.
+Give it a song, and it lays out, along the timeline, the BPM, where the beats are, which chords and notes sounded when, and where each lyric word falls against the beat. You can look at the results on screen and check them against the original audio, export them as JSON, Markdown or a summary note for an AI, or hand them straight to an AI over MCP. It is made for evidence in music analysis, composition references, reading a style and planning video.
 
 There are two ways to use it.
 
 - **Web app**: open a file in the browser and analyze it there. Audio analyzed in the browser never leaves it.
-- **MCP server**: the server analyzes the audio and a connected AI (for example ChatGPT) reads the results inside the conversation. No personal model API key is needed. Publishing the site and connecting the team are not yet verified.
+- **MCP server**: the server analyzes the audio and a connected AI (for example ChatGPT) reads the results inside the conversation. No personal model API key is needed. Publishing the site and connecting it to an AI are not yet verified.
 
 ## Features
 
 - **Detailed analysis**: BPM and the beat grid, half/double-tempo candidates, low/mid/high attacks, chord and key candidates, the start, end and pitch of polyphonic notes, and energy changes
-- **Solo-voice notes (optional)**: the SOME model, made for unaccompanied singing, extracts notes and a continuous pitch curve.
+- **Solo-voice notes (optional)**: the SOME model for unaccompanied singing extracts notes and a continuous pitch curve.
 - **Lyric word transcription (optional)**: Whisper estimates when each word starts and ends, and finds the nearest beat and the notes and chords sounding at the same time.
 - **Check against the original**: piano roll, clickable words and change regions, playback and seeking in the original audio
-- **Hand-off to AI**: JSON, a Markdown summary, the "AI 팀 전달문" and MCP tools
-- **Server analysis tools (MCP)**: beat and BPM, waveform dynamics, spectral texture, attacks against the beat, pitch of an isolated vocal, whole-song transition candidates, and a timeline joining several segments
+- **Hand-off to AI**: JSON, a Markdown summary, a summary note for an AI, and MCP tools
 - **Save and import**: a per-user library for signed-in users (up to 1.9 MB of UTF-8 JSON). Audio is not stored.
-- **Mac analysis server (`lan/`)**: a separate server that lets AI teammates on the same router use the Mac's analysis through signed requests
+- **Mac analysis server (`lan/`)**: a separate server that analyzes songs on the Mac and lets other computers on your home network use it through signed requests
 - **Reading the arrangement by part (Mac analysis server, optional)**: separates vocals, bass and drums to read their notes and hits, and adds accompaniment notes, chords and the song's sections. Each section also says which parts are on, so you can see how the arrangement builds.
 - **Genre estimate (Mac analysis server, optional)**: Discogs styles (e.g. Pop---J-pop) and parent genres (Pop, Rock, ...) with scores, for the whole song and every 30 s window.
 
 ## Quick start
 
-On Windows, run `Start-MusicLens.cmd` in this folder and open `http://127.0.0.1:5173/`. Press Ctrl+C in the terminal it started to stop it.
+On Windows, run `Start-MusicLens.cmd` in the repository folder and open `http://127.0.0.1:5173/`. On macOS and Linux, run these two lines in the `web` folder. Either way, press Ctrl+C in that terminal to stop it.
 
-For a first setup you need Node.js 22.13 or later and a GitHub account with access to the repository.
+```sh
+npm run db:local
+npm run dev -- --host 127.0.0.1
+```
+
+For a first setup you need Node.js 22.13 or later. The repository is private: you can clone it only with a GitHub account that has been given access.
 
 ```sh
 git clone https://github.com/Song-Seng-Hun/llm_music_lens.git
@@ -50,22 +57,22 @@ npm run dev -- --host 127.0.0.1
 
 When the page opens, choose a file and press **정밀 분석 시작** (start detailed analysis). With no file, a 16-second synthetic demo lets you look around first.
 
+The Mac analysis server is set up separately. What it needs and how to install it: [Mac analysis server](../lan/README.md).
+
 ## Examples
 
 ### Analyze a song and hand it to an AI
 
 1. Choose a file and start detailed analysis. For lyrics, pick a Whisper model and a language.
 2. Click the piano roll and words to check them against the original audio.
-3. Export the "AI 팀 전달문" or the JSON into your conversation with the AI. The on-screen summary and the hand-off note do not replace the full JSON.
+3. Download the summary note (the **AI 팀 전달문** button) or the JSON and attach it to your conversation with the AI. The on-screen summary and the note do not replace the full JSON.
 
 ### Reading the genre estimate (Mac analysis server)
 
-When you ask the Mac analysis server for rhythm analysis as well (`rhythm=1`), the result carries `genre`.
+The Mac analysis server scores Discogs styles (written "Parent---Style", e.g. `Pop---J-pop`) and parent genres for the whole song and for every 30 seconds. How to ask for them: [Mac analysis server](../lan/README.md#genre).
 
-- **Whole song**: the top 5 Discogs styles (written "Parent---Style", e.g. `Pop---J-pop`) and the top 5 parent genres (Pop, Rock, Electronic, ...)
-- **Per 30 s window**: the top 3 styles of each window, fetched with the timeline call (`layer=genre`).
 - **Reading the scores**: each genre is scored on its own, so the scores do not add up to 1 and are not probabilities. Read the ranking, not the number.
-- The first pick is wrong for about one or two songs in four, but the right genre is usually in the top 3. Genres with blurry edges such as Pop, and per-window results, are less reliable. Measurements: [Genre estimate accuracy](genre-accuracy.md).
+- Look at the top 3 together, not only the first. Genres with blurry edges such as Pop, and per-window results, are less reliable. Measurements: [Genre estimate accuracy](genre-accuracy.md).
 
 ### Let an AI analyze on the server (MCP)
 
@@ -84,10 +91,12 @@ Once the site is published and connected to an AI, the AI calls these tools duri
 - Every result is `accuracy: unvalidated`. Measurements on synthetic audio, public speech and a few songs do not stand for accuracy on real songs in general.
 - Notes can include accompaniment, overtones and false detections, so they are not a real score. Chords and keys are withheld when the evidence is thin.
 - Lyric transcription can make up or miss words in singing, fast rap and multiple voices.
-- Instruments and emotion are not decided automatically. Genre comes only as a model estimate from the Mac analysis server's rhythm layer, not from the web app or the site's MCP tools. Reading the style is the AI's job, citing sources and time ranges.
-- Publishing the site, connecting the team and per-user report access have not yet been confirmed over a real authenticated connection.
+- Instruments and emotion are not decided automatically. Genre comes only as a model estimate from the Mac analysis server's rhythm layer, not from the web app or the site's MCP tools. Reading the style is up to the AI, which should name the sources and time ranges it relies on.
+- Publishing the site, connecting it to an AI, and per-user report access have not yet been confirmed over a real authenticated connection.
 
 ## Models and licenses
+
+The repository's own code is [MIT](../LICENSE). The components below follow their own terms.
 
 | Component | Used for | License |
 |---|---|---|
@@ -98,9 +107,13 @@ Once the site is published and connected to an AI, the AI calls these tools duri
 | [Whisper large-v3](https://huggingface.co/mlx-community/whisper-large-v3-mlx) MLX conversion (installed separately on the Mac server) | Lyric word transcription on the Mac server | MIT |
 | [Essentia](https://essentia.upf.edu/) and a TempoCNN model (installed separately on the Mac server) | Optional rhythm layer | Essentia AGPL-3.0; model terms not verified |
 | Essentia Discogs-EffNet and genre_discogs400 models (installed separately on the Mac server) | Genre estimate in the optional rhythm layer | CC BY-NC-ND 4.0 |
+| [BTC](https://github.com/jayg996/BTC-ISMIR19) (installed separately on the Mac server) | Chord recognition in the optional rhythm layer | MIT |
+| [Spotify Basic Pitch](https://github.com/spotify/basic-pitch) (installed separately on the Mac server) | Bass note onsets in the optional rhythm layer | Apache-2.0 |
+| [ADTOF](https://github.com/MZehren/ADTOF) weights (installed separately on the Mac server) | Drum hits in the optional rhythm layer | CC BY-NC-SA 4.0 |
 | Transformers.js · ONNX Runtime Web · TensorFlow.js | Running models in the browser | Apache-2.0 · MIT · Apache-2.0 |
 
-- The SOME model (CC BY-NC-SA 4.0) and the Discogs genre models (CC BY-NC-ND 4.0) may only be used non-commercially.
+- The SOME model (CC BY-NC-SA 4.0), the Discogs genre models (CC BY-NC-ND 4.0) and the ADTOF weights (CC BY-NC-SA 4.0) may only be used non-commercially.
+- The ADTOF weights were trained on rhythm-game charts made for commercial music, and are not included in this repository.
 - License texts for the included components are in [web/public/licenses/](../web/public/licenses/README.md) and [web/models/beat-this/](../web/models/beat-this/README.md).
 
 ## More
