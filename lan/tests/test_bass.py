@@ -131,6 +131,9 @@ cfg = json.loads(sys.argv[2])
 if cfg.get("rows"):
     print(json.dumps(rw.bass_rows(np.array(cfg["rows"]["f0"], dtype=float), cfg["rows"]["starts"])))
     sys.exit(0)
+if cfg.get("tidy"):
+    print(json.dumps(rw.bass_tidied(cfg["tidy"]["rows"], cfg["tidy"]["notes"])))
+    sys.exit(0)
 if cfg.get("confirm"):
     print(json.dumps(rw.bass_confirmed(cfg["confirm"]["rows"], cfg["confirm"]["notes"])))
     sys.exit(0)
@@ -328,6 +331,43 @@ class BassRealModelTest(unittest.TestCase):
         self.assertLessEqual(len([r for r in got["rows"] if r["start"] < 3.9]), 8)
         found = [m for t0, m in got["truth"] if any(abs(r["start"] - t0) <= 0.08 and r["midi"] == m for r in got["rows"])]
         self.assertGreaterEqual(len(found), len(got["truth"]) - 1, got["rows"])  # the bass on the kick stays
+
+
+@unittest.skipUnless(os.path.isfile(ESSENTIA_PY), "Essentia python missing")
+class BassTidyTest(unittest.TestCase):
+    """0.26.0: same-pitch pieces join, late starts move back to Basic Pitch's (fake rows and notes, no models)."""
+    def tidy(self, rows, notes):
+        d = tempfile.mkdtemp(prefix="mlbasstidy-")
+        try:
+            drv = os.path.join(d, "driver.py")
+            with open(drv, "w") as f:
+                f.write(DRIVER)
+            p = subprocess.run([ESSENTIA_PY, "-I", drv, REPO, json.dumps({"tidy": {"rows": rows, "notes": notes}})],
+                               capture_output=True, timeout=60)
+            self.assertEqual(p.returncode, 0, p.stderr[-800:])
+            return [(r["start"], r["end"], r["midi"]) for r in json.loads(p.stdout)]
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    @staticmethod
+    def rows(*spec):
+        return [{"start": a, "end": b, "midi": m, "note": "x"} for a, b, m in spec]
+
+    def test_join(self):
+        self.assertEqual(self.tidy(self.rows((0.0, 0.5, 40), (0.54, 1.0, 40)), []), [(0.0, 1.0, 40)])  # 40 ms apart, joined
+        self.assertEqual(self.tidy(self.rows((0.0, 0.5, 40), (0.5, 1.0, 40)), [[0.51, 1.0, 41]]),
+                         [(0.0, 0.5, 40), (0.5, 1.0, 40)])  # a Basic Pitch start on the join (a semitone off): two notes
+        self.assertEqual(self.tidy(self.rows((0.0, 0.5, 40), (0.56, 1.0, 40)), []), [(0.0, 0.5, 40), (0.56, 1.0, 40)])  # 60 ms
+        self.assertEqual(self.tidy(self.rows((0.0, 0.5, 40), (0.52, 1.0, 43)), []), [(0.0, 0.5, 40), (0.52, 1.0, 43)])  # other pitch
+
+    def test_snap(self):
+        self.assertEqual(self.tidy(self.rows((1.0, 1.5, 40)), [[0.82, 1.4, 40]]), [(0.82, 1.5, 40)])  # moved back
+        self.assertEqual(self.tidy(self.rows((1.0, 1.5, 40)), [[0.82, 1.4, 42]]), [(1.0, 1.5, 40)])  # two semitones: not moved
+        self.assertEqual(self.tidy(self.rows((1.0, 1.5, 40)), [[0.7, 1.4, 40]]), [(1.0, 1.5, 40)])  # over 250 ms: not moved
+        self.assertEqual(self.tidy(self.rows((1.0, 1.5, 40)), [[0.9, 0.99, 40], [1.01, 1.5, 40]]), [(1.0, 1.5, 40)])  # just after
+        self.assertEqual(self.tidy(self.rows((1.0, 1.5, 40)), [[0.8, 0.9, 40], [0.9, 1.5, 40]]), [(0.9, 1.5, 40)])  # the latest
+        self.assertEqual(self.tidy(self.rows((0.5, 0.9, 43), (1.0, 1.5, 40)), [[0.8, 1.4, 40]]),
+                         [(0.5, 0.9, 43), (0.9, 1.5, 40)])  # never before the row ahead ends
 
 
 class BassPinTest(unittest.TestCase):
