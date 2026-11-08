@@ -22,6 +22,7 @@ Usage: <essentia python> -I rhythm_worker.py [--words-stdin] WAV
        --drum-model /abs/checkpoint.index (0.9.0; with the Demucs options: a drum layer, see "Drum hits" in README.md)
        With the Demucs options, 0.13.0 adds part activity per section, see "Part activity" in README.md.
        With the section model, 0.14.0 adds downbeats and bars, and 0.15.0 a scale and degree per bar, and 0.16.0 swing, and 0.18.0 a bar's two chords, and 0.22.0 beats per bar, and 0.23.0 bars to the song end (extended_rows), and 0.24.0 the key_changes warning from bar scales, see "Musical units" in README.md.
+       0.25.0 keeps a bass note only where Basic Pitch hears a note within a semitone of it, see "Bass notes" in README.md.
 WAV is the server's already-validated canonical file (PCM mono 16 kHz s16, 0 < duration <= 600 s).
 --words-stdin (0.4.3; the server always passes it): stdin holds one JSON object {"words": [[text, start, end], ...]}
 (the ASR words of the same result) or {"words": null, "reason": code} (the server could not provide them), at most
@@ -198,7 +199,7 @@ import time
 import unicodedata
 import wave
 
-TOOL = {"name": "music-lens-rhythm-worker", "version": "0.24.0"}
+TOOL = {"name": "music-lens-rhythm-worker", "version": "0.25.0"}
 SRC_RATE = 16000
 RATE = 44100
 MAX_SECONDS = 600.0
@@ -315,14 +316,18 @@ BTC_MAX_FRAMES = 8000  # 600 s at 10.8 frames per second, with room to spare
 CHORD_VOCABULARY = "BTC large vocabulary: 12 roots with m, maj, dim, aug, 6, m6, 7, maj7, m7, mMaj7, dim7, m7b5, sus2, sus4; N none, X unknown"
 # Bass notes (0.8.0, optional): Demucs bass stem, RMVPE for the pitch, Basic Pitch note starts to split repeated notes.
 # Settings and the checks behind them come from listening tests; note ends are weak, so reliability stays low_reference.
+# 0.25.0: RMVPE labels any voiced low energy, so Demucs's kick and tom ring in the bass stem came out as notes. A note is kept
+# only when a Basic Pitch note within BASS_CONFIRM_SEMIS overlaps it (synthetic drums, bass and bass-on-kick clips and one
+# drum-only song; numbers in the PR, no real bass clip to check against).
 BASS_DEMUCS_ARGS = ("-n", "htdemucs_ft", "--stem", "bass", "-b", "1", "--seed", "0")
 BASS_ONSETS_CODE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bass_onsets.py")
-BASS_ONSETS_SHA256 = "3c0f91abb732b432463aea9fca4c7372fc164eba16179118da996be54994fd30"
+BASS_ONSETS_SHA256 = "d72f4e1e3364140239c55a92c90277a71dbd4ed861421482130ea994e5fe4e50"
 BASS_ONSETS_MAX_BYTES = 16 * 1024
 BASS_MIN_FRAMES, BASS_JOIN_FRAMES = 8, 20  # at RMVPE's 10 ms: shortest note 80 ms, same pitch joins across 200 ms
+BASS_CONFIRM_SEMIS = 1  # Basic Pitch and RMVPE may round a detuned note to neighbouring semitones
 BASS_MAX_NOTES = 7500  # 600 s / the 80 ms shortest note
-BASS_METHOD = ("Demucs htdemucs_ft bass at 44.1 kHz, RMVPE pitch on CPU, same-pitch notes split at Basic Pitch note "
-               "starts. Pitch is the sounding pitch; note ends are weak.")
+BASS_METHOD = ("Demucs htdemucs_ft bass at 44.1 kHz, RMVPE pitch on CPU, split at Basic Pitch note starts, kept where a "
+               "Basic Pitch note is within a semitone. Sounding pitch; note ends are weak.")
 BASS_FAIL_REASONS = ("models_invalid", "decode_failed", "separation_failed", "rmvpe_failed", "onsets_failed")
 # Drum hits (0.9.0, optional): Demucs drum stem, then ADTOF Frame_RNN. Measured on 23 songs of MDB Drums; tom is weak.
 DRUM_DEMUCS_ARGS = ("-n", "htdemucs_ft", "--stem", "drums", "-b", "1", "--seed", "0")
@@ -1615,6 +1620,20 @@ def bass_rows(f0, starts):
             for a, b, x in out[:BASS_MAX_NOTES]]
 
 
+def bass_confirmed(rows, notes):
+    """Rows that a Basic Pitch note [start, end, midi] within BASS_CONFIRM_SEMIS overlaps in time; drum ring has none."""
+    import bisect
+    notes = sorted(notes)
+    starts = [n[0] for n in notes]
+    span = max([e - s for s, e, _ in notes], default=0.0)
+    out = []
+    for r in rows:  # only the notes that start in (row start - longest note, row end) can overlap it
+        lo, hi = bisect.bisect_right(starts, r["start"] - span), bisect.bisect_left(starts, r["end"])
+        if any(e > r["start"] and abs(m - r["midi"]) <= BASS_CONFIRM_SEMIS for _, e, m in notes[max(0, lo - 1):hi]):
+            out.append(r)
+    return out
+
+
 def bass_stem_notes(sep, n16):
     """(rows, None) or (None, reason). The scratch already holds full.wav."""
     import numpy as np
@@ -1643,10 +1662,11 @@ def bass_stem_notes(sep, n16):
     if run_tool([sep["basic_pitch"], "-I", BASS_ONSETS_CODE, stem_wav, onsets]):
         return None, "onsets_failed"
     with open(onsets) as f:
-        starts = json.load(f)
-    if not (isinstance(starts, list) and all(isinstance(t, (int, float)) and math.isfinite(t) for t in starts)):
+        notes = json.load(f)
+    if not (isinstance(notes, list) and all(isinstance(n, list) and len(n) == 3 and all(
+            isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) for x in n) for n in notes)):
         return None, "onsets_failed"
-    return bass_rows(f0, starts), None
+    return bass_confirmed(bass_rows(f0, [n[0] for n in notes]), notes), None
 
 
 def bass_input(sep, n16, vocal_reason):

@@ -1046,6 +1046,12 @@ What happens on a rhythm request: Demucs gives the bass stem from the same 44.1 
 pitch, and same-pitch notes split at Basic Pitch note starts. Notes under 80 ms are dropped and a same-pitch gap up to 200 ms
 joins unless a start falls on the first frame after it. A 16 kHz WAV upload or band-limited audio has no bass layer.
 
+From worker 0.25.0 a note is kept only when a Basic Pitch note within a semitone overlaps it. RMVPE gives a pitch to any voiced
+low energy, and Demucs leaves kick and tom ring in the bass stem, so drum-only music used to get bass notes; Basic Pitch hears
+no note there. A starting kick is not a reason to drop a note: bass is often played with the kick. Limits: a tom with a clear
+pitch is a note to Basic Pitch too and can stay; the check was measured on synthetic clips and one drum-only song, with no real
+recording of bass to confirm that no true notes are lost. Results stored before 0.25.0 keep their notes until analysed again.
+
 `rhythm.bass` is `{status: "done", method, reliability: "low_reference", note_count}` or `{status: "skipped", reason}`. Read
 the rows with `/timeline` `layer=bass`: `{start, end, midi, note}`, where `midi` is the sounding pitch. Reasons:
 `canonical_16k`, `band_limited`, and the failures `models_invalid`, `decode_failed`, `separation_failed`, `rmvpe_failed`,

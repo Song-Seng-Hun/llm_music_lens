@@ -1,7 +1,8 @@
-"""Note starts of a bass stem from Spotify Basic Pitch (Apache-2.0), run by rhythm_worker.py in its own environment.
+"""Notes of a bass stem from Spotify Basic Pitch (Apache-2.0), run by rhythm_worker.py in its own environment.
 
 Usage: <basic-pitch python> -I bass_onsets.py IN.wav OUT.json
-IN.wav is PCM mono 16 kHz s16. OUT.json holds a list of note start times in seconds. The model file is pinned here.
+IN.wav is PCM mono 16 kHz s16. OUT.json holds a list of [start, end, midi] per note, times in seconds, sorted by start.
+The model file is pinned here.
 """
 import hashlib
 import json
@@ -19,7 +20,7 @@ def main(wav, out):
             return 5
     _, _, events = predict(wav, MODEL)
     with open(out, "w") as f:
-        json.dump(sorted(float(e[0]) for e in events), f)
+        json.dump(sorted([float(e[0]), float(e[1]), int(e[2])] for e in events), f)
     return 0
 
 
