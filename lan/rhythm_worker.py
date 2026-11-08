@@ -317,11 +317,11 @@ CHORD_VOCABULARY = "BTC large vocabulary: 12 roots with m, maj, dim, aug, 6, m6,
 # Bass notes (0.8.0, optional): Demucs bass stem, RMVPE for the pitch, Basic Pitch note starts to split repeated notes.
 # Settings and the checks behind them come from listening tests; note ends are weak, so reliability stays low_reference.
 # 0.25.0: RMVPE labels any voiced low energy, so Demucs's kick and tom ring in the bass stem came out as notes. A note is kept
-# only when a Basic Pitch note within BASS_CONFIRM_SEMIS overlaps it (synthetic drums, bass and bass-on-kick clips and one
-# drum-only song; numbers in the PR, no real bass clip to check against).
+# only when a Basic Pitch note (down to 80 ms) within BASS_CONFIRM_SEMIS overlaps it (synthetic drums, bass and
+# bass-on-kick clips and one drum-only song; numbers in the PR, no real bass clip to check against).
 BASS_DEMUCS_ARGS = ("-n", "htdemucs_ft", "--stem", "bass", "-b", "1", "--seed", "0")
 BASS_ONSETS_CODE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bass_onsets.py")
-BASS_ONSETS_SHA256 = "d72f4e1e3364140239c55a92c90277a71dbd4ed861421482130ea994e5fe4e50"
+BASS_ONSETS_SHA256 = "6a8842bc6bb14b111959020f7354b183c598e247a87ee6b825f61b3c359932de"
 BASS_ONSETS_MAX_BYTES = 16 * 1024
 BASS_MIN_FRAMES, BASS_JOIN_FRAMES = 8, 20  # at RMVPE's 10 ms: shortest note 80 ms, same pitch joins across 200 ms
 BASS_CONFIRM_SEMIS = 1  # Basic Pitch and RMVPE may round a detuned note to neighbouring semitones
@@ -1621,7 +1621,8 @@ def bass_rows(f0, starts):
 
 
 def bass_confirmed(rows, notes):
-    """Rows that a Basic Pitch note [start, end, midi] within BASS_CONFIRM_SEMIS overlaps in time; drum ring has none."""
+    """Rows that a Basic Pitch note [start, end, midi] within BASS_CONFIRM_SEMIS overlaps in time; drum ring has none.
+    No octave tolerance: on the drum-only song it kept 6 rows that are drum ring."""
     import bisect
     notes = sorted(notes)
     starts = [n[0] for n in notes]

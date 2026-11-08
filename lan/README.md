@@ -16,7 +16,7 @@ Nothing here is installed. No LaunchAgent, firewall rule, certificate or key is 
 | `rhythm_worker.py` | Optional rhythm layer worker (Essentia DSP plus pinned local models: TempoCNN, Discogs-EffNet + genre head): BPM (+ half/double, + learned TempoCNN estimate), beats, key (+ 20 s sections), beat-grid chords, 1 s energy curve, repeated-section structure (A/B/...), melody feature summary (predominant pitch notes), genre/style estimate (song + 30 s windows). Runs under the Essentia python, never in the listener |
 | `rmvpe_model.py` | Optional vocal melody: RMVPE inference on CPU, run by `rhythm_worker.py` as its own process (reduced from RVC-Project, MIT) |
 | `btc_model.py` | Optional chords: BTC inference on CPU, run by `rhythm_worker.py` as its own process (reduced from BTC-ISMIR19, MIT) |
-| `bass_onsets.py` | Optional bass layer: Basic Pitch note starts, run by `rhythm_worker.py` in its own environment |
+| `bass_onsets.py` | Optional bass layer: Basic Pitch notes `[start, end, midi]` (starts to split notes, pitches to confirm them), run by `rhythm_worker.py` in its own environment |
 | `other_notes.py` | Optional accompaniment layer: Basic Pitch notes of the other stem, run by `rhythm_worker.py` in its own environment |
 | `adtof_model.py` | Optional drum layer: ADTOF Frame_RNN inference on CPU, run by `rhythm_worker.py` as its own process (separate implementation, reads the official checkpoint) |
 | `limit_exec.py` | Sets RLIMIT_CPU 60 s / FSIZE 24 MiB / NOFILE 32, then `execv /usr/bin/afconvert -f WAVE -d LEI16@16000 -c 1 src dst`. Two more fixed modes for the ear check: `--listen SRC DST` (`-d LEI16@44100 -c 1`, FSIZE 56 MiB) and `--earcheck PYTHON SCRIPT RESULT SRC START END OUT LAYERS` (FSIZE 16 MiB, NOFILE 64, `execv PYTHON -I SCRIPT ...`), and `--roll PYTHON SCRIPT RESULT SRC PAGE OUT`, `--roll-marks ... PAGE OUT MARKS` and `--roll-poster ... START END OUT TITLE CREDIT` for the sheet PNG (FSIZE 8 MiB, NOFILE 64), and for the sheet HTML `--aac SRC DST` (`-f m4af -d aac@44100 -b 96000 -c 2`, FSIZE 12 MiB) and `--view` / `--view-marks PYTHON SCRIPT RESULT SRC AAC OUT` (CPU 150 s, FSIZE 25 MiB, NOFILE 64) |
@@ -1046,11 +1046,13 @@ What happens on a rhythm request: Demucs gives the bass stem from the same 44.1 
 pitch, and same-pitch notes split at Basic Pitch note starts. Notes under 80 ms are dropped and a same-pitch gap up to 200 ms
 joins unless a start falls on the first frame after it. A 16 kHz WAV upload or band-limited audio has no bass layer.
 
-From worker 0.25.0 a note is kept only when a Basic Pitch note within a semitone overlaps it. RMVPE gives a pitch to any voiced
-low energy, and Demucs leaves kick and tom ring in the bass stem, so drum-only music used to get bass notes; Basic Pitch hears
-no note there. A starting kick is not a reason to drop a note: bass is often played with the kick. Limits: a tom with a clear
-pitch is a note to Basic Pitch too and can stay; the check was measured on synthetic clips and one drum-only song, with no real
-recording of bass to confirm that no true notes are lost. Results stored before 0.25.0 keep their notes until analysed again.
+From worker 0.25.0 a note is kept only when a Basic Pitch note within a semitone overlaps it (Basic Pitch notes down to
+80 ms, as the bass rows; a note an octave away does not count, as it kept drum ring on the drum-only song). RMVPE gives a
+pitch to any voiced low energy, and Demucs leaves kick and tom ring in the bass stem, so drum-only music used to get bass
+notes; Basic Pitch hears almost no note there. A starting kick is not a reason to drop a note: bass is often played with the
+kick. Limits: a tom with a clear pitch is a note to Basic Pitch too and can stay; the check was measured on synthetic clips
+and one drum-only song, with no real recording of bass to confirm that no true notes are lost. Results stored before 0.25.0
+keep their notes until analysed again.
 
 `rhythm.bass` is `{status: "done", method, reliability: "low_reference", note_count}` or `{status: "skipped", reason}`. Read
 the rows with `/timeline` `layer=bass`: `{start, end, midi, note}`, where `midi` is the sounding pitch. Reasons:
