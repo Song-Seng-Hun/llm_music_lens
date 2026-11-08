@@ -574,8 +574,32 @@ def render_zoom(z):
     return '\n'.join(out) + '\n'
 
 
+PAGE_MAX = 20.0  # s; a section longer than 1.1 x this is split into k pages at the beats nearest equal cuts
+
+
+def pages(v):
+    """The PNG pages (roll.py) of one stored result: one per source section (sections S01... as in build), long ones
+    split at beats into "i/k"; no section layer gives one page over the whole song."""
+    secs = [('S%02d' % n, s['label'], s['start'], s['end']) for n, s in enumerate(v.get('sections') or [], 1)]
+    secs = secs or [(None, 'all', 0.0, v['duration'])]
+    out = []
+    for sid, label, a, b in secs:
+        k = max(1, -int(-(b - a) // (PAGE_MAX * 1.1)))
+        beats = [t for t in v.get('beats') or [] if a < t < b]
+        cuts = [a]
+        for i in range(1, k):
+            t = a + i * (b - a) / k
+            t = min(beats, key=lambda x: abs(x - t)) if beats else t
+            cuts.append(t if t > cuts[-1] else a + i * (b - a) / k)
+        cuts.append(b)
+        for i in range(k):
+            out.append({'page': len(out) + 1, 'section': sid, 'label': label + (' %d/%d' % (i + 1, k) if k > 1 else ''),
+                        'start': round(cuts[i], 3), 'end': round(cuts[i + 1], 3)})
+    return out
+
+
 if __name__ == '__main__':
-    stem = os.path.basename(sys.argv[1])[:-5]
+    stem =os.path.basename(sys.argv[1])[:-5]
     rid = stem if re.fullmatch('[0-9a-f]{64}', stem) else None
     v = json.load(open(sys.argv[1]))
     sh = zoom(v, float(sys.argv[4]), float(sys.argv[5]), rid) if len(sys.argv) > 4 else build(v, rid)

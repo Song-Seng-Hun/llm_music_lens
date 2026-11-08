@@ -19,10 +19,11 @@ Nothing here is installed. No LaunchAgent, firewall rule, certificate or key is 
 | `bass_onsets.py` | Optional bass layer: Basic Pitch note starts, run by `rhythm_worker.py` in its own environment |
 | `other_notes.py` | Optional accompaniment layer: Basic Pitch notes of the other stem, run by `rhythm_worker.py` in its own environment |
 | `adtof_model.py` | Optional drum layer: ADTOF Frame_RNN inference on CPU, run by `rhythm_worker.py` as its own process (separate implementation, reads the official checkpoint) |
-| `limit_exec.py` | Sets RLIMIT_CPU 60 s / FSIZE 24 MiB / NOFILE 32, then `execv /usr/bin/afconvert -f WAVE -d LEI16@16000 -c 1 src dst`. Two more fixed modes for the ear check: `--listen SRC DST` (`-d LEI16@44100 -c 1`, FSIZE 56 MiB) and `--earcheck PYTHON SCRIPT RESULT SRC START END OUT LAYERS` (FSIZE 16 MiB, NOFILE 64, `execv PYTHON -I SCRIPT ...`) |
+| `limit_exec.py` | Sets RLIMIT_CPU 60 s / FSIZE 24 MiB / NOFILE 32, then `execv /usr/bin/afconvert -f WAVE -d LEI16@16000 -c 1 src dst`. Two more fixed modes for the ear check: `--listen SRC DST` (`-d LEI16@44100 -c 1`, FSIZE 56 MiB) and `--earcheck PYTHON SCRIPT RESULT SRC START END OUT LAYERS` (FSIZE 16 MiB, NOFILE 64, `execv PYTHON -I SCRIPT ...`), and `--roll PYTHON SCRIPT RESULT SRC PAGE OUT` for the sheet PNG (FSIZE 8 MiB, NOFILE 64) |
 | `local_cli.py` | Mac-local CLI (no network): analyze + rhythm layer, report, timeline and sheet through the server's own code (`server.Engine`); see "Local CLI (this Mac)" |
 | `sign.py` | Shared canonical-string and HMAC helper (server, tests, Python clients) |
 | `sheet.py` | LLM sheet: compact section-indexed text/JSON of a stored rhythm result, served at `/sheet/<id>`, with a bar-by-bar zoom (stdlib only) |
+| `roll.py` | Sheet PNG page: spectrogram on a semitone axis over a piano roll of a stored result (run under `rhythm.roll_python` with numpy and matplotlib; never imported by the server); see "Sheet PNG" |
 | `ear_check.py` | Ear check for a person: left ear the original, right ear a synth replay of a stored result, loudness following the original (local tool, and run by the server for `POST /earcheck/<id>` under the rhythm python; needs numpy) |
 | `sign_vector.mjs` | Reference Node signer; prints or checks the fixed vector (`tests/vectors.json`) |
 | `examples/api.example.json` | Example production config (`~/.music-lens/api.json`, mode 0600) |
@@ -39,7 +40,9 @@ MUSIC_LENS_LIVE=1 MUSIC_LENS_FIXTURE_WAV=/abs/fixture-en.wav /usr/bin/python3 -m
 
 The real-worker tests in `tests/test_rhythm.py` run `rhythm_worker.py` under the Essentia python named by
 `MUSIC_LENS_ESSENTIA_PYTHON` and skip cleanly without it. `MUSIC_LENS_FIXTURE_WAV` adds a real WAV to the strict
-WAV check, and `NODE` (or `node` on PATH) runs the signer vector test.
+WAV check, and `NODE` (or `node` on PATH) runs the signer vector test. `MUSIC_LENS_ROLL_PYTHON` (a python with numpy
+and matplotlib) runs the real sheet PNG renderer in `tests/test_roll.py`; without it that test is skipped and the
+image itself is unverified (the route and CLI tests use a fake renderer).
 
 Tests bind 127.0.0.1 only through the test-only `"test_mode": true` config flag. A production config (no
 `test_mode`) refuses loopback, `0.0.0.0`, literal bind IPs, port 0, `limits` overrides and `test_ready_file`.
@@ -69,6 +72,58 @@ NOFILE 64) and fails if numpy does not start under those limits.
 A LAN client can get the same file from the server: `POST /earcheck/<result_id>?start=&end=` with the audio
 re-uploaded (see "Optional rhythm layer"); spans there are at most 30 s.
 
+## Sheet PNG (spectrogram + piano roll per section)
+
+One image per sheet page, to check a stored result's notes against the audio's real energy (a drum boom read as a
+long bass note shows as a note outline with no matching line in the spectrogram) and to show a result to people.
+Each page is one source section (S01, S02, ... as in the sheet); a section longer than 22 s (1.1 x 20 s) is split
+into k pages at the beats nearest equal cuts and labelled `A 1/3`, `A 2/3`, ...; a result with no section layer
+gives one page `all` over the whole song. Layout, top to bottom:
+
+- spectrogram of the audio on a semitone axis (STFT 8192/256, 1/3-semitone rows, MIDI 24-96, 70 dB below the
+  page's own peak, so brightness is not comparable between pages), with each melody, bass and other note drawn
+  as an outline over it;
+- piano roll coloured by part (melody, bass, other), chord labels, beat lines (every 4th darker, counted from the
+  song's first beat; these are not downbeats);
+- drum hits by class (kick, snare, hihat, tom, cymbal), hidden when the result has no drum hits.
+
+The server keeps no audio: the analysed WAV and the upload are removed when `POST /analyze` ends, so the audio is
+sent again for each image, as for the ear check. It must be the analysed audio: its duration must be within 0.5 s of
+the result's, otherwise `400 invalid_argument` ("not this result's audio"). Any upload kind works (it is converted to
+44.1 kHz mono first).
+
+- `GET /sheet/<id>?format=png` returns the page index, no audio needed:
+  `{"result_id", "format": "png", "available": true|false, "pages": [{"page": 1, "section": "S01", "label": "A",
+  "start": 0.0, "end": 19.7}, ...], "render": "POST /sheet/<result_id>?format=png&page=N ..."}`. `available` is
+  false when the server has no `rhythm.roll_python`. Any other parameter with `format=png` is `400 bad_request`.
+- `POST /sheet/<id>?format=png&page=N` with the audio as the body returns that page as `image/png` (about 0.5 MB,
+  about 1270 x 700 px). As `/earcheck`: synchronous, nothing stored, the API gate and the team flock held (`409 busy`
+  beside an analysis), uploads removed before the reply, the renderer under `limit_exec.py --roll` (CPU 60 s,
+  FSIZE 8 MiB) with `roll_timeout` 60 s. Errors are JSON, never a partial image: `404 rhythm_not_found`,
+  `400 invalid_argument` (page past the last page, or another file's audio), `400 invalid_audio`,
+  `503 roll_unavailable` (no `roll_python`), `500 roll_failed` (renderer exit, or output that is not a PNG),
+  `504 timeout`. A POST to `/sheet/<id>` without `format=png` stays `405 method_not_allowed`; the text and JSON
+  sheets are unchanged.
+- CLI: `local_cli.py sheet ID --png DIR --audio FILE [--page N]` renders every page (or page N) into the existing
+  directory DIR as `<first 12 hex of ID>-pNN.png` (mode 0644, never overwriting: an existing file is
+  `invalid_path`) and prints `{"result_id", "format": "png", "pages": [{"page", "section", "label", "start", "end",
+  "path"}, ...]}`. Example:
+
+  ```sh
+  /usr/bin/python3 -I local_cli.py sheet <result_id> --png ~/Pictures/roll --audio song.wav
+  ```
+
+Config: the renderer needs numpy and matplotlib, which the rhythm worker's python does not have. Name a python that
+has them as the optional `rhythm.roll_python` (validated like the other rhythm paths: a regular, executable file,
+not group or world writable), for example the All-In-One runtime:
+
+```json
+"rhythm": {"python": "...", "worker": "...", "roll_python": "/Users/YOU/tools/music-lens/runtime/allin1/bin/python3"}
+```
+
+Without it the index still answers (`available: false`) and rendering is `503 roll_unavailable`. `roll.py` also
+runs by hand: `ROLL_PYTHON -I roll.py RESULT.json AUDIO.wav PAGE OUT.png` (16-bit PCM WAV, any rate and channels).
+
 ## Local CLI (this Mac)
 
 The LAN server refuses loopback in production and holds only the Windows client keys, so agents on the Mac itself
@@ -84,6 +139,7 @@ same trust boundary as the `ml` wrapper: no TLS, no signing, no nonces, no recei
 /usr/bin/python3 -I local_cli.py sheet <result_id> --start 60 --end 90 --format json       # zoom, at most 30 s
 /usr/bin/python3 -I local_cli.py sheet <result_id> --view brief                            # one line per section
 /usr/bin/python3 -I local_cli.py sheet <result_id> --layers chords,drums                   # only those section layers
+/usr/bin/python3 -I local_cli.py sheet <result_id> --png DIR --audio song.wav            # PNG pages (see "Sheet PNG")
 ```
 
 - It reads the server's config (`--config`, default `~/.music-lens/api.json`) through `server.load_config`, so the
