@@ -210,6 +210,8 @@ class RollModesTest(RollBase):
         self.assertEqual((st, h["content-type"], raw), (200, "image/png", PNG))
         a = self.fr.calls()[0]["argv"]
         self.assertEqual(a[4], "2")
+        ev = [e for e in self.env.log_events() if e.get("event") == "roll_exit"]
+        self.assertEqual((ev[-1]["mode"], ev[-1]["page"], ev[-1]["rc"]), ("--roll-marks", 2, 0))
         self.assertTrue(a[5].endswith("/roll.png") and a[6].endswith("/roll-marks.json"), a)
         self.assert_clean()
         self.fr.write(marks="{not json")
@@ -233,7 +235,8 @@ class RollModesTest(RollBase):
                   "format=png&style=poster&start=0&end=2&title=" + "x" * 81,
                   "format=png&style=poster&start=0&end=2&credit=a%0Ab"):
             self.assert_error(400, "bad_request", q)
-        for q in ("format=png&style=poster&start=0&end=6.5", "format=png&style=poster&start=1&end=1"):
+        for q in ("format=png&style=poster&start=0&end=6.5", "format=png&style=poster&start=1&end=1",
+                  "format=png&style=poster&start=1&end=1.4", "format=png&style=poster&start=5&end=5.001"):  # < 0.5 s
             self.assert_error(400, "invalid_argument", q)
         self.assertEqual(self.fr.calls(), [])
 
@@ -319,6 +322,8 @@ class RollCliTest(RollBase):
                     ("--style", "poster", "--start", "1"), ("--title", "x")):
             rc, so, se = self.cli("--png", out, "--audio", wav, *bad)
             self.assertEqual((rc, json.loads(se)["error"]["code"]), (1, "bad_request"), bad)
+        rc, so, se = self.cli("--png", out, "--audio", wav, "--style", "poster", "--start", "1", "--end", "1.2")
+        self.assertEqual((rc, json.loads(se)["error"]["code"]), (1, "invalid_argument"))
 
 
 @unittest.skipUnless(os.path.isfile(ROLL_PY), "unverified: set MUSIC_LENS_ROLL_PYTHON to a python with numpy and matplotlib")
@@ -417,6 +422,45 @@ class RealMarksTest(unittest.TestCase):
         self.assertEqual(m["suspects"], [])
         self.assertEqual([x["note"] for x in m["missed"]], ["A3"])
 
+    def poster(self, d, res, wav, start, end, title="", name="poster.png"):
+        out = os.path.join(d, name)
+        p = subprocess.run([ROLL_PY, "-I", os.path.join(REPO, "roll.py"), "--poster", res, wav, start, end, out, title,
+                            "$5 or $6"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return out
+
+    def test_poster_float_span_and_text(self):
+        """2.02..32.02 is 30 s for the server (round(end - start, 6)); title and credit are plain text, not mathtext
+        ("$\\foo$" used to raise at draw)."""
+        d = tempfile.mkdtemp()
+        res, wav = os.path.join(d, "r.json"), os.path.join(d, "a.wav")
+        with open(res, "w") as f:
+            json.dump(dict(result(), duration=33.0, sections=[]), f)
+        with open(wav, "wb") as f:
+            f.write(make_wav_bytes(33.0, rate=16000, freq=261.63))
+        self.assertEqual(32.02 - 2.02 > 30.0, True)  # the float case itself
+        self.poster(d, res, wav, "2.020000", "32.020000", title="$\\foo$ costs $5")
+
+    def test_poster_drum_labels_only_with_drums(self):
+        d = tempfile.mkdtemp()
+        wav = os.path.join(d, "a.wav")
+        with open(wav, "wb") as f:
+            f.write(make_wav_bytes(6.0, rate=16000, freq=261.63))
+        ink = []
+        for name, hits in (("with", [{"time": 1.0, "class": "kick"}]), ("without", [])):
+            res = os.path.join(d, name + ".json")
+            with open(res, "w") as f:
+                json.dump(dict(result(), drum_hits=hits), f)
+            out = self.poster(d, res, wav, "0.5", "5.5", name=name + ".png")
+            # the label column left of the plot, at the kick/snare rows (figure y 0.04-0.09, x 0.03-0.072)
+            p = subprocess.run([ROLL_PY, "-I", "-c", "import sys, matplotlib.pyplot as p; im = p.imread(sys.argv[1]); "
+                                "r = im[1229:1296, 72:173, :3]; print(float(abs(r - im[5, 5, :3]).max()))", out],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            ink.append(float(p.stdout))
+        self.assertGreater(ink[0], 0.2)
+        self.assertLess(ink[1], 0.02)
+
     def test_poster_size(self):
         d = tempfile.mkdtemp()
         res, wav, out = os.path.join(d, "r.json"), os.path.join(d, "a.wav"), os.path.join(d, "poster.png")
@@ -429,7 +473,7 @@ class RealMarksTest(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stderr)
         with open(out, "rb") as f:
             self.assertEqual(ihdr(f.read(24)), (2400, 1350))
-        for bad in (["0", "31"], ["0", "6.5"], ["0", "2", out + "2", "x" * 81, ""], ["0", "2", out + "3", "a\nb", ""]):
+        for bad in (["0", "31"], ["0", "6.5"], ["1", "1.3"], ["0", "2", out + "2", "x" * 81, ""], ["0", "2", out + "3", "a\nb", ""]):
             args = bad if len(bad) == 5 else bad + [out + "4", "", ""]
             p = subprocess.run([ROLL_PY, "-I", os.path.join(REPO, "roll.py"), "--poster", res, wav] + args,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)

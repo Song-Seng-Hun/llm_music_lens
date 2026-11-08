@@ -171,8 +171,9 @@ ROLL_RENDER = ("POST /sheet/<result_id>?format=png&page=N with the analysed audi
                "add marks=1 for suspect-note and missed-energy marks; style=poster&start=S&end=E[&title=T&credit=C] "
                "for a 2400x1350 poster of at most 30 s")
 ROLL_POSTER_MAX = 30.0  # s; roll.py POSTER_MAX
+ROLL_POSTER_MIN = 0.5  # s; roll.py POSTER_MIN
 ROLL_TEXT_MAX = 80  # roll.py TEXT_MAX
-ROLL_POSTER_DETAIL = "poster span: 0 < end - start <= 30 s, end within the result's duration"
+ROLL_POSTER_DETAIL = "poster span: 0.5 s <= end - start <= 30 s, end within the result's duration"
 ROLL_TEXT_DETAIL = "title and credit: at most 80 printable characters"
 ROLL_DURATION_TOL = 0.5  # s; the posted audio must have the result's duration
 ROLL_AUDIO_DETAIL = "audio duration differs from the result's by more than %g s: not this result's audio" % ROLL_DURATION_TOL
@@ -3137,7 +3138,7 @@ class Engine:
                 if not RE_NUM.match(q[k]) or q[k].startswith("-"):
                     raise HttpError("bad_request", detail=ROLL_DETAIL)
             a, b = float(q["start"]), float(q["end"])
-            if not 0 < round(b - a, 6) <= ROLL_POSTER_MAX or b > v["duration"] + 0.01:
+            if not ROLL_POSTER_MIN <= round(b - a, 6) <= ROLL_POSTER_MAX or b > v["duration"] + 0.01:
                 raise HttpError("invalid_argument", detail=ROLL_POSTER_DETAIL)
             text = [q.get(k, "") for k in ("title", "credit")]
             if not all(len(t) <= ROLL_TEXT_MAX and t.isprintable() for t in text):
@@ -3164,7 +3165,8 @@ class Engine:
                 [mk] if job["marks"] else [])
         t0 = time.monotonic()
         rc = self._run_capped(argv, self.limits["roll_timeout"])
-        self.log.event("roll_exit", result_id=rid, mode=argv[3], rc=rc, seconds=round(time.monotonic() - t0, 3))
+        self.log.event("roll_exit", result_id=rid, mode=argv[3], page=job.get("page"), rc=rc,
+                       seconds=round(time.monotonic() - t0, 3))
         if rc is None:
             raise HttpError("timeout")
         try:
