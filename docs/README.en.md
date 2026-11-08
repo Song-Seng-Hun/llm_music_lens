@@ -121,7 +121,7 @@ Once the site is published and connected to an AI, the AI calls these tools duri
 
 ## Built with AI
 
-This project was built by AI agents under human direction. People decided what to build, what accuracy to aim for and what to adopt; Claude (Anthropic) and Codex (OpenAI) agents shared the implementation, measurement and code review. The [measurement notes](../lan/docs/evaluation.md) are the record the agents kept along the way.
+This project was built by AI agents under human direction. People decided what to build, what accuracy to aim for and what to adopt; Claude (Anthropic) and Codex (OpenAI) agents shared the implementation, measurement and code review. The [measurement notes](../lan/docs/evaluation.md) record the accuracy and speed the agents measured along the way.
 
 ## Models and licenses
 
