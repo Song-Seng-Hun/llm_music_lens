@@ -53,7 +53,7 @@ DEFAULT_LIMITS = {
     "read_timeout": 30.0, "max_body": 64 * MiB, "disk_floor": 2 * 1024 * MiB, "ml_stdout": 8 * MiB,
     "response_max": 8 * MiB, "stderr_line": 4096, "convert_output": 4096, "log_bytes": 5 * MiB, "log_files": 3,
     "send_timeout": 30.0, "stop_grace": 630.0, "rhythm_timeout": 300.0, "rhythm_output": 4 * MiB,
-    "earcheck_timeout": 60.0, "ml_stop_grace": 40.0,
+    "earcheck_timeout": 60.0, "roll_timeout": 60.0, "ml_stop_grace": 40.0,
 }
 CONFIG_KEYS = {"bind", "port", "allow", "clients", "cert", "key", "ml", "root", "inbox", "limit_exec",
                "launchd_logs", "test_mode", "limits", "test_ready_file", "rhythm"}
@@ -100,6 +100,7 @@ ERRORS = {
     "invalid_output": (500, "Analyzer returned invalid output"),
     "invalid_result": (500, "Stored result is invalid"),
     "earcheck_failed": (500, "Ear check synth failed"),
+    "roll_failed": (500, "Sheet PNG render failed"),
     "empty_output": (500, "Analyzer returned no output"),
     "cancelled": (500, "Analysis was cancelled"),
     "nonce_store_full": (503, "Nonce store full; retry later"),
@@ -110,6 +111,7 @@ ERRORS = {
                              "read /receipt later and do not retry"),
     "shutting_down": (503, "Server is stopping; nothing launched"),
     "earcheck_unavailable": (503, "Ear check is not available on this server"),
+    "roll_unavailable": (503, "Sheet PNG is not available on this server (no rhythm roll_python)"),
     "timeout": (504, "Operation timed out"),
 }
 ML_400 = ("invalid_audio", "invalid_path", "invalid_id", "invalid_argument")
@@ -158,10 +160,17 @@ ROUTE_RECEIPT = re.compile(r"\A/receipt/([0-9a-f]{32})\Z")
 ROUTE_EARCHECK = re.compile(r"\A/earcheck/([0-9a-f]{64})\Z")
 M4A_BRANDS = (b"M4A ", b"M4B ", b"mp42", b"mp41", b"isom", b"iso2")
 PCM_GUID = b"\x01\x00\x00\x00\x00\x00\x10\x00\x80\x00\x00\xaa\x00\x38\x9b\x71"
-UPLOAD_NAMES = ("upload.part", "upload.wav", "upload.mp3", "upload.m4a", "converted.wav", "listen.wav", "earcheck.wav")
+UPLOAD_NAMES = ("upload.part", "upload.wav", "upload.mp3", "upload.m4a", "converted.wav", "listen.wav", "earcheck.wav",
+                "roll.png", "roll.png.part")
+ROLL = os.path.join(HERE, "roll.py")  # run by rhythm roll_python (numpy, matplotlib); never imported here
 EAR_CHECK = os.path.join(HERE, "ear_check.py")  # run by the rhythm python (numpy); never imported here
 EARCHECK_LAYERS = ("melody", "bass", "other", "chords", "drums", "clicks")  # ear_check.LAYERS
 EARCHECK_DEFAULT = ("melody", "bass", "other", "chords", "drums")  # ear_check.DEFAULT
+RE_PAGE = re.compile(r"\A[1-9][0-9]{0,3}\Z")  # limit_exec.RE_PAGE
+ROLL_RENDER = "POST /sheet/<result_id>?format=png&page=N with the analysed audio as the body returns that page as image/png"
+ROLL_DURATION_TOL = 0.5  # s; the posted audio must have the result's duration
+ROLL_AUDIO_DETAIL = "audio duration differs from the result's by more than %g s: not this result's audio" % ROLL_DURATION_TOL
+ROLL_DETAIL = "format=png takes no other parameter on GET (page index); POST it with page=N and the audio to render"
 SPAN_DETAIL = "end - start must be more than 0 and at most %g s"
 VIEW_DETAIL = ("view=brief or layers=<comma list of %s>, one of them, not with start/end"
                % ",".join(sheet.SECTION_LAYERS))
@@ -638,8 +647,8 @@ def load_config(path):
     cfg["rhythm"] = None
     if "rhythm" in raw:  # optional layer; absent = unavailable
         rh = raw["rhythm"]
-        if not isinstance(rh, dict) or set(rh) - {"separation", "chord_model", "bass", "drum_model", "sections", "singing"} != RHYTHM_KEYS:
-            raise ConfigError("rhythm must be an object with python, worker and optionally separation, chord_model, bass, drum_model, sections and singing")
+        if not isinstance(rh, dict) or set(rh) - {"separation", "chord_model", "bass", "drum_model", "sections", "singing", "roll_python"} != RHYTHM_KEYS:
+            raise ConfigError("rhythm must be an object with python, worker and optionally separation, chord_model, bass, drum_model, sections, singing and roll_python")
         sp = rh.get("separation")
         if "separation" in rh and (not isinstance(sp, dict) or set(sp) != RHYTHM_SEPARATION_KEYS):
             raise ConfigError("rhythm separation must be an object with exactly demucs and rmvpe")
@@ -657,7 +666,8 @@ def load_config(path):
         out = {}
         for k, raw_path in [("python", rh["python"]), ("worker", rh["worker"])] + sorted((sp or {}).items()) + (
                 [("chord_model", rh["chord_model"])] if "chord_model" in rh else []) + sorted((ba or {}).items()) + (
-                [("drum_model", rh["drum_model"])] if "drum_model" in rh else []) + sorted((sc or {}).items()) + sorted((sg or {}).items()):
+                [("drum_model", rh["drum_model"])] if "drum_model" in rh else []) + sorted((sc or {}).items()) + sorted((sg or {}).items()) + (
+                [("roll_python", rh["roll_python"])] if "roll_python" in rh else []):
             out[k] = _abs(raw_path, "rhythm " + k)
             try:
                 st = os.stat(out[k])
@@ -677,6 +687,8 @@ def load_config(path):
             raise ConfigError("rhythm allin1_python not executable")
         if sg and not os.access(out["yourmt3_python"], os.X_OK):
             raise ConfigError("rhythm yourmt3_python not executable")
+        if "roll_python" in out and not os.access(out["roll_python"], os.X_OK):
+            raise ConfigError("rhythm roll_python not executable")
         cfg["rhythm"] = out
     return cfg
 
@@ -2921,9 +2933,21 @@ class Engine:
             raise HttpError("rhythm_not_found")
         return rhythm_page(rid, v, q["layer"], vals["start"], vals["end"], cursor, limit)
 
+    def rhythm_or_error(self, rid):
+        st, v = self.load_rhythm(rid)
+        if st == "missing":
+            raise HttpError("rhythm_not_found")
+        if st != "ok":
+            raise HttpError("invalid_result")
+        return v
+
     def sheet_view(self, rid, q):
         """The GET /sheet body for parsed query q (format, start, end, view, layers)."""
         fmt = q.get("format", "text")
+        if fmt == "png":
+            if set(q) != {"format"}:
+                raise HttpError("bad_request", detail=ROLL_DETAIL)
+            return self.roll_index(rid, self.rhythm_or_error(rid))
         if fmt not in ("text", "json") or ("start" in q) != ("end" in q):
             raise HttpError("bad_request")
         sel = None  # chosen per-section layers: view=brief = none, layers=a,b = those; not with a zoom span
@@ -2941,11 +2965,7 @@ class Engine:
             span = float(q["start"]), float(q["end"])
             if not 0 < round(span[1] - span[0], 6) <= sheet.ZOOM_MAX:  # round: 2.2 to 32.2 is 30 s
                 raise HttpError("bad_request", detail=SPAN_DETAIL % sheet.ZOOM_MAX)
-        st, v = self.load_rhythm(rid)
-        if st == "missing":
-            raise HttpError("rhythm_not_found")
-        if st != "ok":
-            raise HttpError("invalid_result")
+        v = self.rhythm_or_error(rid)
         if span is not None:
             if span[0] >= v["duration"]:
                 raise HttpError("bad_request")
@@ -3062,6 +3082,61 @@ class Engine:
         t.join(5)
         p.stdout.close()
         return rc
+
+    def team_flock(self):
+        """The team flock, non-blocking: held by `ml analyze` -> busy, as /analyze gets. Returns the fd to close."""
+        try:
+            lfd = os.open(self.team_lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        except OSError:
+            raise HttpError("storage_error")
+        try:
+            fcntl.flock(lfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(lfd)
+            raise HttpError("busy")
+        except OSError:
+            os.close(lfd)
+            raise HttpError("storage_error")
+        return lfd
+
+    def roll_index(self, rid, v):
+        """GET /sheet?format=png: the PNG pages of a stored result (no audio needed to list them)."""
+        return {"result_id": rid, "format": "png", "available": "roll_python" in (self.cfg.get("rhythm") or {}),
+                "pages": sheet.pages(v), "render": ROLL_RENDER}
+
+    def roll_audio(self, src, listen, v):
+        """Convert the analysed audio (any upload kind) to 44.1 kHz mono s16 at listen; it must be this result's audio
+        (duration within ROLL_DURATION_TOL), so the spectrogram never shows another file under these notes."""
+        if not self.cfg.get("rhythm", {}).get("roll_python") or not os.path.isfile(ROLL):
+            raise HttpError("roll_unavailable")
+        rc = self.convert(src, listen, listen=True)
+        self.log.event("convert_exit", rc=rc, use="roll")
+        if rc is None:
+            raise HttpError("timeout")
+        data = pcm16_wav_data(listen, LISTEN_MAX_BYTES, LISTEN_RATE, 1) if rc == 0 and os.path.isfile(listen) else None
+        duration = data / (2.0 * LISTEN_RATE) if data else 0.0
+        if not 0 < duration <= 600:
+            raise HttpError("invalid_audio")
+        if abs(duration - v["duration"]) > ROLL_DURATION_TOL:
+            raise HttpError("invalid_argument", detail=ROLL_AUDIO_DETAIL)
+
+    def roll_page(self, rid, listen, page, out):
+        """roll.py under limit_exec.py --roll with rhythm roll_python; returns the PNG bytes, never a partial image."""
+        argv = [PYTHON, "-I", self.cfg["limit_exec"], "--roll", self.cfg["rhythm"]["roll_python"], ROLL,
+                self.rhythm_path(rid), listen, str(page), out]
+        t0 = time.monotonic()
+        rc = self._run_capped(argv, self.limits["roll_timeout"])
+        self.log.event("roll_exit", result_id=rid, page=page, rc=rc, seconds=round(time.monotonic() - t0, 3))
+        if rc is None:
+            raise HttpError("timeout")
+        try:
+            with open(out, "rb") as f:
+                png = f.read(self.limits["response_max"] + 1)
+        except OSError:
+            png = b""
+        if rc != 0 or not png.startswith(b"\x89PNG\r\n\x1a\n") or len(png) > self.limits["response_max"]:
+            raise HttpError("roll_failed")
+        return png
 
     # analyze job (staged upload -> inbox link -> ml analyze)
     def _job(self, job):
@@ -3337,14 +3412,15 @@ class Handler(BaseHTTPRequestHandler):
                        "ms": int((time.monotonic() - self.t0) * 1000)})
 
     # ---- io
-    def send_raw(self, status, body_bytes):
+    def send_raw(self, status, body_bytes, content_type="application/json"):
         lim = self.server.app.limits
         if len(body_bytes) > lim["response_max"]:
             status, obj = error_body("invalid_output")
-            body_bytes = json.dumps(obj).encode()
+            body_bytes, content_type = json.dumps(obj).encode(), "application/json"
         phrase = http.HTTPStatus(status).phrase
-        head = ("HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n"
-                "Cache-Control: no-store\r\nConnection: close\r\n\r\n" % (status, phrase, len(body_bytes))).encode()
+        head = ("HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %d\r\n"
+                "Cache-Control: no-store\r\nConnection: close\r\n\r\n" % (status, phrase, content_type,
+                                                                            len(body_bytes))).encode()
         self.info["status"], self.info["bytes"] = status, len(body_bytes)
         try:
             self.sock.settimeout(lim["send_timeout"])
@@ -3501,6 +3577,10 @@ class Handler(BaseHTTPRequestHandler):
             if method != "POST":
                 raise HttpError("method_not_allowed")
             return self.do_earcheck(app, m.group(1), nonce, query, cl, rest, vals["x-ml-body-sha256"], expect_continue)
+        m = ROUTE_SHEET.match(path)
+        if m and method == "POST":
+            self.info["route"] = "/sheet/:id"
+            return self.do_roll(app, m.group(1), nonce, query, cl, rest, vals["x-ml-body-sha256"], expect_continue)
         if method != "GET":
             raise HttpError("method_not_allowed")
         if path == "/status":
@@ -3665,13 +3745,7 @@ class Handler(BaseHTTPRequestHandler):
             code, kind, _ = self.stage(app, op, cl, rest, body_sha)
             if code is not None:
                 raise HttpError(code)
-            try:  # after the upload, so a Mac-side `ml analyze` is not blocked while the client sends
-                lfd = os.open(app.team_lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-                fcntl.flock(lfd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # held by `ml analyze`: busy, as /analyze gets
-            except BlockingIOError:
-                raise HttpError("busy")
-            except OSError:
-                raise HttpError("storage_error")
+            lfd = app.team_flock()  # after the upload, so a Mac-side `ml analyze` is not blocked while the client sends
             d = app.uploads + "/" + op
             listen, out = d + "/listen.wav", d + "/earcheck.wav"
             rc = app.convert(d + "/upload." + kind, listen, listen=True)
@@ -3703,6 +3777,49 @@ class Handler(BaseHTTPRequestHandler):
                              "format": "wav", "sample_rate": LISTEN_RATE, "channels": 2, "bytes": len(wav),
                              "sha256": hashlib.sha256(wav).hexdigest(),
                              "audio_base64": base64.b64encode(wav).decode("ascii")})
+
+    def do_roll(self, app, result_id, rid, query, cl, rest, body_sha, expect_continue):
+        """POST /sheet/<id>?format=png&page=N, body = the analysed audio: that page as image/png. As /earcheck:
+        synchronous, nothing stored, API gate and team flock held, upload removed before the reply."""
+        q = parse_query(query, ("format", "page", "start", "end", "view", "layers"))
+        if q.get("format") != "png":
+            raise HttpError("method_not_allowed")  # the text and JSON sheets are GET only, as before
+        if set(q) != {"format", "page"} or not RE_PAGE.match(q["page"]):
+            raise HttpError("bad_request", detail=ROLL_DETAIL)
+        if cl > app.limits["max_body"]:
+            raise HttpError("payload_too_large")
+        v = app.rhythm_or_error(result_id)  # refused before any byte of the upload is read
+        page = int(q["page"])
+        if page > len(sheet.pages(v)):
+            raise HttpError("invalid_argument", detail="page is past the last page (GET /sheet/<id>?format=png lists them)")
+        if not app.cfg.get("rhythm", {}).get("roll_python"):
+            raise HttpError("roll_unavailable")
+        if not app.gate.acquire(blocking=False):
+            raise HttpError("busy")
+        op, lfd = "rl-" + secrets.token_hex(16), None
+        try:
+            with app.job_lock:
+                if app.stopping:
+                    raise HttpError("shutting_down")
+            if shutil.disk_usage(app.cfg["root"]).free < app.limits["disk_floor"]:
+                raise HttpError("insufficient_storage")
+            app.log.event("roll_start", id=rid, op=op, result_id=result_id, page=page)
+            if expect_continue:
+                self.sock.settimeout(app.limits["send_timeout"])
+                self.sock.sendall(b"HTTP/1.1 100 Continue\r\n\r\n")
+            code, kind, _ = self.stage(app, op, cl, rest, body_sha)
+            if code is not None:
+                raise HttpError(code)
+            lfd = app.team_flock()
+            d = app.uploads + "/" + op
+            app.roll_audio(d + "/upload." + kind, d + "/listen.wav", v)
+            png = app.roll_page(result_id, d + "/listen.wav", page, d + "/roll.png")
+        finally:
+            if lfd is not None:
+                os.close(lfd)
+            app.cleanup(op, False)
+            app.gate.release()
+        self.send_raw(200, png, "image/png")
 
     def _prelaunch_fail(self, app, client, rid, op, code):
         status, body = error_body(code, request_id=rid)

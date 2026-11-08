@@ -5,6 +5,8 @@ Usage: limit_exec.py SRC DST            afconvert to WAVE 16 kHz mono s16 (analy
        limit_exec.py --listen SRC DST   afconvert to WAVE 44.1 kHz mono s16 (ear check, for listening)
        limit_exec.py --earcheck PYTHON SCRIPT RESULT SRC START END OUT LAYERS
                                         PYTHON -I SCRIPT RESULT SRC START END OUT LAYERS (ear check synth)
+       limit_exec.py --roll PYTHON SCRIPT RESULT SRC PAGE OUT
+                                        PYTHON -I SCRIPT RESULT SRC PAGE OUT (sheet PNG page, roll.py)
 Paths are absolute; DST/OUT must not exist. Every argv is fixed; no free-form options.
 The threaded server never uses preexec_fn; it runs this helper with start_new_session=True.
 """
@@ -21,6 +23,8 @@ EARCHECK_FSIZE_BYTES = 16 * 1024 * 1024  # 30 s stereo s16 at 44.1 kHz is 5.05 M
 NOFILE = 32
 EARCHECK_NOFILE = 64  # numpy's import opens more files than afconvert
 RE_SECONDS = re.compile(r"\A(0|[1-9][0-9]{0,5})(\.[0-9]{1,6})?\Z")
+ROLL_FSIZE_BYTES = 8 * 1024 * 1024  # one page PNG is about 0.5 MB
+RE_PAGE = re.compile(r"\A[1-9][0-9]{0,3}\Z")
 RE_LAYERS = re.compile(r"\A[a-z]{1,8}(,[a-z]{1,8}){0,5}\Z")
 
 
@@ -43,6 +47,17 @@ def check_path(p):
 
 
 def main(argv):
+    if len(argv) == 8 and argv[1] == "--roll":
+        python, script, result, src, page, out = argv[2:]
+        if not all(check_path(p) for p in (python, script, result, src, out)) or not RE_PAGE.match(page):
+            sys.stderr.write("usage: limit_exec.py --roll PYTHON SCRIPT RESULT SRC PAGE OUT\n")
+            return 2
+        if os.path.lexists(out):
+            sys.stderr.write("destination exists\n")
+            return 2
+        apply_limits(ROLL_FSIZE_BYTES, EARCHECK_NOFILE)  # matplotlib fits in 64 as well
+        os.execv(python, [python, "-I", script, result, src, page, out])
+        return 127
     if len(argv) == 10 and argv[1] == "--earcheck":
         python, script, result, src, start, end, out, layers = argv[2:]
         if (not all(check_path(p) for p in (python, script, result, src, out)) or not RE_SECONDS.match(start)

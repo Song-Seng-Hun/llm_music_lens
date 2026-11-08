@@ -13,6 +13,8 @@ Usage:
   local_cli.py [--config PATH] report ID
   local_cli.py [--config PATH] timeline ID [--layer L] [--start S] [--end E] [--limit N] [--cursor C]
   local_cli.py [--config PATH] sheet ID [--start S --end E | --view brief | --layers L,...] [--format {text,json}]
+  local_cli.py [--config PATH] sheet ID --png DIR --audio FILE [--page N]
+               one PNG per page (spectrogram + piano roll, roll.py) into DIR as <id12>-pNN.png; prints the page list
 """
 import argparse
 import hashlib
@@ -198,8 +200,57 @@ def cmd_timeline(engine, ns):
 
 def cmd_sheet(engine, ns):
     rid = check_id(ns.result_id)
+    if ns.png is not None or ns.audio is not None or ns.page is not None:
+        return sheet_png(engine, rid, ns)
     q = {k: getattr(ns, k) for k in ("format", "start", "end", "view", "layers") if getattr(ns, k) is not None}
     out_json(engine, engine.sheet_view(rid, q))
+
+
+def sheet_png(engine, rid, ns):
+    """As POST /sheet/<id>?format=png&page=N for each page (or --page N), written to DIR; nothing else is stored."""
+    if (ns.png is None or ns.audio is None or any(getattr(ns, k) is not None for k in ("format", "start", "end", "view", "layers"))
+            or (ns.page is not None and not server.RE_PAGE.match(ns.page))):
+        raise Fail("bad_request", "--png DIR and --audio FILE go together, with optional --page N and no other option")
+    if not os.path.isdir(ns.png):
+        raise Fail("invalid_path", "--png must be an existing directory")
+    v = engine.rhythm_or_error(rid)
+    pages = engine.roll_index(rid, v)["pages"]
+    if ns.page is not None:
+        if int(ns.page) > len(pages):
+            raise Fail("invalid_argument", "page is past the last page")
+        pages = [pages[int(ns.page) - 1]]
+    if not (engine.cfg.get("rhythm") or {}).get("roll_python"):
+        raise Fail("roll_unavailable")
+    if shutil.disk_usage(engine.cfg["root"]).free < engine.limits["disk_floor"]:
+        raise Fail("insufficient_storage")
+    op, lfd, out = "rl-" + secrets.token_hex(16), None, []
+    try:
+        kind, _sha = stage(engine, op, ns.audio)
+        lfd = engine.team_flock()
+        d = engine.uploads + "/" + op
+        engine.roll_audio(d + "/upload." + kind, d + "/listen.wav", v)
+        for p in pages:
+            png = engine.roll_page(rid, d + "/listen.wav", p["page"], d + "/roll.png")
+            os.unlink(d + "/roll.png")  # roll.py never overwrites; the next page renders to the same name
+            path = os.path.join(os.path.abspath(ns.png), "%s-p%02d.png" % (rid[:12], p["page"]))
+            try:
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+            except FileExistsError:
+                raise Fail("invalid_path", "output file exists: " + os.path.basename(path))
+            except OSError:
+                raise Fail("storage_error")
+            try:
+                server.write_all(fd, png)
+            finally:
+                os.close(fd)
+            out.append(dict(p, path=path))
+            if engine.cancelled:
+                raise Fail("cancelled")
+    finally:
+        if lfd is not None:
+            os.close(lfd)
+        engine.cleanup(op, False)
+    out_json(engine, {"result_id": rid, "format": "png", "pages": out})
 
 
 def check_id(rid):
@@ -245,6 +296,9 @@ def parser():
     s.add_argument("--end")
     s.add_argument("--view", help="brief: one line per section (as GET /sheet?view=brief)")
     s.add_argument("--layers", help="comma list of " + ",".join(server.sheet.SECTION_LAYERS) + " (as GET /sheet?layers=)")
+    s.add_argument("--png", metavar="DIR", help="write one PNG per page (spectrogram + piano roll) into DIR")
+    s.add_argument("--audio", metavar="FILE", help="with --png: the analysed audio (the server keeps none)")
+    s.add_argument("--page", help="with --png: only page N (1-based)")
     return ap
 
 
