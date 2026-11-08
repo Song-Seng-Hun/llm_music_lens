@@ -160,7 +160,7 @@ prints the lists: `{"result_id", "format": "png", "pages": [{"page", "section", 
 ### Poster (opt-in)
 
 `POST /sheet/<id>?format=png&style=poster&start=S&end=E[&title=T&credit=C]` (CLI: `--style poster --start S --end E
-[--title T] [--credit C]`) draws one span of at most 30 s, inside the result's duration, as a 2400 x 1350 image
+[--title T] [--credit C]`) draws one span of 0.5 to 30 s, inside the result's duration, as a 2400 x 1350 image
 for people: glowing note lines (width from the semitone height, opacity from the note's harmonic energy) over a
 faint harmonic spectrogram, a keyboard strip, a chord band, kick and snare ticks, the title, the tempo and key
 line, and the credit. The legend lists only parts with at least 0.5 s visible; the pitch range reaches down to

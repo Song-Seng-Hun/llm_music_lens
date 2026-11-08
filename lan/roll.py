@@ -355,6 +355,8 @@ def render_marks(v, audio, page, out, out_json):
 POSTER = dict(bg="#05040a", fg="#ffffff", sub="#a99fc7", grid="#1c1830", wk="#cfc8e8", bk="#120f1e",
               col={"melody": "#ff4fd8", "bass": "#ffc14d", "harmony": "#4dfcff"})
 POSTER_MAX = 30.0  # s, as one zoom
+POSTER_MIN = 0.5  # s; shorter spans have too few frames to draw
+SPAN_EPS = 1e-6  # float slack: 2.02..32.02 is 30 s (the server checks round(end - start, 6))
 TEXT_MAX = 80  # characters of title and credit
 
 
@@ -446,10 +448,11 @@ def render_poster(v, audio, t0, t1, out, title, credit):
             x = L + (h["time"] - t0) / (t1 - t0) * (R - L)
             fig.add_artist(plt.Line2D([x, x], [y, y + 0.015], color=POSTER["sub"], lw=2 if h["class"] == "kick" else 1,
                                       alpha=0.8))
-    for y, nm in ((0.052, "kick"), (0.077, "snare")):
-        fig.text(L - 0.004, y, nm, color=POSTER["sub"], fontsize=8, ha="right", va="center")
+    if v.get("drum_hits"):  # no lane labels over an empty lane
+        for y, nm in ((0.052, "kick"), (0.077, "snare")):
+            fig.text(L - 0.004, y, nm, color=POSTER["sub"], fontsize=8, ha="right", va="center")
     ty = 0.93
-    fig.text(L, ty, title, color=POSTER["fg"], fontsize=26, fontweight="bold", va="center")
+    fig.text(L, ty, title, color=POSTER["fg"], fontsize=26, fontweight="bold", va="center", parse_math=False)
     key = v.get("key") or {}
     fig.text(L, ty - 0.045, "%s BPM  ·  %s  ·  %.0f–%.0f s   |   spectrogram + transcribed notes by Music Lens" % (
         "%.0f" % v["bpm"] if isinstance(v.get("bpm"), (int, float)) else "?",
@@ -462,7 +465,7 @@ def render_poster(v, audio, t0, t1, out, title, credit):
         tx = fig.text(xr, ty, "● " + nm, color=POSTER["col"][nm], fontsize=13, va="center", ha="right")
         fig.canvas.draw()
         xr = tx.get_window_extent().x0 / fig.bbox.width - 0.02
-    fig.text(R, 0.015, credit, color=POSTER["sub"], fontsize=8, ha="right")
+    fig.text(R, 0.015, credit, color=POSTER["sub"], fontsize=8, ha="right", parse_math=False)  # "$5 or $6" stays text
     save(plt, fig, out, dpi=150)
 
 
@@ -485,7 +488,8 @@ def parse(argv):
             with open(argv[2], "rb") as f:
                 v = json.load(f)
             t0, t1 = float(argv[4]), float(argv[5])
-            if 0 <= t0 < t1 <= v["duration"] and t1 - t0 <= POSTER_MAX and text_ok(argv[7]) and text_ok(argv[8]):
+            if (0 <= t0 and t1 <= v["duration"] + SPAN_EPS and POSTER_MIN - SPAN_EPS <= t1 - t0 <= POSTER_MAX + SPAN_EPS
+                    and text_ok(argv[7]) and text_ok(argv[8])):
                 return render_poster, (v, argv[3], t0, t1, argv[6], argv[7], argv[8])
         elif len(argv) in (5, 6) and argv[3].isdigit() and not argv[3].startswith("0"):
             with open(argv[1], "rb") as f:
