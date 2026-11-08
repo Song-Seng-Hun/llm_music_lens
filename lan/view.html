@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; media-src data:; base-uri 'none'; form-action 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Music Lens sheet</title>
+<style>
+:root { color-scheme: dark; }
+body { margin: 0; background: #141414; color: #ddd; font: 13px system-ui, sans-serif; }
+#bar { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; padding: 8px 12px; }
+#bar button { background: #2a2a2a; color: #eee; border: 1px solid #444; border-radius: 4px; padding: 4px 12px; font: inherit; }
+#bar select { background: #2a2a2a; color: #eee; border: 1px solid #444; font: inherit; }
+#bar label { white-space: nowrap; }
+#time { font-variant-numeric: tabular-nums; min-width: 110px; }
+#head { color: #aaa; }
+#view { position: relative; margin: 0 12px; }
+canvas { display: block; width: 100%; background: #1c1c1c; cursor: crosshair; }
+#scroll { overflow-x: auto; overflow-y: hidden; height: 16px; margin: 2px 12px 0; }
+#spacer { height: 1px; }
+#notes { color: #999; padding: 4px 12px 10px; font-size: 12px; }
+#tip { position: absolute; pointer-events: none; display: none; background: #000d; border: 1px solid #555;
+       padding: 4px 6px; border-radius: 4px; white-space: pre; font-size: 12px; color: #eee; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <button id="play" type="button">Play</button>
+  <span id="time">0:00.0</span>
+  <label>speed <select id="speed"><option value="0.5">0.5x</option><option value="0.75">0.75x</option><option value="1" selected>1x</option></select></label>
+  <label>zoom <select id="zoom"><option value="40">40 px/s</option><option value="80" selected>80 px/s</option><option value="160">160 px/s</option></select></label>
+  <label><input type="checkbox" id="follow" checked> follow</label>
+  <span id="toggles"></span>
+  <span id="head"></span>
+</div>
+<div id="view"><canvas id="cv"></canvas><div id="tip"></div></div>
+<div id="scroll"><div id="spacer"></div></div>
+<div id="notes"></div>
+<script type="application/json" id="data">@DATA@</script>
+<script>
+"use strict";
+const D = JSON.parse(document.getElementById("data").textContent);
+const $ = (id) => document.getElementById(id);
+const cv = $("cv"), ctx = cv.getContext("2d"), scroll = $("scroll"), spacer = $("spacer"), tip = $("tip");
+const audio = new Audio();
+audio.src = D.audio;
+audio.preservesPitch = true;
+const show = { spectrogram: true, melody: true, bass: true, other: true, drums: true, marks: !!D.marks };
+const tiles = D.tiles.map((t) => { const im = new Image(); im.src = t.src; im.onload = () => draw(); return { t0: t.t0, t1: t.t1, im }; });
+let pxs = 80, W = 0, dragging = false;
+const H = { sec: 16, chord: 18, spec: 210, roll: 250, drum: 56, axis: 18 };
+const Y = {}; { let y = 0; for (const k of ["sec", "chord", "spec", "roll", "drum", "axis"]) { Y[k] = y; y += H[k]; } Y.total = y; }
+
+$("head").textContent = D.header;
+$("notes").textContent = D.notes.join("  ·  ");
+for (const k of Object.keys(show)) {
+  if (k === "marks" && !D.marks) continue;
+  if (D.lanes[k] && !D.lanes[k].notes.length) continue;
+  if (k === "drums" && !D.drums.length) continue;
+  const lab = document.createElement("label"), cb = document.createElement("input");
+  cb.type = "checkbox"; cb.checked = show[k];
+  cb.addEventListener("change", () => { show[k] = cb.checked; draw(); });
+  lab.append(cb, " " + k); $("toggles").append(lab, " ");
+}
+
+function fmt(t) { const m = Math.floor(t / 60); return m + ":" + (t - 60 * m).toFixed(1).padStart(4, "0"); }
+function t0() { return scroll.scrollLeft / pxs; }
+function xOf(t) { return (t - t0()) * pxs; }
+function tOf(x) { return t0() + x / pxs; }
+function yPitch(m, top, h) { return top + h * (1 - (m - D.lo + 0.5) / (D.hi - D.lo + 1)); }
+function rowH(h) { return h / (D.hi - D.lo + 1); }
+
+function resize() {
+  W = cv.clientWidth;
+  const r = window.devicePixelRatio || 1;
+  cv.width = Math.round(W * r); cv.height = Math.round(Y.total * r); cv.style.height = Y.total + "px";
+  ctx.setTransform(r, 0, 0, r, 0, 0);
+  spacer.style.width = Math.ceil(D.duration * pxs + W) + "px";
+  draw();
+}
+
+function band(items, top, h, fill) {
+  const a = t0(), b = a + W / pxs;
+  items.forEach((c, i) => {
+    if (c.e < a || c.s > b) return;
+    const x0 = xOf(c.s), x1 = xOf(c.e);
+    ctx.fillStyle = fill(i); ctx.fillRect(x0, top + 1, x1 - x0 - 1, h - 2);
+    if (x1 - x0 > 24) { ctx.fillStyle = "#ddd"; ctx.fillText(c.l + (c.f ? " " + c.f : ""), Math.max(x0, 0) + 3, top + h - 5); }
+  });
+}
+
+function draw() {
+  if (!W) return;
+  const a = t0(), b = a + W / pxs;
+  ctx.clearRect(0, 0, W, Y.total);
+  ctx.font = "11px system-ui, sans-serif";
+  band(D.sections, Y.sec, H.sec, (i) => i % 2 ? "#2b2b36" : "#23232c");
+  band(D.chords, Y.chord, H.chord, (i) => i % 2 ? "#2a2a2a" : "#222");
+  if (show.spectrogram) for (const t of tiles) {
+    if (t.t1 < a || t.t0 > b || !t.im.complete) continue;
+    ctx.drawImage(t.im, xOf(t.t0), Y.spec, (t.t1 - t.t0) * pxs, H.spec);
+  }
+  for (let m = D.lo; m <= D.hi; m++) if ([1, 3, 6, 8, 10].includes(m % 12)) {
+    ctx.fillStyle = "#181818"; ctx.fillRect(0, yPitch(m, Y.roll, H.roll) - rowH(H.roll) / 2, W, rowH(H.roll));
+  }
+  for (const [t, bar] of D.lines) {
+    if (t < a || t > b) continue;
+    ctx.fillStyle = bar ? "#555" : "#2e2e2e"; ctx.fillRect(Math.round(xOf(t)), Y.spec, bar ? 1 : 0.6, Y.axis - Y.spec);
+  }
+  for (const lane of ["other", "bass", "melody"]) {
+    const L = D.lanes[lane]; if (!show[lane] || !L) continue;
+    for (const n of L.notes) {
+      if (n.e < a || n.s > b) continue;
+      const x0 = xOf(n.s), w = Math.max(1, (n.e - n.s) * pxs), rh = rowH(H.roll), sh = rowH(H.spec);
+      const sus = show.marks && n.f !== undefined;
+      ctx.globalAlpha = sus ? 0.35 : 1; ctx.fillStyle = L.color;
+      ctx.fillRect(x0, yPitch(n.m, Y.roll, H.roll) - rh * 0.4, w, rh * 0.8);
+      ctx.globalAlpha = 1; ctx.strokeStyle = "#ffffffcc"; ctx.lineWidth = 0.8;
+      ctx.strokeRect(x0, yPitch(n.m, Y.spec, H.spec) - sh / 2, w, sh);
+      if (sus) {
+        ctx.setLineDash([4, 3]); ctx.strokeStyle = "#ff3b3b"; ctx.lineWidth = 1.4;
+        ctx.strokeRect(x0, yPitch(n.m, Y.spec, H.spec) - sh / 2 - 1, w, sh + 2);
+        ctx.strokeRect(x0, yPitch(n.m, Y.roll, H.roll) - rh / 2, w, rh);
+        ctx.setLineDash([]);
+      }
+    }
+  }
+  if (show.marks && D.marks) for (const m of D.marks.missed) {
+    if (m.end < a || m.start > b) continue;
+    const sh = rowH(H.spec);
+    ctx.setLineDash([2, 2]); ctx.strokeStyle = "#3dff7a"; ctx.lineWidth = 1.4;
+    ctx.strokeRect(xOf(m.start), yPitch(m.midi, Y.spec, H.spec) - sh / 2 - 1, (m.end - m.start) * pxs, sh + 2);
+    ctx.setLineDash([]);
+  }
+  if (show.drums && D.drums.length) {
+    const rh = H.drum / D.drum_classes.length;
+    D.drum_classes.forEach((c, i) => { ctx.fillStyle = "#777"; ctx.fillText(c, 3, Y.drum + rh * (i + 1) - 2); });
+    for (const h of D.drums) {
+      if (h.t < a || h.t > b) continue;
+      const i = D.drum_classes.indexOf(h.c); if (i < 0) continue;
+      ctx.fillStyle = D.drum_colors[i]; ctx.beginPath(); ctx.arc(xOf(h.t), Y.drum + rh * (i + 0.5), 3, 0, 7); ctx.fill();
+    }
+  }
+  ctx.fillStyle = "#888";
+  const step = pxs >= 120 ? 1 : pxs >= 60 ? 2 : 5;
+  for (let s = Math.ceil(a / step) * step; s <= b; s += step) { ctx.fillRect(xOf(s), Y.axis, 1, 4); ctx.fillText(fmt(s), xOf(s) + 2, Y.axis + 14); }
+  for (let m = D.lo; m <= D.hi; m++) if (m % 12 === 0) {
+    ctx.fillStyle = "#999"; ctx.fillText("C" + (m / 12 - 1), 3, yPitch(m, Y.roll, H.roll) + 4); ctx.fillText("C" + (m / 12 - 1), 3, yPitch(m, Y.spec, H.spec) + 4);
+  }
+  const px = xOf(audio.currentTime);
+  ctx.fillStyle = "#fff"; ctx.fillRect(px - 0.75, 0, 1.5, Y.total);
+  $("time").textContent = fmt(audio.currentTime) + " / " + fmt(D.duration);
+}
+
+function follow() {
+  if (!$("follow").checked) return;
+  const p = audio.currentTime, a = t0(), span = W / pxs;
+  if (p < a + 0.05 * span || p > a + 0.7 * span) scroll.scrollLeft = Math.max(0, (p - 0.3 * span) * pxs);
+}
+function tick() { follow(); draw(); if (!audio.paused) requestAnimationFrame(tick); }
+function toggle() { if (audio.paused) audio.play(); else audio.pause(); }
+audio.addEventListener("play", () => { $("play").textContent = "Pause"; requestAnimationFrame(tick); });
+audio.addEventListener("pause", () => { $("play").textContent = "Play"; draw(); });
+audio.addEventListener("seeked", draw);
+$("play").addEventListener("click", toggle);
+document.addEventListener("keydown", (e) => {
+  if (e.code === "Space" && !(e.target instanceof HTMLSelectElement)) { e.preventDefault(); toggle(); }
+});
+$("speed").addEventListener("change", (e) => { audio.playbackRate = Number(e.target.value); });
+$("zoom").addEventListener("change", (e) => {
+  const mid = t0() + W / pxs / 2; pxs = Number(e.target.value); resize(); scroll.scrollLeft = Math.max(0, (mid - W / pxs / 2) * pxs); draw();
+});
+scroll.addEventListener("scroll", draw);
+cv.addEventListener("wheel", (e) => { scroll.scrollLeft += e.deltaX || e.deltaY; e.preventDefault(); }, { passive: false });
+function seekAt(e) { const r = cv.getBoundingClientRect(); audio.currentTime = Math.min(D.duration, Math.max(0, tOf(e.clientX - r.left))); draw(); }
+cv.addEventListener("mousedown", (e) => { dragging = true; seekAt(e); });
+window.addEventListener("mouseup", () => { dragging = false; });
+cv.addEventListener("mouseleave", () => { tip.style.display = "none"; });
+cv.addEventListener("mousemove", (e) => {
+  if (dragging) { seekAt(e); return; }
+  const r = cv.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top, t = tOf(x);
+  const lines = hit(t, y);
+  if (!lines.length) { tip.style.display = "none"; return; }
+  tip.textContent = lines.join("\n"); tip.style.display = "block";
+  tip.style.left = Math.min(x + 12, W - 260) + "px"; tip.style.top = (y + 14) + "px";
+});
+
+function hit(t, y) {
+  for (const lane of ["melody", "bass", "other"]) {
+    const L = D.lanes[lane]; if (!show[lane] || !L) continue;
+    for (const n of L.notes) {
+      if (t < n.s || t > n.e) continue;
+      const inRoll = Math.abs(y - yPitch(n.m, Y.roll, H.roll)) <= rowH(H.roll) / 2 + 1;
+      const inSpec = Math.abs(y - yPitch(n.m, Y.spec, H.spec)) <= rowH(H.spec) / 2 + 1;
+      if (!inRoll && !inSpec) continue;
+      const out = [lane + "  " + n.n + "  " + n.s.toFixed(2) + "-" + n.e.toFixed(2) + " s"];
+      const s = show.marks && n.f !== undefined && D.marks.suspects[n.f];
+      if (s) {
+        out.push("flags: " + s.flags.join(", "));
+        out.push("contrast " + s.contrast_db + " dB  semitone " + s.semitone_db + " dB  perc " + s.perc_ratio +
+                 "  level " + s.level_db + " dB  reattacks " + s.reattacks);
+      }
+      return out;
+    }
+  }
+  if (show.marks && D.marks) for (const m of D.marks.missed) {
+    if (t >= m.start && t <= m.end && Math.abs(y - yPitch(m.midi, Y.spec, H.spec)) <= rowH(H.spec) / 2 + 2)
+      return ["missed energy  " + m.note + "  " + m.start.toFixed(2) + "-" + m.end.toFixed(2) + " s"];
+  }
+  return [];
+}
+window.addEventListener("resize", resize);
+resize();
+</script>
+</body>
+</html>

@@ -53,7 +53,7 @@ DEFAULT_LIMITS = {
     "read_timeout": 30.0, "max_body": 64 * MiB, "disk_floor": 2 * 1024 * MiB, "ml_stdout": 8 * MiB,
     "response_max": 8 * MiB, "stderr_line": 4096, "convert_output": 4096, "log_bytes": 5 * MiB, "log_files": 3,
     "send_timeout": 30.0, "stop_grace": 630.0, "rhythm_timeout": 300.0, "rhythm_output": 4 * MiB,
-    "earcheck_timeout": 60.0, "roll_timeout": 60.0, "ml_stop_grace": 40.0,
+    "earcheck_timeout": 60.0, "roll_timeout": 60.0, "view_timeout": 180.0, "ml_stop_grace": 40.0,
 }
 CONFIG_KEYS = {"bind", "port", "allow", "clients", "cert", "key", "ml", "root", "inbox", "limit_exec",
                "launchd_logs", "test_mode", "limits", "test_ready_file", "rhythm"}
@@ -161,8 +161,11 @@ ROUTE_EARCHECK = re.compile(r"\A/earcheck/([0-9a-f]{64})\Z")
 M4A_BRANDS = (b"M4A ", b"M4B ", b"mp42", b"mp41", b"isom", b"iso2")
 PCM_GUID = b"\x01\x00\x00\x00\x00\x00\x10\x00\x80\x00\x00\xaa\x00\x38\x9b\x71"
 UPLOAD_NAMES = ("upload.part", "upload.wav", "upload.mp3", "upload.m4a", "converted.wav", "listen.wav", "earcheck.wav",
-                "roll.png", "roll.png.part", "roll-marks.json")
+                "roll.png", "roll.png.part", "roll-marks.json", "view.m4a", "view.html", "view.html.part")
 ROLL = os.path.join(HERE, "roll.py")  # run by rhythm roll_python (numpy, matplotlib); never imported here
+VIEW = os.path.join(HERE, "view.py")  # sheet HTML, run by roll_python too (with view.html); never imported here
+VIEW_MAX = 24 * MiB  # view.py SIZE_MAX: the HTML response may exceed response_max (it carries the audio)
+HTML_DETAIL = ("format=html is POST only, with the analysed audio as the body; optional marks=1; no other parameter")
 EAR_CHECK = os.path.join(HERE, "ear_check.py")  # run by the rhythm python (numpy); never imported here
 EARCHECK_LAYERS = ("melody", "bass", "other", "chords", "drums", "clicks")  # ear_check.LAYERS
 EARCHECK_DEFAULT = ("melody", "bass", "other", "chords", "drums")  # ear_check.DEFAULT
@@ -2952,6 +2955,8 @@ class Engine:
     def sheet_view(self, rid, q):
         """The GET /sheet body for parsed query q (format, start, end, view, layers)."""
         fmt = q.get("format", "text")
+        if fmt == "html":
+            raise HttpError("bad_request", detail=HTML_DETAIL)
         if fmt == "png":
             if set(q) != {"format"}:
                 raise HttpError("bad_request", detail=ROLL_DETAIL)
@@ -3187,6 +3192,41 @@ class Engine:
                                      and isinstance(marks.get("missed"), list)):
             raise HttpError("roll_failed")
         return png, marks
+
+    def view_job(self, q):
+        """The POST /sheet?format=html query (or the CLI's options): {"marks": bool}."""
+        if not set(q) <= {"format", "marks"} or q.get("marks", "1") != "1":
+            raise HttpError("bad_request", detail=HTML_DETAIL)
+        return {"marks": "marks" in q}
+
+    def view_render(self, rid, upload, listen, job, d):
+        """The upload as AAC (limit_exec.py --aac), then view.py under limit_exec.py --view / --view-marks with rhythm
+        roll_python. Returns the HTML bytes; never a partial file. Outputs go to d (the request's upload directory)."""
+        if not os.path.isfile(VIEW):
+            raise HttpError("roll_unavailable")
+        aac, out = d + "/view.m4a", d + "/view.html"
+        head = [PYTHON, "-I", self.cfg["limit_exec"]]
+        rc = self._run_capped(head + ["--aac", upload, aac], self.limits["convert_timeout"])
+        self.log.event("convert_exit", rc=rc, use="view")
+        if rc is None:
+            raise HttpError("timeout")
+        if rc != 0 or not os.path.isfile(aac):
+            raise HttpError("invalid_audio")
+        argv = head + ["--view-marks" if job["marks"] else "--view", self.cfg["rhythm"]["roll_python"], VIEW,
+                       self.rhythm_path(rid), listen, aac, out]
+        t0 = time.monotonic()
+        rc = self._run_capped(argv, self.limits["view_timeout"])
+        self.log.event("view_exit", result_id=rid, marks=job["marks"], rc=rc, seconds=round(time.monotonic() - t0, 3))
+        if rc is None:
+            raise HttpError("timeout")
+        try:
+            with open(out, "rb") as f:
+                html = f.read(VIEW_MAX + 1)
+        except OSError:
+            html = b""
+        if rc != 0 or not html.startswith(b"<!doctype html>") or len(html) > VIEW_MAX:
+            raise HttpError("roll_failed")
+        return html
 
     # analyze job (staged upload -> inbox link -> ml analyze)
     def _job(self, job):
@@ -3462,9 +3502,9 @@ class Handler(BaseHTTPRequestHandler):
                        "ms": int((time.monotonic() - self.t0) * 1000)})
 
     # ---- io
-    def send_raw(self, status, body_bytes, content_type="application/json"):
+    def send_raw(self, status, body_bytes, content_type="application/json", max_bytes=None):
         lim = self.server.app.limits
-        if len(body_bytes) > lim["response_max"]:
+        if len(body_bytes) > (max_bytes or lim["response_max"]):
             status, obj = error_body("invalid_output")
             body_bytes, content_type = json.dumps(obj).encode(), "application/json"
         phrase = http.HTTPStatus(status).phrase
@@ -3829,15 +3869,17 @@ class Handler(BaseHTTPRequestHandler):
                              "audio_base64": base64.b64encode(wav).decode("ascii")})
 
     def do_roll(self, app, result_id, rid, query, cl, rest, body_sha, expect_continue):
-        """POST /sheet/<id>?format=png&page=N, body = the analysed audio: that page as image/png. As /earcheck:
+        """POST /sheet/<id>?format=png&page=N (that page as image/png) or format=html[&marks=1] (the whole song as one
+        offline HTML with the audio, view.py), body = the analysed audio. As /earcheck:
         synchronous, nothing stored, API gate and team flock held, upload removed before the reply."""
         q = parse_query(query, ("format", "page", "marks", "style", "start", "end", "title", "credit", "view", "layers"))
-        if q.get("format") != "png":
+        if q.get("format") not in ("png", "html"):
             raise HttpError("method_not_allowed")  # the text and JSON sheets are GET only, as before
         if cl > app.limits["max_body"]:
             raise HttpError("payload_too_large")
         v = app.rhythm_or_error(result_id)  # refused before any byte of the upload is read
-        job = app.roll_job(v, q)
+        html = q["format"] == "html"
+        job = app.view_job(q) if html else app.roll_job(v, q)
         if not (app.cfg.get("rhythm") or {}).get("roll_python"):
             raise HttpError("roll_unavailable")
         if not app.gate.acquire(blocking=False):
@@ -3859,13 +3901,19 @@ class Handler(BaseHTTPRequestHandler):
             lfd = app.team_flock()
             d = app.uploads + "/" + op
             app.roll_audio(d + "/upload." + kind, d + "/listen.wav", v)
-            png = app.roll_render(result_id, d + "/listen.wav", job, d)[0]
+            if html:
+                body = app.view_render(result_id, d + "/upload." + kind, d + "/listen.wav", job, d)
+            else:
+                body = app.roll_render(result_id, d + "/listen.wav", job, d)[0]
         finally:
             if lfd is not None:
                 os.close(lfd)
             app.cleanup(op, False)
             app.gate.release()
-        self.send_raw(200, png, "image/png")
+        if html:
+            self.send_raw(200, body, "text/html; charset=utf-8", VIEW_MAX)
+        else:
+            self.send_raw(200, body, "image/png")
 
     def _prelaunch_fail(self, app, client, rid, op, code):
         status, body = error_body(code, request_id=rid)

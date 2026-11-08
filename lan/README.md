@@ -19,10 +19,11 @@ Nothing here is installed. No LaunchAgent, firewall rule, certificate or key is 
 | `bass_onsets.py` | Optional bass layer: Basic Pitch note starts, run by `rhythm_worker.py` in its own environment |
 | `other_notes.py` | Optional accompaniment layer: Basic Pitch notes of the other stem, run by `rhythm_worker.py` in its own environment |
 | `adtof_model.py` | Optional drum layer: ADTOF Frame_RNN inference on CPU, run by `rhythm_worker.py` as its own process (separate implementation, reads the official checkpoint) |
-| `limit_exec.py` | Sets RLIMIT_CPU 60 s / FSIZE 24 MiB / NOFILE 32, then `execv /usr/bin/afconvert -f WAVE -d LEI16@16000 -c 1 src dst`. Two more fixed modes for the ear check: `--listen SRC DST` (`-d LEI16@44100 -c 1`, FSIZE 56 MiB) and `--earcheck PYTHON SCRIPT RESULT SRC START END OUT LAYERS` (FSIZE 16 MiB, NOFILE 64, `execv PYTHON -I SCRIPT ...`), and `--roll PYTHON SCRIPT RESULT SRC PAGE OUT`, `--roll-marks ... PAGE OUT MARKS` and `--roll-poster ... START END OUT TITLE CREDIT` for the sheet PNG (FSIZE 8 MiB, NOFILE 64) |
+| `limit_exec.py` | Sets RLIMIT_CPU 60 s / FSIZE 24 MiB / NOFILE 32, then `execv /usr/bin/afconvert -f WAVE -d LEI16@16000 -c 1 src dst`. Two more fixed modes for the ear check: `--listen SRC DST` (`-d LEI16@44100 -c 1`, FSIZE 56 MiB) and `--earcheck PYTHON SCRIPT RESULT SRC START END OUT LAYERS` (FSIZE 16 MiB, NOFILE 64, `execv PYTHON -I SCRIPT ...`), and `--roll PYTHON SCRIPT RESULT SRC PAGE OUT`, `--roll-marks ... PAGE OUT MARKS` and `--roll-poster ... START END OUT TITLE CREDIT` for the sheet PNG (FSIZE 8 MiB, NOFILE 64), and for the sheet HTML `--aac SRC DST` (`-f m4af -d aac@44100 -b 96000`, FSIZE 12 MiB) and `--view` / `--view-marks PYTHON SCRIPT RESULT SRC AAC OUT` (CPU 150 s, FSIZE 25 MiB, NOFILE 64) |
 | `local_cli.py` | Mac-local CLI (no network): analyze + rhythm layer, report, timeline and sheet through the server's own code (`server.Engine`); see "Local CLI (this Mac)" |
 | `sign.py` | Shared canonical-string and HMAC helper (server, tests, Python clients) |
 | `sheet.py` | LLM sheet: compact section-indexed text/JSON of a stored rhythm result, served at `/sheet/<id>`, with a bar-by-bar zoom (stdlib only) |
+| `view.py`, `view.html` | Sheet HTML: the whole song as one offline page with its audio (run under `rhythm.roll_python`, which also needs Pillow; never imported by the server); see "Sheet HTML" |
 | `roll.py` | Sheet PNG page: spectrogram on a semitone axis over a piano roll of a stored result (run under `rhythm.roll_python` with numpy and matplotlib; never imported by the server); see "Sheet PNG" |
 | `ear_check.py` | Ear check for a person: left ear the original, right ear a synth replay of a stored result, loudness following the original (local tool, and run by the server for `POST /earcheck/<id>` under the rhythm python; needs numpy) |
 | `sign_vector.mjs` | Reference Node signer; prints or checks the fixed vector (`tests/vectors.json`) |
@@ -192,6 +193,49 @@ characters each (any script; no control characters), empty when left out. The CL
 Cost on a 20 s span (Apple Silicon, under `limit_exec.py`): a plain page about 0.5 s and 230 MB, marks about
 0.9 s and 460 MB, a poster about 1 s and 510 MB (PNG about 2.4 MB); all well inside CPU 60 s and FSIZE 8 MiB.
 
+## Sheet HTML (whole song, with audio)
+
+One offline HTML file per stored result: the whole song as one horizontally scrolling strip, played in the browser.
+Top to bottom: section and chord labels, the spectrogram (the PNG's multi-resolution rows, 20 ms columns, as JPEG
+tiles) with each note outlined over it, the piano roll by part, drum hits, a time axis; bar lines as on the PNG pages
+(downbeats when the result's bar layer covers that part of the song, else every 4th beat, with the note under the
+strip). Controls: play/pause (button or space), a playhead that follows the audio (the view scrolls with it while
+"follow" is on), click or drag on the strip to seek, speed 0.5 / 0.75 / 1x (pitch kept), zoom 40 / 80 / 160 px/s,
+toggles for the spectrogram, each part, drums and marks; hovering a note shows its part, name, start-end and, with
+marks, its flags and their numbers. With marks the same checks as the PNG marks run page by page (see "Marks") and
+the corner note says "marks: unvalidated heuristics, not accuracy".
+
+- `POST /sheet/<id>?format=html[&marks=1]` with the analysed audio as the body returns `text/html; charset=utf-8`.
+  Same rules as the PNG: the audio must be this result's (duration within 0.5 s), at most 600 s, synchronous,
+  nothing stored, gate and team flock held, uploads removed before the reply; errors are JSON (`400 bad_request` for
+  any other parameter, `400 invalid_argument`, `400 invalid_audio`, `503 roll_unavailable`, `500 roll_failed`,
+  `504 timeout`). `GET /sheet/<id>?format=html` is `400 bad_request` (POST only). The text, JSON and PNG sheets are
+  unchanged.
+- CLI: `local_cli.py sheet ID --html DIR --audio FILE [--marks]` writes `DIR/<first 12 hex of ID>.html` (0644, never
+  overwriting: an existing file is `invalid_path`) and prints `{"result_id", "format": "html", "path", "bytes",
+  "duration", "marks"}` (plus `marks_note` with `--marks`). Example:
+
+  ```sh
+  /usr/bin/python3 -I local_cli.py sheet <result_id> --html ~/Pictures/roll --audio song.m4a --marks
+  ```
+
+Audio: the upload is converted to AAC 96 kbps at 44.1 kHz (`limit_exec.py --aac`, afconvert, channels kept) and
+embedded as a `data:audio/mp4` URI; the spectrogram is drawn from the 44.1 kHz mono conversion as for the PNG.
+**The file contains the audio**: share it only where the audio itself may go.
+
+Size and time: the page is at most 24 MiB (`view.py` refuses more; the response has its own cap, above
+`response_max`); a 600 s song comes to about 12 MiB, mostly audio. The renderer runs under CPU 150 s and
+`view_timeout` 180 s: marks cost one analysis per sheet page, so a long song with marks takes far longer than one
+without.
+
+Safety: the file loads nothing from anywhere. A Content-Security-Policy meta allows only inline script and style and
+`data:` images and media (`default-src 'none'`), there is no external URL, and no tag has a `src` or `href`. Every
+text from the result (chord and section labels, note names, marks) sits in one `application/json` block with `<`,
+`>`, `&` and U+2028/U+2029 escaped and reaches the page through `textContent` or canvas text only, never `innerHTML`.
+
+The page's JavaScript (playback, seeking, scrolling, toggles, hover) has no unit tests; the tests check the file's
+structure, escaping, CSP, size cap and the routes.
+
 ## Local CLI (this Mac)
 
 The LAN server refuses loopback in production and holds only the Windows client keys, so agents on the Mac itself
@@ -209,6 +253,7 @@ same trust boundary as the `ml` wrapper: no TLS, no signing, no nonces, no recei
 /usr/bin/python3 -I local_cli.py sheet <result_id> --layers chords,drums                   # only those section layers
 /usr/bin/python3 -I local_cli.py sheet <result_id> --png DIR --audio song.wav            # PNG pages (see "Sheet PNG")
 /usr/bin/python3 -I local_cli.py sheet <result_id> --png DIR --audio song.wav --marks    # with suspect/missed marks
+/usr/bin/python3 -I local_cli.py sheet <result_id> --html DIR --audio song.wav [--marks] # one offline page, with audio
 /usr/bin/python3 -I local_cli.py sheet <result_id> --png DIR --audio song.wav --style poster --start 40 --end 60
 ```
 

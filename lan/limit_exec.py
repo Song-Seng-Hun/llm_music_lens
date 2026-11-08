@@ -11,6 +11,11 @@ Usage: limit_exec.py SRC DST            afconvert to WAVE 16 kHz mono s16 (analy
                                         PYTHON -I SCRIPT RESULT SRC PAGE OUT MARKS (page with marks + JSON)
        limit_exec.py --roll-poster PYTHON SCRIPT RESULT SRC START END OUT TITLE CREDIT
                                         PYTHON -I SCRIPT --poster RESULT SRC START END OUT TITLE CREDIT
+       limit_exec.py --aac SRC DST      afconvert to AAC 44.1 kHz 96 kbps in M4A (sheet HTML)
+       limit_exec.py --view PYTHON SCRIPT RESULT SRC AAC OUT
+                                        PYTHON -I SCRIPT RESULT SRC AAC OUT (sheet HTML, view.py)
+       limit_exec.py --view-marks PYTHON SCRIPT RESULT SRC AAC OUT
+                                        PYTHON -I SCRIPT RESULT SRC AAC OUT --marks
 Paths are absolute; DST/OUT must not exist. Every argv is fixed; no free-form options.
 The threaded server never uses preexec_fn; it runs this helper with start_new_session=True.
 """
@@ -28,13 +33,16 @@ NOFILE = 32
 EARCHECK_NOFILE = 64  # numpy's import opens more files than afconvert
 RE_SECONDS = re.compile(r"\A(0|[1-9][0-9]{0,5})(\.[0-9]{1,6})?\Z")
 ROLL_FSIZE_BYTES = 8 * 1024 * 1024  # one page PNG is about 0.5 MB
+AAC_FSIZE_BYTES = 12 * 1024 * 1024  # 600 s at 96 kbps is 7.2 MB
+VIEW_FSIZE_BYTES = 25 * 1024 * 1024  # view.py SIZE_MAX is 24 MiB
+VIEW_CPU_SECONDS = 150  # a 580 s song with marks took 49 s (one marks pass per sheet page)
 RE_PAGE = re.compile(r"\A[1-9][0-9]{0,3}\Z")
 TEXT_MAX = 80  # roll.py TEXT_MAX: title and credit, printable characters only
 RE_LAYERS = re.compile(r"\A[a-z]{1,8}(,[a-z]{1,8}){0,5}\Z")
 
 
-def apply_limits(fsize=FSIZE_BYTES, nofile=NOFILE):
-    resource.setrlimit(resource.RLIMIT_CPU, (CPU_SECONDS, CPU_SECONDS))
+def apply_limits(fsize=FSIZE_BYTES, nofile=NOFILE, cpu=CPU_SECONDS):
+    resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu))
     resource.setrlimit(resource.RLIMIT_FSIZE, (fsize, fsize))
     resource.setrlimit(resource.RLIMIT_NOFILE, (nofile, nofile))
 
@@ -73,7 +81,41 @@ def roll_command(argv):
     return child, outs
 
 
+def aac_command(src, dst):
+    return [AFCONVERT, "-f", "m4af", "-d", "aac@44100", "-b", "96000", src, dst]  # @44100: 96 kbps needs >= 32 kHz
+
+
+def view_command(argv):
+    """None: not a view mode; (): bad arguments; else the child argv (outputs: its last path)."""
+    if len(argv) < 2 or argv[1] not in ("--view", "--view-marks"):
+        return None
+    if len(argv) != 8 or not all(check_path(p) for p in argv[2:]):
+        return ()
+    return [argv[2], "-I"] + argv[3:] + (["--marks"] if argv[1] == "--view-marks" else [])
+
+
 def main(argv):
+    view = view_command(argv)
+    if view is not None:
+        if not view:
+            sys.stderr.write("usage: limit_exec.py --view | --view-marks PYTHON SCRIPT RESULT SRC AAC OUT\n")
+            return 2
+        if os.path.lexists(argv[7]):
+            sys.stderr.write("destination exists\n")
+            return 2
+        apply_limits(VIEW_FSIZE_BYTES, EARCHECK_NOFILE, VIEW_CPU_SECONDS)
+        os.execv(view[0], view)
+        return 127
+    if len(argv) >= 2 and argv[1] == "--aac":
+        if len(argv) != 4 or not check_path(argv[2]) or not check_path(argv[3]):
+            sys.stderr.write("usage: limit_exec.py --aac SRC DST (absolute)\n")
+            return 2
+        if os.path.lexists(argv[3]):
+            sys.stderr.write("destination exists\n")
+            return 2
+        apply_limits(AAC_FSIZE_BYTES)
+        os.execv(AFCONVERT, aac_command(argv[2], argv[3]))
+        return 127
     roll = roll_command(argv)
     if roll is not None:
         if not roll:
