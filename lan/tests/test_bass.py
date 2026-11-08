@@ -1,4 +1,7 @@
-"""Bass layer (worker 0.8.0): server wiring with a fake worker, and the worker's fallbacks with fake Demucs, RMVPE and Basic Pitch."""
+"""Bass layer (worker 0.8.0): server wiring with a fake worker, and the worker's fallbacks with fake Demucs, RMVPE and Basic Pitch.
+The Basic Pitch confirmation (0.25.0) on fake inputs, and once with the real models when MUSIC_LENS_BASS_CONFIG names the
+server config (unverified otherwise)."""
+import fcntl
 import json
 import os
 import shutil
@@ -128,6 +131,9 @@ cfg = json.loads(sys.argv[2])
 if cfg.get("rows"):
     print(json.dumps(rw.bass_rows(np.array(cfg["rows"]["f0"], dtype=float), cfg["rows"]["starts"])))
     sys.exit(0)
+if cfg.get("confirm"):
+    print(json.dumps(rw.bass_confirmed(cfg["confirm"]["rows"], cfg["confirm"]["notes"])))
+    sys.exit(0)
 sha = lambda p: hashlib.sha256(open(p, "rb").read()).hexdigest()
 rw.RMVPE_CODE, rw.RMVPE_CODE_SHA256 = cfg["rmvpe_code"], sha(cfg["rmvpe_code"])
 rw.RMVPE_SHA256 = sha(cfg["sep"]["rmvpe"])
@@ -159,9 +165,11 @@ FAKE_ONSETS = r'''import json, sys
 if "%s" == "fail":
     sys.exit(5)
 if "%s" == "bad":
-    open(sys.argv[2], "w").write("[null]")
+    open(sys.argv[2], "w").write("[[0.0, 1.0]]")
+elif "%s" == "drums":
+    json.dump([[0.0, 2.0, 50]], open(sys.argv[2], "w"))
 else:
-    json.dump([0.0, 1.0], open(sys.argv[2], "w"))
+    json.dump([[0.0, 1.0, 40], [1.0, 2.0, 41]], open(sys.argv[2], "w"))
 '''
 
 
@@ -198,7 +206,7 @@ class BassFallbackTest(unittest.TestCase):
     def run_bass(self, demucs_fail="", rmvpe="ok", onsets="ok", source="noise", **cfg):
         files = {}
         for name, text in (("demucs", FAKE_DEMUCS % (ESSENTIA_PY, demucs_fail)), ("rmvpe.py", FAKE_RMVPE % rmvpe),
-                           ("onsets.py", FAKE_ONSETS % (onsets, onsets)), ("bp", "#!/bin/sh\nexec %s \"$@\"\n" % ESSENTIA_PY)):
+                           ("onsets.py", FAKE_ONSETS % (onsets, onsets, onsets)), ("bp", "#!/bin/sh\nexec %s \"$@\"\n" % ESSENTIA_PY)):
             files[name] = os.path.join(self.d, name)
             with open(files[name], "w") as f:
                 f.write(text)
@@ -218,6 +226,10 @@ class BassFallbackTest(unittest.TestCase):
         self.assertEqual((field["status"], field["note_count"], field["reliability"]), ("done", len(rows), "low_reference"))
         self.assertEqual({r["note"] for r in rows}, {"E2"})
         self.assertEqual(len(rows), 2)  # split at the start at 1.0 s
+
+    def test_unconfirmed_notes_dropped(self):
+        field, rows = self.run_bass(onsets="drums")["bass"]  # Basic Pitch hears only D3: the E2 run is not a bass note
+        self.assertEqual((field["status"], field["note_count"], rows), ("done", 0, []))
 
     def test_vocal_failure_keeps_bass(self):
         out_ = self.run_bass(demucs_fail="vocals")
@@ -244,6 +256,78 @@ class BassFallbackTest(unittest.TestCase):
         self.assertEqual([r["midi"] for r in rows], [40, 40, 43])  # a start splits it
         rows = self.run_driver({"rows": {"f0": [e2] * 5 + [0.0] * 40, "starts": []}})
         self.assertEqual(rows, [])  # under 80 ms
+
+    def test_confirmed(self):
+        rows = [{"start": 0.0, "end": 0.5, "midi": 40, "note": "E2"}, {"start": 0.5, "end": 1.0, "midi": 50, "note": "D3"},
+                {"start": 1.0, "end": 1.5, "midi": 28, "note": "E1"}, {"start": 2.0, "end": 2.5, "midi": 33, "note": "A1"}]
+        notes = [[0.1, 0.4, 41], [0.5, 1.0, 52], [1.4, 1.6, 28], [2.5, 3.0, 33]]
+        kept = self.run_driver({"confirm": {"rows": rows, "notes": notes}})
+        # a semitone off counts, two do not, any overlap counts, touching ends do not
+        self.assertEqual([r["note"] for r in kept], ["E2", "E1"])
+        self.assertEqual(self.run_driver({"confirm": {"rows": rows, "notes": []}}), [])
+
+
+REAL_DRIVER = r'''
+import json, os, sys
+sys.path.insert(0, sys.argv[1])
+import numpy as np
+import rhythm_worker as rw
+sep = json.loads(sys.argv[2])
+sr, rng = 44100, np.random.default_rng(0)
+y = np.zeros(sr * 8)
+def put(t, x):
+    i = int(t * sr); y[i:i + len(x)] += x[:len(y) - i]
+def ring(f_end, f_start, tau, n=1.0):
+    t = np.arange(int(n * sr)) / sr
+    f = f_end + (f_start - f_end) * np.exp(-t / 0.04)
+    return 0.8 * np.sin(2 * np.pi * np.cumsum(f) / sr) * np.exp(-t / tau) + 0.2 * rng.normal(0, 1, len(t)) * np.exp(-t / 0.004)
+for k in range(8):  # 0-4 s: kick and toms only
+    put(k * 0.5, ring(55, 165, 0.25) if k % 2 == 0 else ring(98 if k % 4 == 1 else 131, 140, 0.4))
+truth = [(4.0, 33), (4.5, 33), (5.0, 36), (5.5, 31), (6.0, 28), (6.5, 40), (7.0, 38)]
+for t0, m in truth:  # 4-8 s: a bass line with a kick on every note
+    t = np.arange(int(0.45 * sr)) / sr
+    ph = 2 * np.pi * 440 * 2 ** ((m - 69) / 12) * t
+    put(t0, 0.4 * sum(np.sin(k * ph) / k ** 1.3 for k in range(1, 8)) * np.minimum(t / 0.005, 1) * np.clip((0.45 - t) / 0.03, 0, 1))
+    put(t0, ring(55, 165, 0.25))
+os.makedirs(sep["scratch"], mode=0o700)
+rw.write_wav(os.path.join(sep["scratch"], "full.wav"), 44100, y / np.abs(y).max() * 0.9)
+rows, reason = rw.bass_stem_notes(sep, 16000 * 8)
+print(json.dumps({"rows": rows, "reason": reason, "truth": truth}))
+'''
+REAL_CONFIG = os.environ.get("MUSIC_LENS_BASS_CONFIG", "")
+
+
+@unittest.skipUnless(REAL_CONFIG, "unverified: set MUSIC_LENS_BASS_CONFIG to the server config for the real Demucs, RMVPE and Basic Pitch")
+class BassRealModelTest(unittest.TestCase):
+    def test_bass_on_kick_kept(self):
+        rh = server.load_config(REAL_CONFIG)["rhythm"]
+        if "basic_pitch_python" not in rh:
+            self.skipTest("unverified: the config has no bass layer")
+        lock = os.open(server.load_config(REAL_CONFIG)["root"] + "/.analyze.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        try:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)  # one heavy job at a time, as /analyze
+            except BlockingIOError:
+                self.skipTest("unverified: the team flock is busy")
+            d = tempfile.mkdtemp(prefix="mlbassreal-")
+            try:
+                sep = {"demucs": rh["demucs"], "rmvpe": rh["rmvpe"], "basic_pitch": rh["basic_pitch_python"],
+                       "scratch": os.path.join(d, "scratch")}
+                driver = os.path.join(d, "driver.py")
+                with open(driver, "w") as f:
+                    f.write(REAL_DRIVER)
+                p = subprocess.run([rh["python"], "-I", driver, REPO, json.dumps(sep)], capture_output=True, timeout=600)
+                self.assertEqual(p.returncode, 0, p.stderr[-800:])
+                got = json.loads(p.stdout)
+            finally:
+                shutil.rmtree(d, ignore_errors=True)
+        finally:
+            os.close(lock)
+        self.assertIsNone(got["reason"])
+        # Sine-like toms are pitched notes to Basic Pitch too, so 0-4 s may keep a few: a known limit (see README.md).
+        self.assertLessEqual(len([r for r in got["rows"] if r["start"] < 3.9]), 8)
+        found = [m for t0, m in got["truth"] if any(abs(r["start"] - t0) <= 0.08 and r["midi"] == m for r in got["rows"])]
+        self.assertGreaterEqual(len(found), len(got["truth"]) - 1, got["rows"])  # the bass on the kick stays
 
 
 class BassPinTest(unittest.TestCase):
