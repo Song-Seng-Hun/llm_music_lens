@@ -3138,12 +3138,15 @@ class Engine:
                 if not RE_NUM.match(q[k]) or q[k].startswith("-"):
                     raise HttpError("bad_request", detail=ROLL_DETAIL)
             a, b = float(q["start"]), float(q["end"])
-            if not ROLL_POSTER_MIN <= round(b - a, 6) <= ROLL_POSTER_MAX or b > v["duration"] + 0.01:
+            if b > v["duration"] + 0.01:  # a rounded end just past the song end is the song end
+                raise HttpError("invalid_argument", detail=ROLL_POSTER_DETAIL)
+            b = min(b, v["duration"])  # roll.py refuses an end past the duration; the span is checked on this end
+            if not ROLL_POSTER_MIN <= round(b - a, 6) <= ROLL_POSTER_MAX:
                 raise HttpError("invalid_argument", detail=ROLL_POSTER_DETAIL)
             text = [q.get(k, "") for k in ("title", "credit")]
             if not all(len(t) <= ROLL_TEXT_MAX and t.isprintable() for t in text):
                 raise HttpError("bad_request", detail=ROLL_TEXT_DETAIL)
-            return {"poster": (a, min(b, v["duration"])), "title": text[0], "credit": text[1]}
+            return {"poster": (a, b), "title": text[0], "credit": text[1]}
         if (not set(q) <= {"format", "page", "marks"} or not RE_PAGE.match(q.get("page", ""))
                 or q.get("marks", "1") != "1"):
             raise HttpError("bad_request", detail=ROLL_DETAIL)

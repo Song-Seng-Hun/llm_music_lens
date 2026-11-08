@@ -228,6 +228,14 @@ class RollModesTest(RollBase):
         st, _, _ = self.post("format=png&style=poster&start=0&end=6")  # no title or credit: empty
         self.assertEqual((st, self.fr.calls()[-1]["argv"][-2:]), (200, ["", ""]))
 
+    def test_poster_end_clamped_to_duration(self):  # duration 6.0; a rounded end up to 0.01 s past it is the end
+        st, _, raw = self.post("format=png&style=poster&start=1&end=6.005")
+        self.assertEqual((st, raw), (200, PNG))
+        self.assertEqual(self.fr.calls()[-1]["argv"][5:7], ["1.000000", "6.000000"])
+        self.assert_error(400, "invalid_argument", "format=png&style=poster&start=5.505&end=6.005")  # 0.495 s once clamped
+        self.assert_error(400, "invalid_argument", "format=png&style=poster&start=1&end=6.02")
+        self.assertEqual(len(self.fr.calls()), 1)
+
     def test_mode_errors(self):
         for q in ("format=png&page=1&marks=2", "format=png&page=1&marks=1&style=poster",
                   "format=png&style=poster&start=0", "format=png&style=poster&start=0&end=2&page=1",
