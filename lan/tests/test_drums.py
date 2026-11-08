@@ -139,6 +139,14 @@ print(json.dumps({"separation": field, "drums": sep.get("drums"), "scratch_left"
 FAKE_DEMUCS = r'''#!%s -I
 import os, shutil, sys
 a = sys.argv[1:]
+if "--stem" not in a:  # one run for all four stems; it fails when any stem is set to fail
+    if "%s".strip(","):
+        sys.exit(3)
+    d = os.path.join(a[a.index("-o") + 1], "full")
+    os.makedirs(d, exist_ok=True)
+    for s in ("vocals", "bass", "drums", "other"):
+        shutil.copy(a[-1], os.path.join(d, s + ".wav"))
+    sys.exit(0)
 stem = a[a.index("--stem") + 1]
 if stem in "%s".split(","):
     sys.exit(3)
@@ -188,7 +196,7 @@ class DrumFallbackTest(unittest.TestCase):
 
     def run_drums(self, demucs_fail="", adtof="ok", source="noise", index="a.index", **cfg):
         files = {}
-        for name, text in (("demucs", FAKE_DEMUCS % (ESSENTIA_PY, demucs_fail)), ("rmvpe.py", FAKE_RMVPE), ("adtof.py", FAKE_ADTOF % (adtof, adtof))):
+        for name, text in (("demucs", FAKE_DEMUCS % (ESSENTIA_PY, demucs_fail, demucs_fail)), ("rmvpe.py", FAKE_RMVPE), ("adtof.py", FAKE_ADTOF % (adtof, adtof))):
             files[name] = os.path.join(self.d, name)
             with open(files[name], "w") as f:
                 f.write(text)
@@ -214,10 +222,10 @@ class DrumFallbackTest(unittest.TestCase):
                                 {"time": 1.0, "class": "hihat"}])  # sorted; the hit past the end is gone
         self.assertEqual(field["hit_counts"], {"kick": 1, "snare": 2, "tom": 0, "hihat": 1, "cymbal": 0})
 
-    def test_vocal_failure_keeps_drums(self):
-        out_ = self.run_drums(demucs_fail="vocals")
+    def test_failed_run_skips_vocal_and_drums(self):
+        out_ = self.run_drums(demucs_fail="vocals")  # one Demucs run serves both, so both go
         self.assertEqual(out_["separation"], {"status": "skipped", "reason": "separation_failed"})
-        self.assertEqual(out_["drums"][0]["status"], "done")
+        self.assert_skipped(out_, "separation_failed")
 
     def test_failures(self):
         self.assert_skipped(self.run_drums(demucs_fail="drums"), "separation_failed")

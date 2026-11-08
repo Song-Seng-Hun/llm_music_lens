@@ -146,7 +146,8 @@ if "%s" == "fail":
     sys.exit(3)
 d = os.path.join(a[a.index("-o") + 1], "full")
 os.makedirs(d, exist_ok=True)
-shutil.copy(a[-1], os.path.join(d, a[a.index("--stem") + 1] + ".wav"))
+for s in [a[a.index("--stem") + 1]] if "--stem" in a else ["vocals", "bass", "drums", "other"]:
+    shutil.copy(a[-1], os.path.join(d, s + ".wav"))
 '''
 FAKE_RMVPE = r'''import sys, wave
 import numpy as np
