@@ -81,11 +81,17 @@ into k pages and labelled `A 1/3`, `A 2/3`, ... (each cut is the beat nearest th
 previous cut and before the next equal cut, else the equal cut, so pages always move forward); a result with no section layer
 gives one page `all` over the whole song. Layout, top to bottom:
 
-- spectrogram of the audio on a semitone axis (STFT 8192/256, 1/3-semitone rows, MIDI 24-96, 70 dB below the
-  page's own peak, so brightness is not comparable between pages), with each melody, bass and other note drawn
-  as an outline over it;
-- piano roll coloured by part (melody, bass, other), chord labels, beat lines (every 4th darker, counted from the
-  song's first beat; these are not downbeats);
+- spectrogram of the audio on a semitone axis (1/3-semitone rows centred on each semitone, MIDI 24-96, 70 dB below
+  the page's own peak, so brightness is not comparable between pages), with each melody, bass and other note drawn
+  as an outline over it. The STFT is multi-resolution with a 256-sample hop: below MIDI 45 a 0.74 s window, below
+  57 a 0.37 s window, above that 0.19 s (32768 / 16384 / 8192 samples at 44.1 kHz), so a Hann main lobe stays under
+  one semitone near each band's low end and two low notes a semitone apart show as two lines (one 8192-point STFT
+  merged them). All bands share frame centres and are scaled by their window sum, so levels match across bands;
+  the price is time detail in the low rows (onsets there smear by about 0.3 s);
+- piano roll coloured by part (melody, bass, other), chord labels, and bar lines: when the result's `bars` layer is
+  done, darker lines at the bars' starts (the downbeats) and lighter lines at the other beats; otherwise every 4th
+  beat counted from the song's first beat is darker and the page says so in its bottom-left corner ("no downbeats
+  in this result"). The poster draws the same lines;
 - drum hits by class (kick, snare, hihat, tom, cymbal), hidden when the result has no drum hits.
 
 The server keeps no audio: the analysed WAV and the upload are removed when `POST /analyze` ends, so the audio is
@@ -135,18 +141,27 @@ about 0.2 s along time, 25 rows along pitch, soft mask), and the drum lane shows
 drum hits. Without `marks` the page is byte-identical to the plain one.
 
 - Suspect notes (red dashed outline, faded in the roll), flags per note:
-  `weak` (the note's row is less than 3 dB above the rows 2.5 semitones away), `drum` (more than 60% of the energy
-  within 1 semitone is percussive), `quiet` (more than 45 dB below the page's 99.5th percentile), `reattackN` (N >= 2
-  separate rises of more than 6 dB within 30 ms in a 2048-point STFT band f0/1.26..2.5 f0, more than 0.1 s apart,
-  the note's own attack excluded: a held note that is really N strikes).
-- Missed energy (green dotted box): harmonic peaks more than 12 dB above the rows 4 away (8 below MIDI 48), within
+  `weak` (the note's row is less than 3 dB above the rows 2.5 semitones away), `semitone` (the row 1 semitone above
+  or below is more than 6 dB stronger over the note, unless another sounding note or its harmonics explains that
+  row: the usual pitch-off-by-one error), `drum` (the percussive share within 1 semitone is more than 0.25 above the
+  median of the page's notes), `quiet` (more than 20 dB below the median level of the page's notes), `reattackN`
+  (N >= 2 separate rises of more than 6 dB within 30 ms in a 2048-point STFT band f0/1.26..2.5 f0, more than 0.1 s
+  apart, the note's own attack excluded, and rises where another note with a harmonic in that band starts within
+  0.1 s ignored: a held note that is really N strikes).
+- Missed energy (green dotted box): harmonic peaks more than 12 dB above the rows 4 away (4/3 semitones), within
   20 dB of the page's 99.5th percentile, not explained by any note +-1 semitone or its harmonics (+0, 12, 19, 24, 28,
-  31 semitones), held at least 0.4 s; harmonics of a lower missed run are dropped.
+  31 semitones), held at least 0.15 s; harmonics of a lower missed run are dropped. A note explains its pitches from
+  half its band's window before its start (the STFT smear) to half the window plus 0.3 s after its end (ringing
+  tails). A run shorter than 0.4 s near a drum hit of the result (within the smear, up to 0.2 s after) is the drum.
 - Each page is analysed on its own span plus 1 s on each side, so the levels are relative to that page.
 
-These thresholds were tuned by eye on a few clips. They are unvalidated rules of thumb: a mark says "look here",
-and the counts are not an accuracy measure. On clear synthetic cases (a sustained tone with drums, nine stabs
-written as one note, one note left out) they behave as intended; that is all the tests pin.
+These thresholds are unvalidated rules of thumb: a mark says "look here", and the counts are not an accuracy measure.
+They were set by eye on a few clips and then checked against seeded error injection on three synthetic clips and two
+real clips (pitch off by a semitone or octave, deleted notes, merged stabs, notes added on kicks or in quiet spots);
+that check covers five sources only. On real songs a result that leaves out a part (a melody-only result, say)
+shows that part as many missed runs. The tests pin clear synthetic cases only: a sustained tone with drums, nine
+stabs written as one note, a note left out, a note a semitone off, a 0.25 s note left out, a tone ringing past its
+written end.
 
 The server returns the PNG only. The CLI also writes `<id12>-pNN-marks.json` beside `<id12>-pNN-marks.png` and
 prints the lists: `{"result_id", "format": "png", "pages": [{"page", "section", "label", "start", "end", "path",
