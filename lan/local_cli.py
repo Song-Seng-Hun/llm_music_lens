@@ -16,6 +16,8 @@ Usage:
   local_cli.py [--config PATH] sheet ID --png DIR --audio FILE [--page N] [--marks]
                one PNG per page (spectrogram + piano roll, roll.py) into DIR as <id12>-pNN.png; prints the page list
                (--marks: <id12>-pNN-marks.png and .json, suspect notes and missed energy)
+  local_cli.py [--config PATH] sheet ID --html DIR --audio FILE [--marks]
+               (<id12>.html: the whole song as one offline page with the audio, playhead and toggles)
   local_cli.py [--config PATH] sheet ID --png DIR --audio FILE --style poster --start S --end E [--title T] [--credit C]
 """
 import argparse
@@ -205,6 +207,8 @@ PNG_OPTS = ("png", "audio", "page", "marks", "style", "title", "credit")
 
 def cmd_sheet(engine, ns):
     rid = check_id(ns.result_id)
+    if ns.html is not None:
+        return sheet_html(engine, rid, ns)
     if any(getattr(ns, k) not in (None, False) for k in PNG_OPTS):
         return sheet_png(engine, rid, ns)
     q = {k: getattr(ns, k) for k in ("format", "start", "end", "view", "layers") if getattr(ns, k) is not None}
@@ -285,6 +289,41 @@ def sheet_png(engine, rid, ns):
     out_json(engine, body)
 
 
+def sheet_html(engine, rid, ns):
+    """As POST /sheet/<id>?format=html[&marks=1]: DIR/<id12>.html (never overwriting); nothing else is stored."""
+    if (ns.audio is None or ns.png is not None or ns.format or ns.view or ns.layers or ns.style
+            or any(x is not None for x in (ns.page, ns.start, ns.end, ns.title, ns.credit))):
+        raise Fail("bad_request", "--html DIR --audio FILE [--marks]; no other sheet option")
+    if not os.path.isdir(ns.html):
+        raise Fail("invalid_path", "--html must be an existing directory")
+    v = engine.rhythm_or_error(rid)
+    job = engine.view_job({"format": "html", "marks": "1"} if ns.marks else {"format": "html"})
+    path = os.path.join(os.path.abspath(ns.html), rid[:12] + ".html")
+    if os.path.lexists(path):
+        raise Fail("invalid_path", "output file exists: " + os.path.basename(path))
+    if not (engine.cfg.get("rhythm") or {}).get("roll_python"):
+        raise Fail("roll_unavailable")
+    if shutil.disk_usage(engine.cfg["root"]).free < engine.limits["disk_floor"]:
+        raise Fail("insufficient_storage")
+    op, lfd = "rl-" + secrets.token_hex(16), None
+    try:
+        kind, _sha = stage(engine, op, ns.audio)
+        lfd = engine.team_flock()
+        d = engine.uploads + "/" + op
+        engine.roll_audio(d + "/upload." + kind, d + "/listen.wav", v)
+        html = engine.view_render(rid, d + "/upload." + kind, d + "/listen.wav", job, d)
+        write_new(path, html)
+    finally:
+        if lfd is not None:
+            os.close(lfd)
+        engine.cleanup(op, False)
+    body = {"result_id": rid, "format": "html", "path": path, "bytes": len(html), "duration": v["duration"],
+            "marks": job["marks"]}
+    if job["marks"]:
+        body["marks_note"] = MARKS_NOTE
+    out_json(engine, body)
+
+
 MARKS_NOTE = ("suspects and missed are unvalidated heuristics (thresholds tuned by eye on a few clips): places to look, "
               "not an accuracy measure")
 
@@ -332,10 +371,11 @@ def parser():
     s.add_argument("--end")
     s.add_argument("--view", help="brief: one line per section (as GET /sheet?view=brief)")
     s.add_argument("--layers", help="comma list of " + ",".join(server.sheet.SECTION_LAYERS) + " (as GET /sheet?layers=)")
+    s.add_argument("--html", metavar="DIR", help="write <id12>.html: the whole song as one offline page with the audio")
     s.add_argument("--png", metavar="DIR", help="write one PNG per page (spectrogram + piano roll) into DIR")
-    s.add_argument("--audio", metavar="FILE", help="with --png: the analysed audio (the server keeps none)")
+    s.add_argument("--audio", metavar="FILE", help="with --png or --html: the analysed audio (the server keeps none)")
     s.add_argument("--page", help="with --png: only page N (1-based)")
-    s.add_argument("--marks", action="store_true", help="with --png: suspect-note and missed-energy marks, plus their JSON")
+    s.add_argument("--marks", action="store_true", help="with --png or --html: suspect-note and missed-energy marks")
     s.add_argument("--style", choices=("poster",), help="with --png: one 2400x1350 poster of --start..--end (<= 30 s)")
     s.add_argument("--title", help="poster title (<= 80 printable characters)")
     s.add_argument("--credit", help="poster credit line (<= 80 printable characters)")

@@ -45,10 +45,10 @@ def window(sr, sec):
     return 1 << max(8, int(round(math.log2(sec * sr))))
 
 
-def stft_rows(np, path, a, b, short=0):
-    """(sr, times, rows, M) for frames centred on a + j*HOP/sr up to b: M[row, frame] the multi-resolution magnitude
+def stft_rows(np, path, a, b, short=0, hop=HOP):
+    """(sr, times, rows, M) for frames centred on a + j*hop/sr up to b: M[row, frame] the multi-resolution magnitude
     on 1/3-semitone rows MIDI 24-96 (silence beyond the audio's ends); with short=N also S[frame, bin], a plain
-    N-point STFT at the same centres (re-attack timing)."""
+    N-point STFT at the same centres (re-attack timing). view.py passes a coarser hop for a whole song."""
     with wave.open(path) as w:
         if w.getsampwidth() != 2:
             raise ValueError("not 16-bit PCM")
@@ -61,7 +61,7 @@ def stft_rows(np, path, a, b, short=0):
         raw = w.readframes(min(s1, total) - max(0, s0))
     x = np.frombuffer(raw, dtype="<i2").astype(np.float32).reshape(-1, ch).mean(1) / 32768
     x = np.pad(x, (max(0, -s0), max(0, s1 - total)))
-    n = (int(b * sr) - int(a * sr)) // HOP + 1
+    n = (int(b * sr) - int(a * sr)) // hop + 1
     rows = MLO - 1 / 3 + np.arange(3 * (MHI - MLO + 1)) / 3  # centred on each semitone and its thirds, as drawn
     M = np.empty((len(rows), n), np.float32)
     lo = MLO - 1
@@ -77,16 +77,16 @@ def stft_rows(np, path, a, b, short=0):
         win /= win.sum()
         step = max(16, (1 << 21) // N)  # frames per chunk: about 2M samples (8 MB float32) per chunk at any N
         for j in range(0, n, step):
-            idx = np.arange(j, min(n, j + step))[:, None] * HOP + (half - N // 2) + np.arange(N)[None, :]
+            idx = np.arange(j, min(n, j + step))[:, None] * hop + (half - N // 2) + np.arange(N)[None, :]
             s = np.abs(np.fft.rfft(x[idx] * win, axis=1))
             M[sel, j:j + len(idx)] = (s[:, i0] * (1 - wt) + s[:, i1] * wt).T
-    times = int(a * sr) / sr + np.arange(n) * HOP / sr
+    times = int(a * sr) / sr + np.arange(n) * hop / sr
     if not short:
         return sr, times, rows, M
     ws = np.hanning(short).astype(np.float32)
     S = np.empty((n, short // 2 + 1), np.float32)
     for j in range(0, n, 256):
-        idx = np.arange(j, min(n, j + 256))[:, None] * HOP + (half - short // 2) + np.arange(short)[None, :]
+        idx = np.arange(j, min(n, j + 256))[:, None] * hop + (half - short // 2) + np.arange(short)[None, :]
         S[j:j + len(idx)] = np.abs(np.fft.rfft(x[idx] * ws, axis=1))
     return sr, times, rows, M, S
 
