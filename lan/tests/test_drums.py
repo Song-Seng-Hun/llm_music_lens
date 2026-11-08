@@ -222,10 +222,10 @@ class DrumFallbackTest(unittest.TestCase):
                                 {"time": 1.0, "class": "hihat"}])  # sorted; the hit past the end is gone
         self.assertEqual(field["hit_counts"], {"kick": 1, "snare": 2, "tom": 0, "hihat": 1, "cymbal": 0})
 
-    def test_vocal_failure_keeps_drums(self):
-        out_ = self.run_drums(demucs_fail="vocals")
+    def test_failed_run_skips_vocal_and_drums(self):
+        out_ = self.run_drums(demucs_fail="vocals")  # one Demucs run serves both, so both go
         self.assertEqual(out_["separation"], {"status": "skipped", "reason": "separation_failed"})
-        self.assertEqual(out_["drums"][0]["status"], "done")
+        self.assert_skipped(out_, "separation_failed")
 
     def test_failures(self):
         self.assert_skipped(self.run_drums(demucs_fail="drums"), "separation_failed")

@@ -242,10 +242,10 @@ class BassFallbackTest(unittest.TestCase):
         field, rows = self.run_bass(onsets="drums")["bass"]  # Basic Pitch hears only D3: the E2 run is not a bass note
         self.assertEqual((field["status"], field["note_count"], rows), ("done", 0, []))
 
-    def test_vocal_failure_keeps_bass(self):
-        out_ = self.run_bass(demucs_fail="vocals")
+    def test_failed_run_skips_vocal_and_bass(self):
+        out_ = self.run_bass(demucs_fail="vocals")  # one Demucs run serves both, so both go
         self.assertEqual(out_["separation"], {"status": "skipped", "reason": "separation_failed"})
-        self.assertEqual(out_["bass"][0]["status"], "done")
+        self.assert_skipped(out_, "separation_failed")
 
     def test_failures(self):
         self.assert_skipped(self.run_bass(demucs_fail="bass"), "separation_failed")

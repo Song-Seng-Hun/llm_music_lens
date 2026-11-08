@@ -298,11 +298,10 @@ MERGE_REVERSALS = 2  # sign changes an oscillation needs: A-B-A-B = 3 alternatin
 # Batch 1 keeps Demucs at 8.6 GB for 600 s (34.1 GB with the automatic batch); the seed makes it repeatable.
 SEP_RATE = 44100
 SEP_BAND_HZ, SEP_BAND_MIN_DB = 8200.0, -40.0
-DEMUCS_ARGS = ("-n", "htdemucs_ft", "--stem", "vocals", "-b", "1", "--seed", "0")
 # One Demucs run: the vocal, bass, drum, other and section stems come from one Demucs run on full.wav (MONO_DEMUCS_ARGS). Each
 # htdemucs_ft stem is its own model, so the four files are byte-identical to four --stem runs; one run skips three weight
 # loads (50 s: 2.5 s instead of 3.3 s). Its peak footprint is higher (600 s: 14.4 GB instead of 8.6 GB), about the stereo
-# layer's own all-stems run, so the run's peak stays. After a failed run each stem falls back to its own --stem call.
+# layer's own all-stems run, so the run's peak stays. When the run fails, every stem stage is skipped.
 MONO_DEMUCS_ARGS = ("-n", "htdemucs_ft", "-b", "1", "--seed", "0")
 MONO_STEMS = ("vocals", "bass", "drums", "other")
 DEMUCS_WEIGHTS = "~/.cache/demucs-mlx/htdemucs_ft.safetensors"  # where demucs-mlx looks; it has no path option
@@ -326,7 +325,6 @@ CHORD_VOCABULARY = "BTC large vocabulary: 12 roots with m, maj, dim, aug, 6, m6,
 # 0.25.0: RMVPE labels any voiced low energy, so Demucs's kick and tom ring in the bass stem came out as notes. A note is kept
 # only when a Basic Pitch note (down to 80 ms) within BASS_CONFIRM_SEMIS overlaps it (synthetic drums, bass and
 # bass-on-kick clips and one drum-only song; numbers in the PR, no real bass clip to check against).
-BASS_DEMUCS_ARGS = ("-n", "htdemucs_ft", "--stem", "bass", "-b", "1", "--seed", "0")
 BASS_ONSETS_CODE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bass_onsets.py")
 BASS_ONSETS_SHA256 = "6a8842bc6bb14b111959020f7354b183c598e247a87ee6b825f61b3c359932de"
 BASS_ONSETS_MAX_BYTES = 16 * 1024
@@ -343,7 +341,6 @@ BASS_METHOD = ("Demucs htdemucs_ft bass, RMVPE pitch on CPU, split at Basic Pitc
                "is within a semitone, pieces joined, starts at Basic Pitch's. Sounding pitch; ends are weak.")
 BASS_FAIL_REASONS = ("models_invalid", "decode_failed", "separation_failed", "rmvpe_failed", "onsets_failed")
 # Drum hits (0.9.0, optional): Demucs drum stem, then ADTOF Frame_RNN. Measured on 23 songs of MDB Drums; tom is weak.
-DRUM_DEMUCS_ARGS = ("-n", "htdemucs_ft", "--stem", "drums", "-b", "1", "--seed", "0")
 ADTOF_CODE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "adtof_model.py")
 ADTOF_CODE_SHA256 = "8362b7295c75719f7d4dd269701113aff1b5165fa9a14c778bd1d96c6653e73c"
 ADTOF_CODE_MAX_BYTES = 64 * 1024
@@ -422,7 +419,6 @@ DEGREE_NAMES = ("1", "b2", "2", "b3", "3", "4", "b5", "5", "b6", "6", "b7", "7")
 MAJOR_STEPS = (0, 2, 4, 5, 7, 9, 11)
 NOTE_PCS = {"C": 0, "B#": 0, "C#": 1, "Db": 1, "D": 2, "D#": 3, "Eb": 3, "E": 4, "Fb": 4, "F": 5, "E#": 5, "F#": 6, "Gb": 6,
             "G": 7, "G#": 8, "Ab": 8, "A": 9, "A#": 10, "Bb": 10, "B": 11, "Cb": 11}
-OTHER_DEMUCS_ARGS = ("-n", "htdemucs_ft", "--stem", "other", "-b", "1", "--seed", "0")
 OTHER_NOTES_CODE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "other_notes.py")
 OTHER_NOTES_SHA256 = "53de95ae2b1abd6c793a91241a81cfd9836d021ff4f2847feb4edf821494e37c"
 OTHER_NOTES_MAX_BYTES = 16 * 1024
@@ -1560,20 +1556,12 @@ def run_tool(argv):
 
 def mono_stem(sep, stem):
     """True when scratch/full/<stem>.wav is there. The first call separates all four stems in one Demucs run; when that
-    run fails, its files go and each stem has its own --stem run."""
+    run fails, no stem stage uses its files."""
     d = sep["scratch"]
-    full, path = os.path.join(d, "full.wav"), os.path.join(d, "full", stem + ".wav")
-    if os.path.isfile(path):
-        return True
-    if not sep.get("mono_run"):
-        sep["mono_run"] = True
-        if not run_tool([sep["demucs"]] + list(MONO_DEMUCS_ARGS) + ["-o", d, full]) and os.path.isfile(path):
-            return True
-        for s in MONO_STEMS:  # a run that failed may have left some stems
-            if os.path.isfile(os.path.join(d, "full", s + ".wav")):
-                os.unlink(os.path.join(d, "full", s + ".wav"))
-    args = {"vocals": DEMUCS_ARGS, "bass": BASS_DEMUCS_ARGS, "drums": DRUM_DEMUCS_ARGS, "other": OTHER_DEMUCS_ARGS}[stem]
-    return not run_tool([sep["demucs"]] + list(args) + ["-o", d, full]) and os.path.isfile(path)
+    path = os.path.join(d, "full", stem + ".wav")
+    if "mono_ok" not in sep and not os.path.isfile(path):
+        sep["mono_ok"] = not run_tool([sep["demucs"]] + list(MONO_DEMUCS_ARGS) + ["-o", d, os.path.join(d, "full.wav")])
+    return sep.get("mono_ok", True) and os.path.isfile(path)
 
 
 def vocal_pitch(sep, n16):

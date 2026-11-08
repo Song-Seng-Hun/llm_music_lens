@@ -920,8 +920,10 @@ gives a vocal, RMVPE reads it on CPU, and the notes go through the same segmenta
 changes; every other layer still reads the 16 kHz mix.
 
 One Demucs run gives the vocal, bass, drum and other stems for all stem layers. Each `htdemucs_ft` stem is its own model,
-so the files are the same as four `--stem` runs, and one run skips three weight loads. If that run fails, each stem gets its
-own `--stem` run, as before. The stereo layer still runs Demucs separately.
+so the files are the same as four `--stem` runs, and one run skips three weight loads. If that run fails, every stem layer
+is skipped with `separation_failed`. The stereo layer still runs Demucs separately. Running the sections model alongside
+the accompaniment layer's Basic Pitch step was tried and dropped: 4% faster on a 600 s file (239.6 s to 228.9 s), no gain
+on 20 s and 50 s clips, for extra process handling.
 
 Scoop join (worker 0.20.0, vocal method only): a sung scoop from below used to come out as an extra short note a
 semitone flat before the real note. After the merge, a note up to 0.12 s that touches (gap up to 30 ms) a note 1 or 2

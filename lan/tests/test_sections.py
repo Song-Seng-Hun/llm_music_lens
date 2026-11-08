@@ -256,11 +256,6 @@ class SectionFallbackTest(unittest.TestCase):
         with open(self.log) as f:
             self.assertEqual(f.read().split(), ["all"])  # one Demucs run gives every stage its stem
 
-    def test_one_run_falls_back_per_stem(self):
-        self.assert_skipped(self.run_it(demucs_fail="other"), "separation_failed")
-        with open(self.log) as f:  # the failed run's files go; each stem then has its own run, as before
-            self.assertEqual(f.read().split(), ["all", "vocals", "bass", "drums", "other"])
-
     def test_failures(self):
         self.assert_skipped(self.run_it(helper="fail"), "sections_failed")
         self.assert_skipped(self.run_it(helper="bad"), "sections_failed")
