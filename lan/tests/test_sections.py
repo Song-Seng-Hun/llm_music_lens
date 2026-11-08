@@ -156,9 +156,17 @@ print(json.dumps({"separation": field, "sections": sep.get("sections"), "downbea
 FAKE_DEMUCS = r'''#!%s -I
 import os, shutil, sys
 a = sys.argv[1:]
-stem = a[a.index("--stem") + 1]
+stem = a[a.index("--stem") + 1] if "--stem" in a else "all"
 with open("%s", "a") as f:
     f.write(stem + "\n")
+if stem == "all":  # one run for all four stems; it fails when any stem is set to fail
+    if "%s".strip(","):
+        sys.exit(3)
+    d = os.path.join(a[a.index("-o") + 1], "full")
+    os.makedirs(d, exist_ok=True)
+    for s in ("vocals", "bass", "drums", "other"):
+        shutil.copy(a[-1], os.path.join(d, s + ".wav"))
+    sys.exit(0)
 if stem in "%s".split(","):
     sys.exit(3)
 d = os.path.join(a[a.index("-o") + 1], "full")
@@ -176,6 +184,7 @@ mode, model_dir, stems, out = "%s", sys.argv[1], sys.argv[2], sys.argv[3]
 assert all(os.path.isfile(os.path.join(stems, s + ".wav")) for s in ("vocals", "bass", "drums", "other"))
 if mode == "fail":
     sys.exit(4)
+
 if mode == "bad":
     rows = [{"start": 0, "end": 1, "label": "hook"}]
 elif mode == "many":
@@ -215,7 +224,7 @@ class SectionFallbackTest(unittest.TestCase):
 
     def run_it(self, demucs_fail="", helper="ok", source="noise", model="a0.pth", **cfg):
         files = {}
-        for name, text in (("demucs", FAKE_DEMUCS % (ESSENTIA_PY, self.log, demucs_fail)), ("rmvpe.py", FAKE_RMVPE),
+        for name, text in (("demucs", FAKE_DEMUCS % (ESSENTIA_PY, self.log, demucs_fail, demucs_fail)), ("rmvpe.py", FAKE_RMVPE),
                            ("helper.py", FAKE_HELPER % helper)):
             files[name] = os.path.join(self.d, name)
             with open(files[name], "w") as f:
@@ -245,7 +254,12 @@ class SectionFallbackTest(unittest.TestCase):
         # the empty start row goes, the gap joins the row before it, the last row past the end is gone
         self.assertEqual(segs, [[0.0, 0.9, "intro"], [0.9, 2.0, "chorus"]])
         with open(self.log) as f:
-            self.assertEqual(f.read().split(), ["vocals", "bass", "drums", "other"])  # one run for each missing stem
+            self.assertEqual(f.read().split(), ["all"])  # one Demucs run gives every stage its stem
+
+    def test_one_run_falls_back_per_stem(self):
+        self.assert_skipped(self.run_it(demucs_fail="other"), "separation_failed")
+        with open(self.log) as f:  # the failed run's files go; each stem then has its own run, as before
+            self.assertEqual(f.read().split(), ["all", "vocals", "bass", "drums", "other"])
 
     def test_failures(self):
         self.assert_skipped(self.run_it(helper="fail"), "sections_failed")

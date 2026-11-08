@@ -919,6 +919,10 @@ What happens on a rhythm request: the upload is decoded to 44.1 kHz mono; audio 
 gives a vocal, RMVPE reads it on CPU, and the notes go through the same segmentation and merge as before. Only melody
 changes; every other layer still reads the 16 kHz mix.
 
+One Demucs run gives the vocal, bass, drum and other stems for all stem layers. Each `htdemucs_ft` stem is its own model,
+so the files are the same as four `--stem` runs, and one run skips three weight loads. If that run fails, each stem gets its
+own `--stem` run, as before. The stereo layer still runs Demucs separately.
+
 Scoop join (worker 0.20.0, vocal method only): a sung scoop from below used to come out as an extra short note a
 semitone flat before the real note. After the merge, a note up to 0.12 s that touches (gap up to 30 ms) a note 1 or 2
 semitones higher and at least twice as long is removed, and the longer note starts where it started. On songs 51-100 of
@@ -949,7 +953,8 @@ Limits: one of the four songs got worse (77.5 to 73.5), the one where separation
 through Demucs as vocals, and that case is not in these mixes.
 
 Cost for a 600 s file on an M4 Max: Demucs 6.8 s and 8.6 GB, RMVPE 7.6 s and 2.6 GB, run one after the other. The
-default Demucs batch would take 34.1 GB.
+default Demucs batch would take 34.1 GB. The one run for all four stems (above) takes 26 s and 14.4 GB, about as much as
+the stereo layer's Demucs run on the same file.
 
 Licenses:
 

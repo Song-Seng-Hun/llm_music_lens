@@ -299,6 +299,12 @@ MERGE_REVERSALS = 2  # sign changes an oscillation needs: A-B-A-B = 3 alternatin
 SEP_RATE = 44100
 SEP_BAND_HZ, SEP_BAND_MIN_DB = 8200.0, -40.0
 DEMUCS_ARGS = ("-n", "htdemucs_ft", "--stem", "vocals", "-b", "1", "--seed", "0")
+# One Demucs run: the vocal, bass, drum, other and section stems come from one Demucs run on full.wav (MONO_DEMUCS_ARGS). Each
+# htdemucs_ft stem is its own model, so the four files are byte-identical to four --stem runs; one run skips three weight
+# loads (50 s: 2.5 s instead of 3.3 s). Its peak footprint is higher (600 s: 14.4 GB instead of 8.6 GB), about the stereo
+# layer's own all-stems run, so the run's peak stays. After a failed run each stem falls back to its own --stem call.
+MONO_DEMUCS_ARGS = ("-n", "htdemucs_ft", "-b", "1", "--seed", "0")
+MONO_STEMS = ("vocals", "bass", "drums", "other")
 DEMUCS_WEIGHTS = "~/.cache/demucs-mlx/htdemucs_ft.safetensors"  # where demucs-mlx looks; it has no path option
 DEMUCS_WEIGHTS_SHA256 = "53f03b1ad4b4d211025a35da65460ba61a17547adf9c0544cad0ebcc8d7bbabb"
 DEMUCS_WEIGHTS_MAX_BYTES = 1024 * 1024 * 1024
@@ -1552,6 +1558,24 @@ def run_tool(argv):
                           env=dict(os.environ, DEMUCS_MLX_NO_DOWNLOAD="1", HF_HUB_OFFLINE="1"), cwd="/").returncode
 
 
+def mono_stem(sep, stem):
+    """True when scratch/full/<stem>.wav is there. The first call separates all four stems in one Demucs run; when that
+    run fails, its files go and each stem has its own --stem run."""
+    d = sep["scratch"]
+    full, path = os.path.join(d, "full.wav"), os.path.join(d, "full", stem + ".wav")
+    if os.path.isfile(path):
+        return True
+    if not sep.get("mono_run"):
+        sep["mono_run"] = True
+        if not run_tool([sep["demucs"]] + list(MONO_DEMUCS_ARGS) + ["-o", d, full]) and os.path.isfile(path):
+            return True
+        for s in MONO_STEMS:  # a run that failed may have left some stems
+            if os.path.isfile(os.path.join(d, "full", s + ".wav")):
+                os.unlink(os.path.join(d, "full", s + ".wav"))
+    args = {"vocals": DEMUCS_ARGS, "bass": BASS_DEMUCS_ARGS, "drums": DRUM_DEMUCS_ARGS, "other": OTHER_DEMUCS_ARGS}[stem]
+    return not run_tool([sep["demucs"]] + list(args) + ["-o", d, full]) and os.path.isfile(path)
+
+
 def vocal_pitch(sep, n16):
     """(8 ms pitch, 16 kHz vocal, None) or (None, None, reason)."""
     import numpy as np
@@ -1575,7 +1599,7 @@ def vocal_pitch(sep, n16):
         return None, None, "band_limited"
     write_wav(full, SEP_RATE, x)
     os.unlink(decoded)
-    if run_tool([sep["demucs"]] + list(DEMUCS_ARGS) + ["-o", d, full]):
+    if not mono_stem(sep, "vocals"):
         return None, None, "separation_failed"
     rate, y = wavfile.read(os.path.join(d, "full", "vocals.wav"))
     y = y.astype(np.float32)
@@ -1676,7 +1700,7 @@ def bass_stem_notes(sep, n16):
     if read_pinned(BASS_ONSETS_CODE, BASS_ONSETS_SHA256, BASS_ONSETS_MAX_BYTES, keep=False)[0]:
         return None, "models_invalid"
     d = sep["scratch"]
-    if run_tool([sep["demucs"]] + list(BASS_DEMUCS_ARGS) + ["-o", d, os.path.join(d, "full.wav")]):
+    if not mono_stem(sep, "bass"):
         return None, "separation_failed"
     rate, y = wavfile.read(os.path.join(d, "full", "bass.wav"))
     y = y.astype(np.float32)
@@ -1729,7 +1753,7 @@ def drum_stem_hits(sep, duration):
         if read_pinned(path, sha, cap, keep=False)[0]:
             return None, "models_invalid"
     d = sep["scratch"]
-    if run_tool([sep["demucs"]] + list(DRUM_DEMUCS_ARGS) + ["-o", d, os.path.join(d, "full.wav")]):
+    if not mono_stem(sep, "drums"):
         return None, "separation_failed"
     out = os.path.join(d, "drums.json")
     if run_tool([sys.executable, "-I", ADTOF_CODE, model, os.path.join(d, "full", "drums.wav"), out]):
@@ -1766,7 +1790,7 @@ def other_stem_notes(sep, duration):
         return None, "models_invalid"
     d = sep["scratch"]
     stem = os.path.join(d, "full", "other.wav")
-    if not os.path.isfile(stem) and run_tool([sep["demucs"]] + list(OTHER_DEMUCS_ARGS) + ["-o", d, os.path.join(d, "full.wav")]):
+    if not mono_stem(sep, "other"):
         return None, "separation_failed"
     out = os.path.join(d, "other-notes.json")
     if run_tool([sep["basic_pitch"], "-I", OTHER_NOTES_CODE, stem, out]):
@@ -2303,9 +2327,8 @@ def section_segments(sep, duration):
             return None, "models_invalid"
     d = sep["scratch"]
     stems = os.path.join(d, "full")
-    for s in ("vocals", "bass", "drums", "other"):
-        if not os.path.isfile(os.path.join(stems, s + ".wav")) and run_tool(
-                [sep["demucs"], "-n", "htdemucs_ft", "--stem", s, "-b", "1", "--seed", "0", "-o", d, os.path.join(d, "full.wav")]):
+    for s in MONO_STEMS:
+        if not mono_stem(sep, s):
             return None, "separation_failed"
     out = os.path.join(d, "sections.json")
     if run_tool([sep["sections_python"], "-I", ALLIN1_CODE, root, stems, out]):

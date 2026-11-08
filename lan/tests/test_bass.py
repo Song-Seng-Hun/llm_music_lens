@@ -149,6 +149,14 @@ print(json.dumps({"separation": field, "bass": sep.get("bass"), "scratch_left": 
 FAKE_DEMUCS = r'''#!%s -I
 import os, shutil, sys
 a = sys.argv[1:]
+if "--stem" not in a:  # one run for all four stems; it fails when any stem is set to fail
+    if "%s".strip(","):
+        sys.exit(3)
+    d = os.path.join(a[a.index("-o") + 1], "full")
+    os.makedirs(d, exist_ok=True)
+    for s in ("vocals", "bass", "drums", "other"):
+        shutil.copy(a[-1], os.path.join(d, s + ".wav"))
+    sys.exit(0)
 stem = a[a.index("--stem") + 1]
 if stem in "%s".split(","):
     sys.exit(3)
@@ -208,7 +216,7 @@ class BassFallbackTest(unittest.TestCase):
 
     def run_bass(self, demucs_fail="", rmvpe="ok", onsets="ok", source="noise", **cfg):
         files = {}
-        for name, text in (("demucs", FAKE_DEMUCS % (ESSENTIA_PY, demucs_fail)), ("rmvpe.py", FAKE_RMVPE % rmvpe),
+        for name, text in (("demucs", FAKE_DEMUCS % (ESSENTIA_PY, demucs_fail, demucs_fail)), ("rmvpe.py", FAKE_RMVPE % rmvpe),
                            ("onsets.py", FAKE_ONSETS % (onsets, onsets, onsets)), ("bp", "#!/bin/sh\nexec %s \"$@\"\n" % ESSENTIA_PY)):
             files[name] = os.path.join(self.d, name)
             with open(files[name], "w") as f:
