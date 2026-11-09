@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 import unittest
 
-from helpers import PY, REPO, Client, Env, Harness, server
+from helpers import PY, REPO, RID64, Client, Env, Harness, server
 from test_rhythm import AR, ESSENTIA_PY, RHYTHM_OUT_V40, WAV, FakeWorker, RhythmBase, rw
 from test_separation import FULL
 
@@ -60,6 +60,41 @@ class SectionServerTest(RhythmBase):
         r = self.post(WAV)
         self.assertEqual((r["sections_model"], r["sections"]), (DONE, ROWS))
 
+    def test_all_in_one_beats_timeline(self):
+        self.store()
+        prefix = "/timeline/" + RID64 + "?layer="
+        original = {layer: self.c.json("GET", prefix + layer) for layer in ("beats", "chords")}
+        target = prefix + "all_in_one_beats"
+        status, body = self.c.json("GET", target)
+        self.assertEqual((status, body["error"]["code"]), (404, "rhythm_not_found"))
+        self.assertNotIn("all_in_one_beats", self.c.json("GET", "/report/" + RID64)[1]["rhythm"])
+
+        times = [0.3, 0.75, 1.2, 5.9]
+        summary = {"method": "All-In-One", "count": 4, "first_beat_s": 0.3, "last_beat_s": 5.9}
+        self.fw.write(stdout=json.dumps(dict(out(), all_in_one_beats=times)))
+        r = self.post(FULL)
+        self.assertEqual(r["all_in_one_beats"], summary)
+        self.assertFalse(r["cache_hit"])
+        report = self.c.json("GET", "/report/" + RID64)[1]
+        self.assertEqual(report["rhythm"]["all_in_one_beats"], summary)
+        sheet = self.c.json("GET", "/sheet/" + RID64 + "?format=json")[1]["sheet"]
+        self.assertIn("all_in_one_beats", sheet["drill_down"]["layers"].split("|"))
+
+        page_url = target + "&start=0.75&end=1.2&limit=1"
+        status, first = self.c.json("GET", page_url)
+        self.assertEqual(status, 200)
+        self.assertEqual({key: first[key] for key in summary}, summary)
+        self.assertEqual((first["all_in_one_beats"], first["total"], first["continuation"]),
+                         ([{"time": 0.75}], 2, 1))
+        second = self.c.json("GET", page_url + "&cursor=1")[1]
+        self.assertEqual((second["all_in_one_beats"], second["continuation"]), ([{"time": 1.2}], None))
+        empty = self.c.json("GET", target + "&start=6")[1]
+        self.assertEqual((empty["all_in_one_beats"], empty["last_beat_s"]), ([], 5.9))
+        for layer, before in original.items():
+            self.assertEqual(self.c.json("GET", prefix + layer), before)
+        self.assertTrue(self.post(FULL)["cache_hit"])
+        self.assertEqual(len(self.fw.calls()), 1)
+
     def test_reuse(self):
         skipped = lambda reason: dict(sections_model={"status": "skipped", "reason": reason})
         for fields, body, hit in ((dict(sections_model=DONE, sections=ROWS), FULL, True),
@@ -82,6 +117,12 @@ class SectionCheckTest(unittest.TestCase):
         self.assertIsNotNone(self.check(sections_model=DONE, sections=ROWS, sections_reliability="reference_candidate"))
         self.assertIsNotNone(self.check(sections_model={"status": "skipped", "reason": "too_many_sections"}))
         self.assertIsNotNone(self.check())
+
+    def test_all_in_one_beat_validation(self):
+        self.assertIsNotNone(self.check(all_in_one_beats=[0, 0.1, 6.0]))
+        for value in (None, [], "0", [True], [float("nan")], [-0.1], [6.001], [0.1, 0.1], [0.2, 0.1],
+                      [i / 1000 for i in range(server.RHYTHM_MAX_BEATS + 1)]):
+            self.assertIsNone(self.check(all_in_one_beats=value), type(value).__name__)
 
     def test_refused(self):
         for fields in (dict(sections=ROWS),  # a function with no model record

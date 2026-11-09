@@ -95,6 +95,19 @@ class QuickServerTest(QuickBase):
         self.assertNotIn("profile", r)
         self.assertNotIn("profile", self.stored())
 
+    def test_model_beats_alone_protect_full_cache(self):
+        full = dict(SKIPPED, all_in_one_beats=[0.2, 0.7, 1.2],
+                    sections_model={"status": "skipped", "reason": "too_many_sections"},
+                    **dict(self.ids(), worker_sha256="0" * 64))
+        with open(self.rhythm_file(), "w") as f:
+            json.dump(full, f)
+        for target, body in ((AQ, FULL), (AF, WAV)):
+            r = self.post(target, body)
+            self.assertTrue(r["cache_hit"])
+            self.assertEqual(r["all_in_one_beats"]["last_beat_s"], 1.2)
+            self.assertEqual(self.stored(), full)
+        self.assertEqual(self.fw.calls(), [])
+
     def test_default_unchanged_and_bad_values(self):
         r = self.post(AF)
         self.assertNotIn("profile", r)

@@ -276,7 +276,8 @@ def build(v, rid=None):
                  'melody_source': melody_source(done(v, 'melody'))},
         'sections': out_secs,
         'drill_down': {'request': 'GET /timeline/%s?layer=<layer>&start=<s>&end=<s>&limit=<1-200>&cursor=<n>' % (rid or '<result_id>'),
-                       'layers': LAYERS, 'range': '0-600 s; rows overlapping [start, end]', 'paging': 'follow continuation as the next cursor',
+                       'layers': LAYERS + ('|all_in_one_beats' if 'all_in_one_beats' in v else ''),
+                       'range': '0-600 s; rows overlapping [start, end]', 'paging': 'follow continuation as the next cursor',
                        'zoom': 'GET /sheet/%s?start=<s>&end=<s> for a bar-by-bar reading of up to %.0f s' % (rid or '<result_id>', ZOOM_MAX)}}
     if v.get('profile') == 'quick':  # server-added on a rhythm=quick result only
         out['profile'] = profile(v)

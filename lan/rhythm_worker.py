@@ -200,7 +200,7 @@ import time
 import unicodedata
 import wave
 
-TOOL = {"name": "music-lens-rhythm-worker", "version": "0.26.0"}
+TOOL = {"name": "music-lens-rhythm-worker", "version": "0.27.0"}
 SRC_RATE = 16000
 RATE = 44100
 MAX_SECONDS = 600.0
@@ -2772,7 +2772,8 @@ def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None, genre_di
     parts = parts_field(sep, sections, bass, bass_notes, other, other_notes, drums, drum_hits)
     if parts and parts.get("reason") == "levels_failed":
         warnings.append("parts_failed: levels_failed")
-    bars = bars_field((sep or {}).get("downbeats"), chords, drums, drum_hits, btc_used, duration, (sep or {}).get("model_beats"))
+    model_beats = (sep or {}).get("model_beats")
+    bars = bars_field((sep or {}).get("downbeats"), chords, drums, drum_hits, btc_used, duration, model_beats)
     kw = key_change_warning(key_sections, bars)
     if kw:
         warnings.append(kw)
@@ -2796,6 +2797,7 @@ def analyze(path, model=TEMPO_CNN_MODEL, words=None, words_reason=None, genre_di
         "bpm_alternatives": bpm_alternatives(round(bpm, 2)),
         "bpm_alternatives_note": ALT_NOTE,
         "beats": beats,
+        **({"all_in_one_beats": model_beats} if model_beats else {}),
         "double_tempo_evidence": dte,
         "double_tempo_evidence_note": DTE_NOTE,
         "tempo_cnn": tc,

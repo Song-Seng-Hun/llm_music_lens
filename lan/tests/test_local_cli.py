@@ -45,10 +45,10 @@ class CliBase(RhythmBase):
         self.assertEqual(st, 200, body)
         return body
 
-    def store(self):
+    def store(self, **fields):
         os.makedirs(os.path.dirname(self.rhythm_file()), 0o700, exist_ok=True)
         with open(self.rhythm_file(), "w") as f:
-            f.write(json.dumps(dict(RHYTHM_OUT_V40, **self.ids())))
+            f.write(json.dumps(dict(RHYTHM_OUT_V40, **self.ids(), **fields)))
 
 
 class CliAnalyzeTest(CliBase):
@@ -319,8 +319,8 @@ class CliReadTest(CliBase):
         self.err(1, "bad_request", "sheet", RID64, "--view", "brief", "--start", "0", "--end", "3")
 
     def test_timeline(self):
-        self.store()
-        for layer in ("beats", "chords", "melody"):
+        self.store(all_in_one_beats=[0.3, 0.75, 1.2, 5.9])
+        for layer in ("beats", "all_in_one_beats", "chords", "melody"):
             self.assertEqual(self.ok("timeline", RID64, "--layer", layer, "--limit", "3"),
                              self.served("/timeline/%s?layer=%s&limit=3" % (RID64, layer)))
         self.assertEqual(self.ok("timeline", RID64, "--layer", "beats", "--start", "1", "--end", "2.5", "--cursor", "1"),

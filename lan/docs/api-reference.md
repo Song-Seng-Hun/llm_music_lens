@@ -320,7 +320,7 @@ API:
   The worker also bounds itself (SIGALRM 330 s, RLIMIT_CPU 600 s) in case the server dies first.
 - Rhythm never fails the analyze: the reply stays 200 with the ASR fields unchanged plus `rhythm`:
   - success: the same compact summary as `/report` plus `cache_hit` and `stored` (no beat or chord rows; page
-    them with `/timeline` `layer=beats|chords|energy|melody|genre|bass|other|drums|bars`);
+    them with `/timeline` `layer=beats|all_in_one_beats|chords|energy|melody|genre|bass|other|drums|bars`);
   - `{"status":"busy","code":"busy"}` when the team lock is held (never waits);
   - `{"status":"timeout","code":"timeout"|"no_time_left"}`;
   - `{"status":"failed","code":...}` with the worker's error code (`invalid_audio`, `too_short`, `analysis_failed`,
@@ -369,7 +369,7 @@ API:
   from before 0.4.3 give `lyric_repeats: null` and `overview: null`, and files from before 0.5.0 give `genre: null`
   (summary `genre` = the stored one without `windows`, plus `window_count`). `structure_debug` is never in the summary (stored file only). A damaged file gives `rhythm: {"status":"failed","code":"invalid_result"}`.
   No file: native bytes unchanged.
-- `GET /timeline/<id>?layer=beats|chords|energy|melody|genre|bass|other|drums|bars` is served by the server from the stored file with the native rules:
+- `GET /timeline/<id>?layer=beats|all_in_one_beats|chords|energy|melody|genre|bass|other|drums|bars` is served by the server from the stored file with the native rules:
   `start`/`end` 0..600 (default 0 and 600, `end >= start`), rows overlapping the range, `limit` 1..200 (default 100),
   `cursor` <= total, a ~43 KB page byte cap, `truncated` and `continuation`. Beats rows are `{"time"}`, chords rows
   `{start, end, label, strength}`, with `display` from worker 0.10.0 and `one_beat: true` on some BTC rows (with `reliability`: `low_reference`, or
@@ -384,6 +384,15 @@ API:
   new `rhythm=1` analyze recomputes it (the worker hash changed); `invalid_argument` would wrongly blame the
   request. `layer=melody` on a file stored before worker 0.4.0 and `layer=genre` before 0.5.0 give the same 404. Sections are in the summary only (at most 40 rows), not a timeline layer.
   `words`/`emotion` still go to `ml timeline` unchanged.
+- `all_in_one_beats` (worker 0.27.0) is optional timing evidence from the existing full-run All-In-One model.
+  Analyze and report summaries give `{method, count, first_beat_s, last_beat_s}` when that evidence exists.
+  Page the observed times as `{"time": seconds}` with `layer=all_in_one_beats` (Mac CLI
+  `mlr timeline <id> --layer all_in_one_beats` on a release that supports it). The page repeats those four
+  summary fields for the entire input, including the last observed beat even if the requested range has no rows.
+  Treat the times as estimates, including any gaps or early ending. `layer=beats` and the chord grid use the
+  Essentia beat times as before. Older results, quick-only results and results without model beat evidence
+  omit the summary field and give 404 `rhythm_not_found` for this layer. A quick request that reuses a full
+  result can still read its saved times.
 - `read_next` (in `/report` and in analyze summaries whose result is stored) points an LLM at the next reads with
   this result's ID filled in: `sheet` (`GET /sheet/<id>`), `zoom` (`GET /sheet/<id>?start=&end=`), `earcheck` (only
   when `POST /earcheck` is available, the same condition as `/status` `rhythm.earcheck_available` plus the rhythm
