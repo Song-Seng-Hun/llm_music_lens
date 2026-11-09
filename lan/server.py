@@ -64,6 +64,7 @@ RHYTHM_SECTIONS_KEYS = {"allin1_python", "allin1_model"}
 RHYTHM_SINGING_KEYS = {"yourmt3_python"}
 SEP_DIR = "sep"  # per-request scratch of the rhythm worker, under the upload directory
 RHYTHM_DIR = "results-rhythm"  # under root: <result_id>.json, 0600, written atomically
+SECTIONS_CACHE_DIR = "cache-allin1"  # under root, 0700: matplotlib's font list for allin1_sections.py, kept between runs
 RHYTHM_LAYERS = ("beats", "chords", "energy", "melody", "genre", "bass", "other", "drums", "bars")
 RHYTHM_MAX_BEATS = 5000
 RHYTHM_MAX_CHORDS = 20000
@@ -2603,10 +2604,13 @@ class Engine:
         if self.cfg.get("rhythm"):
             self._rhythm_dir_ok(create=True)
             self.rhythm_worker_sha256 = file_sha256(self.cfg["rhythm"]["worker"])
+            if "allin1_model" in self.cfg["rhythm"]:
+                self.sections_cache = root + "/" + SECTIONS_CACHE_DIR
+                self._rhythm_dir_ok(create=True, d=self.sections_cache)
 
     # rhythm layer
-    def _rhythm_dir_ok(self, create=False):
-        d = self.rhythm_dir
+    def _rhythm_dir_ok(self, create=False, d=None):
+        d = d or self.rhythm_dir
         if create and not os.path.lexists(d):
             os.mkdir(d, 0o700)
         st = os.lstat(d)
@@ -2809,7 +2813,8 @@ class Engine:
                     if "drum_model" in rh:
                         sep += ["--drum-model", rh["drum_model"]]
                     if "allin1_model" in rh:
-                        sep += ["--sections-python", rh["allin1_python"], "--sections-model", rh["allin1_model"]]
+                        sep += ["--sections-python", rh["allin1_python"], "--sections-model", rh["allin1_model"],
+                                "--sections-cache", self.sections_cache]
                     if "yourmt3_python" in rh:
                         sep += ["--singing-python", rh["yourmt3_python"]]
                 if "chord_model" in rh:

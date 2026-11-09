@@ -49,6 +49,9 @@ class SectionServerTest(RhythmBase):
         argv = self.fw.calls()[-1]["argv"]
         self.assertEqual(argv[argv.index("--sections-python") + 1], self.paths["allin1py"])
         self.assertEqual(argv[argv.index("--sections-model") + 1], self.paths["fold0.pth"])
+        cache = argv[argv.index("--sections-cache") + 1]
+        self.assertEqual(cache, os.path.join(self.env.root, server.SECTIONS_CACHE_DIR))
+        self.assertEqual(os.stat(cache).st_mode & 0o777, 0o700)
 
     def test_status(self):
         self.assertTrue(self.c.json("GET", "/status")[1]["rhythm"]["sections_configured"])
@@ -135,6 +138,30 @@ class SectionConfigTest(unittest.TestCase):
             with self.assertRaises(server.ConfigError):
                 self.load(sections, separation)
 
+    def test_cache_dir(self):
+        """The font cache directory is made 0700 when missing and kept; an open one or a symlink stops the server."""
+        cache = os.path.join(self.env.root, server.SECTIONS_CACHE_DIR)
+        server.App(self.load(self.good)).close()
+        self.assertEqual(os.lstat(cache).st_mode & 0o777, 0o700)
+        with open(os.path.join(cache, "fontlist.json"), "w") as f:
+            f.write("{}")
+        server.App(self.load(self.good)).close()
+        self.assertTrue(os.path.isfile(os.path.join(cache, "fontlist.json")))
+        os.chmod(cache, 0o755)
+        with self.assertRaises(server.ConfigError):
+            server.App(self.load(self.good))
+        os.chmod(cache, 0o700)
+        os.rename(cache, cache + ".real")
+        os.symlink(cache + ".real", cache)
+        with self.assertRaises(server.ConfigError):
+            server.App(self.load(self.good))
+
+    def test_no_cache_dir_without_sections(self):
+        rh = {"python": PY, "worker": self.paths["worker"],
+              "separation": {"demucs": self.paths["demucs"], "rmvpe": self.paths["rmvpe"]}}
+        server.App(server.load_config(self.env.write_config(self.env.config(rhythm=rh), 0o600))).close()
+        self.assertFalse(os.path.lexists(os.path.join(self.env.root, server.SECTIONS_CACHE_DIR)))
+
 
 DRIVER = r'''
 import json, os, sys, hashlib
@@ -180,8 +207,9 @@ with wave.open(sys.argv[2]) as w:
 np.save(sys.argv[3], np.full(n, 440.0))
 '''
 FAKE_HELPER = r'''import json, os, sys
-mode, model_dir, stems, out = "%s", sys.argv[1], sys.argv[2], sys.argv[3]
+mode, model_dir, stems, cache, out = "%s", sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 assert all(os.path.isfile(os.path.join(stems, s + ".wav")) for s in ("vocals", "bass", "drums", "other"))
+open(os.path.join(cache, "seen"), "a").write("x")
 if mode == "fail":
     sys.exit(4)
 
@@ -212,6 +240,8 @@ class SectionFallbackTest(unittest.TestCase):
         with open(self.driver, "w") as f:
             f.write(DRIVER)
         self.log = os.path.join(self.d, "stems.log")
+        self.cache = os.path.join(self.d, "cache")
+        os.mkdir(self.cache, 0o700)
         self.noise = os.path.join(self.d, "noise.wav")
         gen = ("import sys, wave, numpy as np\n"
                "y = np.random.default_rng(0).normal(0, 0.1, 44100 * 2)\n"
@@ -231,7 +261,7 @@ class SectionFallbackTest(unittest.TestCase):
                 f.write(text)
             os.chmod(files[name], 0o700)
         sep = {"demucs": files["demucs"], "rmvpe": os.path.join(self.d, "rmvpe.pt"), "scratch": os.path.join(self.d, "scratch"),
-               "sections_python": ESSENTIA_PY, "sections_model": os.path.join(self.d, model)}
+               "sections_python": ESSENTIA_PY, "sections_model": os.path.join(self.d, model), "sections_cache": self.cache}
         if source:
             sep["source"] = self.noise if source == "noise" else source
         p = subprocess.run([ESSENTIA_PY, "-I", self.driver, REPO, json.dumps(dict(
@@ -255,6 +285,8 @@ class SectionFallbackTest(unittest.TestCase):
         self.assertEqual(segs, [[0.0, 0.9, "intro"], [0.9, 2.0, "chorus"]])
         with open(self.log) as f:
             self.assertEqual(f.read().split(), ["all"])  # one Demucs run gives every stage its stem
+        with open(os.path.join(self.cache, "seen")) as f:  # the helper got the kept cache directory, not the scratch
+            self.assertEqual(f.read(), "x")
 
     def test_failures(self):
         self.assert_skipped(self.run_it(helper="fail"), "sections_failed")
@@ -272,6 +304,19 @@ class SectionFallbackTest(unittest.TestCase):
 
     def test_canonical(self):
         self.assert_skipped(self.run_it(source=None), "canonical_16k")
+
+
+@unittest.skipUnless(os.path.isfile(ESSENTIA_PY), "Essentia python missing")
+class SectionFlagsTest(unittest.TestCase):
+    def test_sections_flags_come_together(self):
+        base = ["--demucs", "/d", "--rmvpe-model", "/r", "--melody-scratch", "/s"]
+        flags = {"--sections-python": "/p", "--sections-model": "/m", "--sections-cache": "/c"}
+        for drop in flags:
+            argv = base + [x for k, v in flags.items() if k != drop for x in (k, v)]
+            p = subprocess.run([ESSENTIA_PY, "-I", os.path.join(REPO, "rhythm_worker.py")] + argv + ["/x.wav"],
+                               capture_output=True, timeout=60)
+            self.assertEqual(p.returncode, 1, drop)
+            self.assertIn(b"invalid_argument", p.stderr, drop)
 
 
 ROWS_DRIVER = r'''

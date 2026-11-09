@@ -355,7 +355,7 @@ DRUM_FAIL_REASONS = ("models_invalid", "decode_failed", "separation_failed", "ad
 # Sections from All-In-One (0.11.0, optional): functional segments on the four Demucs stems, run in their own environment.
 # See "Sections from All-In-One" in README.md. Audio without stems keeps the beat method.
 ALLIN1_CODE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "allin1_sections.py")
-ALLIN1_CODE_SHA256 = "9aedd5ca7e7a8aae957fe646fde9b0d74daa33099c306a4afec75dc511d738d0"
+ALLIN1_CODE_SHA256 = "367b919c3190c8e89d18d0c33700259c358070413df37f536816b032896bebba"
 ALLIN1_CODE_MAX_BYTES = 16 * 1024
 ALLIN1_WEIGHTS = (("harmonix-fold0-0vra4ys2.pth", "0db596dfb0995f41d62f6267d76a9d54c046f1649bd35e1dbeca0c5f9a7b8acd"),
                   ("harmonix-fold1-3ozjhtsj.pth", "607b4864eaabccd4f6951410d5ea6676666ad1cfa6ce2e18bc99f3824b77c3b7"),
@@ -438,7 +438,8 @@ CHORD_TONES = {"": (4, 7), "m": (3, 7), "dim": (3, 6), "aug": (4, 8), "m6": (3, 
 SEP_RETRY_REASONS = ("models_invalid", "decode_failed", "separation_failed", "rmvpe_failed")
 SEP_FLAGS = {"--demucs": "demucs", "--rmvpe-model": "rmvpe", "--melody-scratch": "scratch", "--melody-source": "source",
              "--basic-pitch-python": "basic_pitch", "--drum-model": "drum_model", "--singing-python": "singing_python",
-             "--sections-python": "sections_python", "--sections-model": "sections_model"}
+             "--sections-python": "sections_python", "--sections-model": "sections_model",
+             "--sections-cache": "sections_cache"}
 MEL_METHOD_VOCAL = ("Demucs htdemucs_ft vocal at 44.1 kHz, then RMVPE threshold 0.03 on CPU in 30 s pieces; "
                     "same note segmentation and merge as the mix method, then scoop join. The vocal stem can include backing vocals.")
 # Sung notes (0.21.0, optional): YourMT3+ on the same Demucs vocal, program 100 (singing voice). RWC-P songs 76-100 against
@@ -2322,7 +2323,7 @@ def section_segments(sep, duration):
         if not mono_stem(sep, s):
             return None, "separation_failed"
     out = os.path.join(d, "sections.json")
-    if run_tool([sep["sections_python"], "-I", ALLIN1_CODE, root, stems, out]):
+    if run_tool([sep["sections_python"], "-I", ALLIN1_CODE, root, stems, sep["sections_cache"], out]):
         return None, "sections_failed"
     with open(out) as f:
         got = json.load(f)
@@ -2841,7 +2842,7 @@ def main(argv):
     sep, chord_model, budget = {}, None, None
     usage = ("usage: rhythm_worker.py [--tempo-cnn-model /abs/model.pb] [--genre-models /abs/dir] [--words-stdin] "
              "[--demucs /abs --rmvpe-model /abs --melody-scratch /abs [--melody-source /abs]] "
-             "[--sections-python /abs --sections-model /abs] [--chord-model /abs] /absolute/path.wav")
+             "[--sections-python /abs --sections-model /abs --sections-cache /abs] [--chord-model /abs] /absolute/path.wav")
     while len(rest) > 1:
         if rest[0] == "--tempo-cnn-model" and not use_model and len(rest) > 2 and os.path.isabs(rest[1]):
             model, use_model, rest = rest[1], True, rest[2:]
@@ -2858,7 +2859,7 @@ def main(argv):
             sep[SEP_FLAGS[rest[0]]], rest = rest[1], rest[2:]
         else:
             fail_out("invalid_argument", usage)
-    if sep and not {"demucs", "rmvpe", "scratch"} <= set(sep) or ("sections_python" in sep) != ("sections_model" in sep):
+    if sep and not {"demucs", "rmvpe", "scratch"} <= set(sep) or len({"sections_python", "sections_model", "sections_cache"} & set(sep)) not in (0, 3):
         fail_out("invalid_argument", usage)
     if len(rest) != 1 or not os.path.isabs(rest[0]):
         fail_out("invalid_argument", usage)
