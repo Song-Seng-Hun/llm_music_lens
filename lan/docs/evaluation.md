@@ -356,14 +356,11 @@ Copy `rmvpe_model.py` next to `rhythm_worker.py`. Nothing is downloaded: install
 place `htdemucs_ft.safetensors` under `~/.cache/demucs-mlx/` yourself. Both weight files are pinned by SHA-256 in the
 worker. The rhythm python needs torch, scipy and librosa.
 
-What happens on a rhythm request: the upload is decoded to 44.1 kHz mono; audio with under -40 dB of its energy above
-8.2 kHz keeps the mix method, because Demucs needs the full band. Otherwise Demucs (`htdemucs_ft`, batch 1, seed 0)
-gives a vocal, RMVPE reads it on CPU, and the notes go through the same segmentation and merge as before. Only melody
-changes; every other layer still reads the 16 kHz mix.
-
-One Demucs run gives the vocal, bass, drum and other stems for all stem layers. Each `htdemucs_ft` stem is its own model,
-so the files are the same as four `--stem` runs, and one run skips three weight loads. If that run fails, every stem layer
-is skipped with `separation_failed`. The stereo layer still runs Demucs separately. Running the sections model alongside
+The 44.1 kHz mono decode supplies the bandwidth check. Audio with under -40 dB of its energy above 8.2 kHz
+keeps the mix method. For full-band stereo, worker 0.28.0 shares one Demucs `htdemucs_ft` pass (batch 1, seed 0)
+across the stereo measurements and stem readers. RMVPE reads the vocal in mono. The bass note reader uses a
+separate mono-input bass-only pass when configured. Identical channels or failed stereo separation use the existing
+mono all-stem pass. A failed mono separation skips its stem layers with `separation_failed`. Running the sections model alongside
 the accompaniment layer's Basic Pitch step was tried and dropped: 4% faster on a 600 s file (239.6 s to 228.9 s), no gain
 on 20 s and 50 s clips, for extra process handling.
 
@@ -396,9 +393,7 @@ Results, all on mixes built for the test (voice and accompaniment at equal level
 Limits: one of the four songs got worse (77.5 to 73.5), the one where separation was poorest. Backing vocals pass
 through Demucs as vocals, and that case is not in these mixes.
 
-Cost for a 600 s file on an M4 Max: Demucs 6.8 s and 8.6 GB, RMVPE 7.6 s and 2.6 GB, run one after the other. The
-default Demucs batch would take 34.1 GB. The one run for all four stems (above) takes 26 s and 14.4 GB, about as much as
-the stereo layer's Demucs run on the same file.
+See [measured runtime and memory](../../docs/performance.md) for the current and previous separation paths.
 
 Licenses:
 
@@ -491,8 +486,8 @@ A bass layer from the separated bass stem. Off unless the `rhythm` config has `b
 Copy `bass_onsets.py` next to `rhythm_worker.py`. Install `basic-pitch` with the ONNX backend in its own environment.
 `bass_onsets.py` and `nmp.onnx` are pinned by SHA-256.
 
-What happens on a rhythm request: Demucs gives the bass stem from the same 44.1 kHz mono audio as the vocal, RMVPE reads the
-pitch, and same-pitch notes split at Basic Pitch note starts. Notes under 80 ms are dropped and a same-pitch gap up to 200 ms
+What happens on a rhythm request: Demucs gives the bass stem from the 44.1 kHz mono decode. On a shared stereo run, this
+uses a bass-only pass. RMVPE reads the pitch, and same-pitch notes split at Basic Pitch note starts. Notes under 80 ms are dropped and a same-pitch gap up to 200 ms
 joins unless a start falls on the first frame after it. A 16 kHz WAV upload or band-limited audio has no bass layer.
 
 From worker 0.25.0 a note is kept only when a Basic Pitch note within a semitone overlaps it (Basic Pitch notes down to
@@ -530,7 +525,7 @@ Notes of everything but vocals, bass and drums, as one group. It comes with the 
 on and there is nothing else to install. Copy `other_notes.py` next to `rhythm_worker.py`. `other_notes.py` and `nmp.onnx` are
 pinned by SHA-256.
 
-What happens on a rhythm request: Demucs gives the other stem from the same 44.1 kHz mono audio as the vocal, and Basic Pitch reads
+What happens on a rhythm request: Basic Pitch reads the shared Demucs other stem and estimates
 its notes at onset threshold 0.7 and frame threshold 0.2. A 16 kHz WAV upload or band-limited audio has no such layer.
 
 `rhythm.other` is `{status: "done", method, reliability: "low_reference", note_count}` or `{status: "skipped", reason}`. Read the
@@ -579,8 +574,8 @@ Section labels are not corrected by this: similar chords and busy vocals did not
 ## Mix and stereo
 
 How wide a section is, where it leans, how loud the song is, and where each part sits. It needs no config of its own and no new
-model: it comes with the separation config. The rest of the worker still reads mono; this reads a second, stereo decode of the upload
-and runs Demucs on it once more, which adds about 11 s to a five-minute song and the same memory as the first run, one after the other.
+model: it comes with the separation config. It reads the stereo decode for mix measurements and shares the stereo Demucs stems
+with the other stem readers. The bass note reader uses its own mono bass stem.
 
 - `rhythm.mix` is `{status: "done", method, reliability: "reference_candidate", lufs, loudness_range, sections}` or
   `{status: "skipped", reason}`. `sections` has one row per `rhythm.sections` row: `{start, end, label, balance, width_db, low_width_db,
@@ -591,8 +586,8 @@ and runs Demucs on it once more, which adds about 11 s to a five-minute song and
   `{status: "skipped", reason}`. A row is `{start, end, label, vocals, bass, drums, other}`, each `{pan, width_db, level_db}` or `null`
   when that part is under -15 dB of the section's mix, and from worker 0.18.1 in a `silence` section. `level_db` is against the section's mix.
 - Reasons: `canonical_16k`, `band_limited`, `mono_source` (identical channels), `models_invalid`, and the failures `decode_failed`, `mix_failed`,
-  `separation_failed`, which add a warning and are retried on the next request that can give the field. A failed second Demucs run
-  leaves `mix` done. Before this worker, or without separation, both fields are `null`. Results are per section; there is no `/timeline` layer.
+  `separation_failed`, which add a warning and are retried on the next request that can give the field. A failed stereo separation
+  leaves `mix` available and uses the mono pass for the other stem layers. Before this worker, or without separation, both fields are `null`. Results are per section; there is no `/timeline` layer.
 
 Evaluated locally with pass thresholds set in advance. Mix values were checked on signals with exact answers. Part values were checked by giving
 separated stems known positions, levels and widths in 30 s blocks, mixing them, separating again and comparing, and all four parts
@@ -711,7 +706,7 @@ Copy `adtof_model.py` next to `rhythm_worker.py`. Get `Frame_RNN_adtofAll_0.inde
 [MZehren/ADTOF](https://github.com/MZehren/ADTOF) and keep them side by side. Both files and `adtof_model.py` are pinned by SHA-256.
 It runs in the rhythm python and needs no new environment.
 
-What happens on a rhythm request: Demucs gives the drum stem from the same 44.1 kHz mono audio as the vocal, and the model
+What happens on a rhythm request: the model reads the shared Demucs drum stem and
 gives hit times for five classes. A 16 kHz WAV upload or band-limited audio has no drum layer.
 
 `rhythm.drums` is `{status: "done", method, reliability: "reference_candidate", hit_counts}` or `{status: "skipped", reason}`.
@@ -749,8 +744,7 @@ that lets the model run on a Mac without the NATTEN package. Get the eight `harm
 Copy `allin1_sections.py` next to `rhythm_worker.py`. The eight files and `allin1_sections.py` are pinned by SHA-256, and the
 checkpoints load with torch's restricted unpickler. Nothing is downloaded at run time.
 
-What happens on a rhythm request: Demucs gives all four stems from the 44.1 kHz mono audio, reusing those the vocal, bass, accompaniment and
-drum layers made, and the model gives the sections from them.
+What happens on a rhythm request: the model reads the four shared Demucs stems and estimates the song sections.
 
 Cost of the model step for a 600 s file on an M4 Max: 20 s, 150 CPU seconds and 14.5 GB, after the Demucs step, not alongside it.
 

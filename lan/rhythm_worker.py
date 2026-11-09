@@ -200,7 +200,7 @@ import time
 import unicodedata
 import wave
 
-TOOL = {"name": "music-lens-rhythm-worker", "version": "0.27.0"}
+TOOL = {"name": "music-lens-rhythm-worker", "version": "0.28.0"}
 SRC_RATE = 16000
 RATE = 44100
 MAX_SECONDS = 600.0
@@ -298,11 +298,9 @@ MERGE_REVERSALS = 2  # sign changes an oscillation needs: A-B-A-B = 3 alternatin
 # Batch 1 keeps Demucs at 8.6 GB for 600 s (34.1 GB with the automatic batch); the seed makes it repeatable.
 SEP_RATE = 44100
 SEP_BAND_HZ, SEP_BAND_MIN_DB = 8200.0, -40.0
-# One Demucs run: the vocal, bass, drum, other and section stems come from one Demucs run on full.wav (MONO_DEMUCS_ARGS). Each
-# htdemucs_ft stem is its own model, so the four files are byte-identical to four --stem runs; one run skips three weight
-# loads (50 s: 2.5 s instead of 3.3 s). Its peak footprint is higher (600 s: 14.4 GB instead of 8.6 GB), about the stereo
-# layer's own all-stems run, so the run's peak stays. When the run fails, every stem stage is skipped.
-MONO_DEMUCS_ARGS = ("-n", "htdemucs_ft", "-b", "1", "--seed", "0")
+# Share stereo stems with the mono readers. The bass note reader gets the original mono bass alone.
+# Mono sources and a failed stereo separation use one mono all-stem pass.
+DEMUCS_ARGS = ("-n", "htdemucs_ft", "-b", "1", "--seed", "0")
 MONO_STEMS = ("vocals", "bass", "drums", "other")
 DEMUCS_WEIGHTS = "~/.cache/demucs-mlx/htdemucs_ft.safetensors"  # where demucs-mlx looks; it has no path option
 DEMUCS_WEIGHTS_SHA256 = "53f03b1ad4b4d211025a35da65460ba61a17547adf9c0544cad0ebcc8d7bbabb"
@@ -378,8 +376,7 @@ PART_WINDOW_S = 2.0
 PART_THRESHOLD_DB = -15  # stem window RMS against the whole mix's RMS; chosen on RWC-P 1-50
 PART_METHOD = ("Demucs htdemucs_ft stems: share of 2 s windows whose RMS is within 15 dB of the mix's RMS. "
                "Quiet parts can read as off. Note and hit rates come from the note layers.")
-# Mix and stereo (0.17.0): the upload decoded to stereo, and a second Demucs run on it; see "Mix and stereo" in README.md.
-STEREO_ARGS = ("-n", "htdemucs_ft", "-b", "1", "--seed", "0")
+# Mix and stereo: use the stereo decode and shared separated stems.
 STEREO_PARTS = ("vocals", "bass", "drums", "other")
 STEREO_WINDOW_S = 1.0
 STEREO_BANDS = (("low_width_db", 0.0, 200.0), ("mid_width_db", 200.0, 2000.0), ("high_width_db", 2000.0, None))
@@ -1559,14 +1556,20 @@ def run_tool(argv):
                           env=dict(os.environ, DEMUCS_MLX_NO_DOWNLOAD="1", HF_HUB_OFFLINE="1"), cwd="/").returncode
 
 
+def stem_dir(sep):
+    return sep.get("shared_stems") or os.path.join(sep["scratch"], "full")
+
+
 def mono_stem(sep, stem):
-    """True when scratch/full/<stem>.wav is there. The first call separates all four stems in one Demucs run; when that
-    run fails, no stem stage uses its files."""
+    """Make the stems for the mono readers. True stereo can share one set of stems with stereo analysis."""
     d = sep["scratch"]
-    path = os.path.join(d, "full", stem + ".wav")
-    if "mono_ok" not in sep and not os.path.isfile(path):
-        sep["mono_ok"] = not run_tool([sep["demucs"]] + list(MONO_DEMUCS_ARGS) + ["-o", d, os.path.join(d, "full.wav")])
-    return sep.get("mono_ok", True) and os.path.isfile(path)
+    if "mono_ok" not in sep and not os.path.isfile(os.path.join(stem_dir(sep), stem + ".wav")):
+        wav, _, reason = stereo_source(sep)
+        if reason is None:
+            sep["shared_stems"] = separate_stereo(sep, wav)
+        sep["mono_ok"] = bool(sep.get("shared_stems")) or not run_tool(
+            [sep["demucs"]] + list(DEMUCS_ARGS) + ["-o", d, os.path.join(d, "full.wav")])
+    return sep.get("mono_ok", True) and os.path.isfile(os.path.join(stem_dir(sep), stem + ".wav"))
 
 
 def vocal_pitch(sep, n16):
@@ -1594,7 +1597,7 @@ def vocal_pitch(sep, n16):
     os.unlink(decoded)
     if not mono_stem(sep, "vocals"):
         return None, None, "separation_failed"
-    rate, y = wavfile.read(os.path.join(d, "full", "vocals.wav"))
+    rate, y = wavfile.read(os.path.join(stem_dir(sep), "vocals.wav"))
     y = y.astype(np.float32)
     if y.ndim > 1:
         y = y.mean(axis=1)
@@ -1695,7 +1698,17 @@ def bass_stem_notes(sep, n16):
     d = sep["scratch"]
     if not mono_stem(sep, "bass"):
         return None, "separation_failed"
-    rate, y = wavfile.read(os.path.join(d, "full", "bass.wav"))
+    bass_path = os.path.join(stem_dir(sep), "bass.wav")
+    if sep.get("shared_stems"):
+        # Keep the note reader on the original mono-input bass without separating three unused mono stems.
+        source = os.path.join(d, "full.wav")
+        mono_bass = os.path.join(d, "full", "bass.wav")
+        if run_tool([sep["demucs"]] + list(DEMUCS_ARGS) + ["--stem", "bass", "-o", d, source]):
+            return None, "separation_failed"
+        if not complete_stems(source, os.path.dirname(mono_bass), ("bass",)):
+            return None, "separation_failed"
+        bass_path = mono_bass
+    rate, y = wavfile.read(bass_path)
     y = y.astype(np.float32)
     if y.ndim > 1:
         y = y.mean(axis=1)
@@ -1749,7 +1762,7 @@ def drum_stem_hits(sep, duration):
     if not mono_stem(sep, "drums"):
         return None, "separation_failed"
     out = os.path.join(d, "drums.json")
-    if run_tool([sys.executable, "-I", ADTOF_CODE, model, os.path.join(d, "full", "drums.wav"), out]):
+    if run_tool([sys.executable, "-I", ADTOF_CODE, model, os.path.join(stem_dir(sep), "drums.wav"), out]):
         return None, "adtof_failed"
     with open(out) as f:
         v = json.load(f)
@@ -1782,9 +1795,9 @@ def other_stem_notes(sep, duration):
     if read_pinned(OTHER_NOTES_CODE, OTHER_NOTES_SHA256, OTHER_NOTES_MAX_BYTES, keep=False)[0]:
         return None, "models_invalid"
     d = sep["scratch"]
-    stem = os.path.join(d, "full", "other.wav")
     if not mono_stem(sep, "other"):
         return None, "separation_failed"
+    stem = os.path.join(stem_dir(sep), "other.wav")
     out = os.path.join(d, "other-notes.json")
     if run_tool([sep["basic_pitch"], "-I", OTHER_NOTES_CODE, stem, out]):
         return None, "notes_failed"
@@ -1829,7 +1842,7 @@ def sing_stem_notes(sep, duration, left):
     env = {"PATH": "/usr/bin:/bin", "HOME": os.path.expanduser("~"), "LANG": "en_US.UTF-8", "TMPDIR": tmp, "MPLCONFIGDIR": tmp,
            "NUMBA_CACHE_DIR": tmp, "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "WANDB_MODE": "disabled"}
     try:
-        p = subprocess.run([sep["singing_python"], "-I", "-W", "ignore", SING_CODE, SING_DIR, os.path.join(d, "full", "vocals.wav"), out],
+        p = subprocess.run([sep["singing_python"], "-I", "-W", "ignore", SING_CODE, SING_DIR, os.path.join(stem_dir(sep), "vocals.wav"), out],
                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=env, cwd="/",
                            timeout=min(left, SING_MAX))
     except subprocess.TimeoutExpired:
@@ -1857,7 +1870,7 @@ def sing_stem_notes(sep, duration, left):
 
 def sing_input(sep, n16, vocal_reason):
     """Sets sep["sing"] to (field, rows). Runs last before the scratch goes, in the time left. Never raises."""
-    if vocal_reason or not os.path.isfile(os.path.join(sep["scratch"], "full", "vocals.wav")):
+    if vocal_reason or not os.path.isfile(os.path.join(stem_dir(sep), "vocals.wav")):
         sep["sing"] = ({"status": "skipped", "reason": "no_vocal"}, [])
         return
     left = BUDGET - SING_RESERVE - (time.monotonic() - START)
@@ -2159,34 +2172,80 @@ def tone_measures(folder, drum_hits):
     return {"frames": frames, "hits": hits}
 
 
+def stereo_source(sep):
+    """Decode once and use the existing stereo channel check for both consumers."""
+    if "stereo_source" in sep:
+        return sep["stereo_source"]
+    wav = os.path.join(sep["scratch"], "stereo.wav")
+    if run_tool(["/usr/bin/afconvert", "-f", "WAVE", "-d", "LEI16@%d" % SEP_RATE, "-c", "2", sep["source"], wav]):
+        result = (None, None, "decode_failed")
+    else:
+        try:
+            mix = stereo_energy(wav, bands=True)
+            result = (wav, mix, None) if any(r[0] + r[1] - 2.0 * r[2] > 0 for r in mix) else (None, None, "mono_source")
+        except Exception:
+            result = (None, None, "mix_failed")
+    sep["stereo_source"] = result
+    return result
+
+
+def complete_stems(source, folder, names):
+    """Check the PCM headers and final frame before sharing separator output."""
+    try:
+        with wave.open(source, "rb") as original:
+            frames = original.getnframes()
+        if frames < 1:
+            return False
+        for name in names:
+            with wave.open(os.path.join(folder, name + ".wav"), "rb") as stem:
+                if stem.getparams()[:4] != (2, 2, SEP_RATE, frames):
+                    return False
+                stem.setpos(frames - 1)
+                if len(stem.readframes(1)) != 4:
+                    return False
+    except (OSError, EOFError, wave.Error, ValueError):
+        return False
+    return True
+
+
+def separate_stereo(sep, wav):
+    """Run the stereo separator at most once, exposing only a complete stem set."""
+    if "stereo_stems" not in sep:
+        out = os.path.join(sep["scratch"], "stereo_out")
+        stems = os.path.join(out, "stereo")
+        sep["stereo_stems"] = None
+        try:
+            if not run_tool([sep["demucs"]] + list(DEMUCS_ARGS) + ["-o", out, wav]) and complete_stems(wav, stems, MONO_STEMS):
+                sep["stereo_stems"] = stems
+        except OSError:
+            pass
+    return sep["stereo_stems"]
+
+
 def stereo_input(sep, vocal_reason):
     """Sets sep["stereo"] to (mix field or None, position field or None, measures). Runs before the scratch goes. Never raises."""
-    def skip(reason, position_reason=None):
-        sep["stereo"] = ({"status": "skipped", "reason": reason}, {"status": "skipped", "reason": position_reason or reason}, None)
-    d = sep["scratch"]
-    if not os.path.isfile(os.path.join(d, "full.wav")):
+    def skip(reason):
+        sep["stereo"] = ({"status": "skipped", "reason": reason}, {"status": "skipped", "reason": reason}, None)
+    if not os.path.isfile(os.path.join(sep["scratch"], "full.wav")):
         return skip(vocal_reason or "separation_failed")
-    wav = os.path.join(d, "stereo.wav")
-    if run_tool(["/usr/bin/afconvert", "-f", "WAVE", "-d", "LEI16@%d" % SEP_RATE, "-c", "2", sep["source"], wav]):
-        return skip("decode_failed")
+    wav, mix, reason = stereo_source(sep)
+    if reason:
+        return skip(reason)
     try:
-        mix = stereo_energy(wav, bands=True)
-        if not any(r[0] + r[1] - 2.0 * r[2] > 0 for r in mix):  # identical channels: a mono upload has no stereo to read
-            return skip("mono_source")
         lufs, lra = stereo_lufs(wav)
     except Exception:
         return skip("mix_failed")
     parts = None
-    try:
-        out = os.path.join(d, "stereo_out")
-        if not run_tool([sep["demucs"]] + list(STEREO_ARGS) + ["-o", out, wav]):
-            parts = {s: stereo_energy(os.path.join(out, "stereo", s + ".wav")) for s in STEREO_PARTS}
-    except Exception:
-        parts = None
+    stems = separate_stereo(sep, wav)
+    if stems:
+        try:
+            parts = {s: stereo_energy(os.path.join(stems, s + ".wav")) for s in STEREO_PARTS}
+        except Exception:
+            pass
     tone = None
     if parts:
         try:
-            tone = tone_measures(os.path.join(out, "stereo"), sep.get("drums", (None, []))[1])
+            tone = tone_measures(stems, sep.get("drums", (None, []))[1])
         except Exception:
             tone = None
     position = None if parts else {"status": "skipped", "reason": "separation_failed"}
@@ -2322,12 +2381,11 @@ def section_segments(sep, duration):
         if read_pinned(path, sha, cap, keep=False)[0]:
             return None, "models_invalid"
     d = sep["scratch"]
-    stems = os.path.join(d, "full")
     for s in MONO_STEMS:
         if not mono_stem(sep, s):
             return None, "separation_failed"
     out = os.path.join(d, "sections.json")
-    if run_tool([sep["sections_python"], "-I", ALLIN1_CODE, root, stems, sep["sections_cache"], out]):
+    if run_tool([sep["sections_python"], "-I", ALLIN1_CODE, root, stem_dir(sep), sep["sections_cache"], out]):
         return None, "sections_failed"
     with open(out) as f:
         got = json.load(f)
@@ -2359,13 +2417,14 @@ def wav_rms(path, window_s):
             total, count = total + power, count + len(x)
 
 
-def part_levels(d):
+def part_levels(d, stems=None):
     """{part: [window active?] or None when that stem is absent or unreadable}, from scratch d."""
     floor = wav_rms(os.path.join(d, "full.wav"), PART_WINDOW_S)[1] * 10 ** (PART_THRESHOLD_DB / 20.0)
     out = {}
+    stems = stems or os.path.join(d, "full")
     for s in PART_STEMS:
         try:
-            out[s] = [0 < r >= floor for r in wav_rms(os.path.join(d, "full", s + ".wav"), PART_WINDOW_S)[0]]
+            out[s] = [0 < r >= floor for r in wav_rms(os.path.join(stems, s + ".wav"), PART_WINDOW_S)[0]]
         except (OSError, EOFError, ValueError, wave.Error):
             out[s] = None
     return out
@@ -2377,7 +2436,7 @@ def parts_input(sep, vocal_reason):
         sep["parts"] = ({"status": "skipped", "reason": vocal_reason or "separation_failed"}, None)
         return
     try:
-        levels = part_levels(sep["scratch"])
+        levels = part_levels(sep["scratch"], stem_dir(sep))
     except Exception:
         levels = None
     if levels is None or all(v is None for v in levels.values()):

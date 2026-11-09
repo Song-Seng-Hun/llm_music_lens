@@ -39,4 +39,4 @@ under 1 s after it. The server's limit is 300 s, so the step keeps a 10 s reserv
 
 - One song collection (Japanese pop, 1990s studio recordings). Other styles may score differently.
 - The vocal stem can include backing vocals; their notes count as sung notes.
-- The server runs Demucs on a mono decode, while these runs used the stereo files.
+- The server used a mono decode at the time of this comparison. These evaluation runs used the stereo files.
