@@ -189,7 +189,7 @@ VIEW_DETAIL = ("view=brief or layers=<comma list of %s>, one of them, not with s
 EARCHECK_MAX_SPAN = 30.0  # s; 30 s stereo s16 44.1 kHz = 5,292,044 bytes, base64 7.06 MB < response_max 8 MiB
 LISTEN_RATE = 44100
 LISTEN_MAX_BYTES = 56 * MiB  # limit_exec.LISTEN_FSIZE_BYTES
-RE_EARCHECK_OP = re.compile(r"\Aec-[0-9a-f]{32}\Z")  # uploads/ec-<hex>: ear-check staging, never owned by a receipt
+RE_EARCHECK_OP = re.compile(r"\A(ec|rl)-[0-9a-f]{32}\Z")  # uploads/ec-<hex> (ear-check), rl-<hex> (sheet PNG/HTML): never owned by a receipt
 
 
 class ConfigError(Exception):
@@ -3341,7 +3341,7 @@ class App(Engine):
         self.gate = threading.Lock()
         self.conn_lock, self.conns = threading.Lock(), 0
         swept = 0
-        for name in os.listdir(self.uploads):  # ear-check crash leftovers: no receipt can own them
+        for name in os.listdir(self.uploads):  # ear-check and sheet crash leftovers: no receipt can own them
             if RE_EARCHECK_OP.match(name) and stat.S_ISDIR(os.lstat(self.uploads + "/" + name).st_mode):
                 self.cleanup(name, False)
                 swept += 1

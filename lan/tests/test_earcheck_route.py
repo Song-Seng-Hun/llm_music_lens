@@ -283,22 +283,27 @@ class EarcheckTimeoutTest(EarcheckBase):
 
 
 class EarcheckLeftoverTest(Base):
-    def test_startup_removes_only_earcheck_dirs(self):
+    def test_startup_removes_only_earcheck_and_sheet_dirs(self):
         up = os.path.join(self.env.root, "uploads")
-        ec, other = os.path.join(up, "ec-" + "a" * 32), os.path.join(up, "b" * 32)
-        for d in (ec, other):
+        ec, rl, other = os.path.join(up, "ec-" + "a" * 32), os.path.join(up, "rl-" + "c" * 32), os.path.join(up, "b" * 32)
+        with open(os.path.join(up, "rl-" + "d" * 32), "wb") as f:  # a file of that name is not a staging directory
+            f.write(b"x")
+        for d in (ec, rl, other):
             os.mkdir(d, 0o700)
             for n in ("upload.wav", "listen.wav", "earcheck.wav"):
                 with open(os.path.join(d, n), "wb") as f:
                     f.write(b"RIFF")
+        with open(os.path.join(rl, "view.m4a"), "wb") as f:
+            f.write(b"x")
         self.restart()
-        self.assertEqual(self.env.uploads_entries(), ["b" * 32])
+        self.assertEqual(self.env.uploads_entries(), ["b" * 32, "rl-" + "d" * 32])
         self.assertEqual(sorted(os.listdir(other)), ["earcheck.wav", "listen.wav", "upload.wav"])
         ev = [e for e in self.env.log_events() if e.get("event") == "earcheck_leftovers_removed"]
-        self.assertEqual([e["count"] for e in ev], [1])
+        self.assertEqual([e["count"] for e in ev], [2])
         for n in os.listdir(other):
             os.unlink(os.path.join(other, n))
         os.rmdir(other)
+        os.unlink(os.path.join(up, "rl-" + "d" * 32))
 
 
 class EarcheckUnconfiguredTest(Base):

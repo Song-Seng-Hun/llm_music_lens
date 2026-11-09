@@ -495,14 +495,18 @@ class Fail(Exception):
         self.code, self.message = code, message
 
 
-def fail_out(code, message):
+def fail_out(code, message, group=False):
+    """group: also SIGKILL the rest of our process group (a model child still running), when we lead it as the server
+    starts us; otherwise that child would outlive a server that died without killing the group."""
     sys.stderr.write(json.dumps({"error": {"code": code, "message": message[:500]}}) + "\n")
     sys.stderr.flush()
+    if group and os.getpgrp() == os.getpid():
+        os.killpg(0, signal.SIGKILL)
     os._exit(1)
 
 
 def on_alarm(signum, frame):
-    fail_out("timeout", "rhythm worker exceeded its own wall bound")
+    fail_out("timeout", "rhythm worker exceeded its own wall bound", group=True)
 
 
 def r3(x):

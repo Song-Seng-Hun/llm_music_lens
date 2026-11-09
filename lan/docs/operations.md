@@ -21,6 +21,9 @@ more specific than that spec.
 - At start, a torn last line (crash mid-append) is truncated away and fsynced, and `journal_tail_truncated` is
   logged. An unparsable line anywhere else stops the server (exit 2, "journal needs owner recovery"), because it
   may hide a later acknowledged record. Inspect the file by hand; do not delete it to get the server up.
+- If every full analysis suddenly takes about 10 s longer, delete `fontlist-*.json` and `.matplotlib-lock` in
+  `~/AI-Listen/cache-allin1/` (a run killed while it first wrote the font list can leave them broken); the next run
+  rebuilds them.
 
 ## Stopping
 
