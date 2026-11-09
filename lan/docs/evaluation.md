@@ -444,7 +444,7 @@ Reliability: on test songs the pitch of sung notes matched the written vocal par
 did, and the note count came close to it; about half of the sung pitches still miss, so notes stay low_reference. Backing
 vocals pass through Demucs as vocals. Measurements: [sung notes accuracy](../../docs/sung-notes-accuracy.md).
 
-Cost for a 600 s vocal: about 80 s and 14.3 GB on CPU, and about 1,000 s of CPU time. The worker keeps its own CPU limit
+Cost for a 600 s vocal: about 45 s and 3.9 GB on CPU, and about 550 s of CPU time. The worker keeps its own CPU limit
 at 600 s and sets a hard limit of 1,800 s, which only `sing_notes.py` raises its soft limit to.
 
 | Part | Terms | Notes |

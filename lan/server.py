@@ -2832,6 +2832,10 @@ class Engine:
             if p.returncode != 0:
                 code = last_stderr_code(err, lim["stderr_line"])
                 return {"status": "failed", "code": code if re.match(r"\A[a-z_]{1,64}\Z", code) else "internal_error"}
+            err.seek(0)
+            for line in err.read(16 * 1024).decode("utf-8", "replace").splitlines():  # e.g. the singing full-decode fallback
+                if line.startswith("sing_notes: "):
+                    self.log.event("rhythm_note", id=job.rid, line=line[:200])
             if os.fstat(out.fileno()).st_size > lim["rhythm_output"]:
                 return {"status": "failed", "code": "invalid_output"}
             out.seek(0)

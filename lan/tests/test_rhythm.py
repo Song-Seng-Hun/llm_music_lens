@@ -538,6 +538,13 @@ class RhythmAnalyzeTest(RhythmBase):
         finally:
             os.close(fd)
 
+    def test_sing_notes_line_logged(self):
+        self.fw.write(stderr_lines=["UserWarning: noise", "sing_notes: model structure differs; full decode"])
+        st, b = self.c.json("POST", AR, WAV, headers=self.c.signed("POST", AR, WAV))
+        self.assertEqual((st, b["rhythm"]["status"]), (200, "done"))
+        notes = [e for e in self.env.log_events() if e.get("event") == "rhythm_note"]
+        self.assertEqual([e["line"] for e in notes], ["sing_notes: model structure differs; full decode"])
+
     def test_cache_hit_reuses_stored(self):
         self.assertEqual(self.c.json("POST", AR, WAV)[1]["rhythm"]["cache_hit"], False)
         self.env.write_control(analyze={"stdout": json.dumps(dict(ANALYZE_OUT, cache_hit=True))})
