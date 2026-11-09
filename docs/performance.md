@@ -4,7 +4,15 @@ Measured on one Mac Studio (Apple M4 Max, 16 cores, 64 GB unified memory, macOS)
 
 A Mac analysis run has two parts: speech recognition and the optional emotion or mood scores (Music Lens local, `ml`), then the rhythm layer (beats, chords, sections and, in a full run, the separated parts). The tables below time each part on its own.
 
-## Rhythm layer, whole runs
+## Shared stereo stems with mono bass notes
+
+Worker 0.28.0 shares one stereo all-stem separation. When bass notes are configured it also runs a mono bass-only separation.
+On the same Mac, one fresh paired run of a 358 s stereo recording took 124.50 → 113.18 s for full rhythm (−9.09%),
+with 31.12 → 19.63 s in Demucs. Both runs reported 8.73 GB maximum process RSS. The mono bass WAV matched byte for byte
+and bass note rows matched on all three recorded inputs. On those inputs vocal-note F1 changed by −0.61 points on average
+and drum-hit F1 by +1.19. This measured pair excludes speech recognition and network transfer.
+
+## Rhythm layer, whole runs at 4c4b035
 
 | Song | Mode | Wall time | Peak memory |
 | --- | --- | ---: | ---: |

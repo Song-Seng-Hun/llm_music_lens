@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 import wave
+from unittest import mock
 
 try:
     import numpy as np
@@ -173,6 +174,41 @@ class InputTest(unittest.TestCase):
         self.assertEqual(pos["status"], "done")
         self.assertEqual(pos["sections"][0]["vocals"]["level_db"], 0.0)
         self.assertAlmostEqual(pos["sections"][0]["other"]["pan"], 0.5, delta=0.01)
+
+    def test_share_only_complete_stems(self):
+        try:
+            import essentia  # noqa: F401
+        except ImportError:
+            self.skipTest("run under the Essentia runtime")
+        left, right = noise(2, 1) * 0.03, noise(2, 2) * 0.03
+        write(self.src, np.stack([left, right], 1))
+        real_tool = rw.run_tool
+        for truncated in (False, True):
+            with self.subTest(truncated=truncated), tempfile.TemporaryDirectory(dir=self.d.name) as scratch:
+                write(os.path.join(scratch, "full.wav"), np.stack([left, left], 1))
+                sep = {"scratch": scratch, "source": self.src, "demucs": self.demucs}
+                calls = []
+
+                def run(argv):
+                    rc = real_tool(argv)
+                    if argv[0] == self.demucs:
+                        calls.append(os.path.basename(argv[-1]))
+                        if truncated and calls[-1] == "stereo.wav" and rc == 0:
+                            bad = os.path.join(argv[argv.index("-o") + 1], "stereo", "other.wav")
+                            with open(bad, "r+b") as f:
+                                f.seek(-1, os.SEEK_END)
+                                f.truncate()
+                    return rc
+
+                with mock.patch.object(rw, "run_tool", side_effect=run):
+                    self.assertTrue(rw.mono_stem(sep, "vocals"))
+                    self.assertTrue(rw.mono_stem(sep, "other"))
+                    rw.stereo_input(sep, None)
+                self.assertEqual(calls, ["stereo.wav", "full.wav"] if truncated else ["stereo.wav"])
+                self.assertEqual(os.path.basename(rw.stem_dir(sep)), "full" if truncated else "stereo")
+                mix, pos = rw.stereo_fields(sep, [{"start": 0.0, "end": 2.0, "label": "A"}])
+                self.assertEqual(mix["status"], "done")
+                self.assertEqual(pos["status"], "skipped" if truncated else "done")
 
     def test_identical_channels(self):
         c = noise(2) * 0.05
