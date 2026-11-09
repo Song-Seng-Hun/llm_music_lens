@@ -955,6 +955,10 @@ Why lyric repeats are the backbone: on the 8 real songs (stored 0.4.3 `structure
      section boundary nearest its middle (this last rule does not check for words); repeated while longer
      than 45 s and fewer than 40 segments exist; no candidate meeting the 8 s rule (word rules need words): no cut.
      On the 8 songs: 111-171 -> 111-138 + 138-171 and 65-116 -> 65-80 + 80-116 (both at a word-free second).
+  7. after merging and splitting, a final `vocal` segment becomes `gap` (voice unknown) when ASR tokens still
+     touch at least 25% of its windows but no overlapping token contains a letter or number after Unicode
+     normalization. A lexical word at a single instant or crossing a boundary still counts. Boundaries, transcript
+     and word counts are kept. This uses the ASR output alone, so speech need not appear in any printed lyrics.
 - `internal` (every segment; false unless a repeat): `internal: true` means this group has only one surviving block
   after silence filtering (step 5); splitting that block (step 6) does not add occurrences. It is weaker
   cross-section repeat evidence, not proof that the text repeats only within that block (e.g. the group's other
