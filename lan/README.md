@@ -63,6 +63,8 @@ there are any, with each part's loudness, main chords and melody range.
 A later full run replaces a quick result; a quick run never replaces a full one. Quick chord labels match a full run's, without bass slashes or two chords in a bar.
 For instrumental audio, add `--emotion-mode music` so speech recognition does not run twice.
 
+Memory, time and disk, measured on one Mac: [Memory and time](../docs/performance.md).
+
 ## Check the result against the audio
 
 The server keeps no audio, so each of these needs the audio again. **Use the original audio file.** The renderer checks

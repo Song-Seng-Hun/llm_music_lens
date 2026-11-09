@@ -16,7 +16,9 @@ A program that pulls beat, harmony, note, lyric and energy cues out of audio and
 
 ## What is it?
 
-Give it a song, and it lays out, along the timeline, the BPM, where the beats are, which chords and notes sounded when, and where each lyric word falls against the beat. You can look at the results on screen and check them against the original audio, export them as JSON, Markdown or a summary note for an AI, or hand them straight to an AI over MCP. It is made for evidence in music analysis, composition references, reading a style and planning video.
+Most AI agents cannot hear sound. Models that do take audio can describe the impression a song gives, but they cannot point, with evidence, to the BPM, which chord and note sounded at which second, or where a lyric falls against the beat. So when you ask "listen to this song and write something with a similar feel", the AI guesses from the title or the genre instead of actually hearing the song. Music Lens was built to fill that gap.
+
+Give it a song, and it lays out, along the timeline, the BPM, where the beats are, which chords and notes sounded when, and where each lyric word falls against the beat. You can look at the results on screen and check them against the original audio, export them as JSON, Markdown or a summary note for an AI, or hand them straight to an AI over MCP. Use it for evidence in music analysis, composition references, reading a style and planning video.
 
 There are two ways to use it.
 
@@ -83,6 +85,16 @@ npm run dev -- --host 127.0.0.1
 When the page opens, choose a file and press **정밀 분석 시작** (start detailed analysis). With no file, a 16-second synthetic demo lets you look around first.
 
 The Mac analysis server is set up separately. What it needs and how to install it: [Mac analysis server](../lan/README.md).
+
+### Memory and time
+
+Measured for the Mac analysis server on an Apple M4 Max (64 GB memory). Other machines, in particular 8 GB or 16 GB Macs, have not been measured yet. The web app runs in the browser and was not measured.
+
+- Memory: a quick analysis (`--quick`) uses about 1–2 GB; a full analysis, which separates the parts, uses up to about 15 GB on a 10-minute song. Lyric word timing (Whisper) uses about 7 GB. The two run one after the other, so they do not add up.
+- Time: a full analysis takes about 17 s for a 20-second song, about 25 s for a 50-second song and about 3 minutes for a 10-minute song. A quick analysis takes about 16 s even for a 10-minute song. Word timing for a sung 6-minute song takes about 30 s; voice emotion adds about 30 s, music mood about 10 s. The first full analysis after an install takes about 8 s longer.
+- Disk: with every optional model, about 5.6 GB of models and about 5 GB of Python environments.
+
+How it was measured, and the numbers per step: [Memory and time](performance.md).
 
 ## Examples
 
@@ -152,5 +164,6 @@ The repository's own code is [MIT](../LICENSE). The components below follow thei
 - Server tool docs: [beat and BPM](server-timing.md) · [waveform](waveform-dynamics.md) · [spectral texture](spectral-texture.md) · [attacks against the beat](attack-beat.md) · [vocal pitch](server-vocal-pitch.md) · [song structure](music-structure.md) · [timeline](music-continuity.md)
 - [Preparing solo-voice analysis](vocal-specialist.md)
 - [Mac analysis server](../lan/README.md)
+- [Memory and time](performance.md): the machine and method, time, memory and disk per step
 - [Genre estimate accuracy](genre-accuracy.md)
 - Development checks (in `web/`): `npm run typecheck`, `npm test`, `npm run build`
