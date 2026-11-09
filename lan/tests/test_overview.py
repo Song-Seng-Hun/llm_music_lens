@@ -350,6 +350,20 @@ class OverviewLogicTest(unittest.TestCase):
         self.assertIs(server.check_rhythm(v), v)
         self.assertEqual(server.rhythm_overview(v, None), {"status": "failed", "code": "no_structure"})
 
+    def test_punctuation_only_vocal_evidence_becomes_unknown(self):
+        v = stored(12.0, [VERSE] * 12, [(6.0, 12.0, 0)])
+        punctuation = [["…", 1.0, 1.0], ["♪", 2.0, 2.0]]
+        o = server.rhythm_overview(v, punctuation)
+        assert_shape(self, o, 12.0)
+        self.assertEqual(seq(o), [("gap", None, 0.0, 6.0), ("repeat", 0, 6.0, 12.0)])
+        self.assertEqual(o["segments"][0]["words"], {"count": 2})
+        self.assertIn("voice unknown", o["notes"])
+
+        for word in (["말", 0.0, 0.0], ["Thank you", 5.99, 6.2], ["１２", 3.0, 3.0]):
+            with self.subTest(word=word):
+                o = server.rhythm_overview(v, punctuation + [word])
+                self.assertEqual(seq(o), [("vocal", None, 0.0, 6.0), ("repeat", 0, 6.0, 12.0)])
+
     def test_melody_missing_and_no_words(self):
         vals = [VERSE] * 60
         v = stored(60.0, vals, [(20.0, 30.0, 0)], notes=None)  # melody failed

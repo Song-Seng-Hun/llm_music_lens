@@ -477,6 +477,8 @@ How the overview is built is in [analysis layers](evaluation.md#overview-server-
   [{group, count, seconds}], dropped_repeats, segments, notes}`; at most 40 segments, contiguous 0..duration (times 3 decimals). Each segment
   `{start, end, kind, group (repeat only, else null), internal, label (audio only, else null), energy: {mean_db, rel_db,
   rank}, quiet, chords: {top, changes_per_min}, melody, words}`:
+  - `kind: "gap"`: voice is unknown. This includes final spans where punctuation or symbols alone supported
+    the vocal label, and lyric-source spans without usable word or melody evidence;
   - `energy.mean_db`: mean of the 1 s values whose midpoint lies in the segment, leaving out values below
     `silence_db` unless the segment is silence or holds only such values; `rel_db` = mean_db minus the song median of
     the non-silent values; `rank` 1 = loudest among non-silence segments (ties earliest), null for silence;

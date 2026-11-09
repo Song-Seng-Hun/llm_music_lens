@@ -2067,6 +2067,9 @@ OV_NOTES = ("estimate: repeat = repeated ASR text (chorus/hook candidate; quiet 
             "not distinguished, depends on ASR; audio sections near chance vs lyric edges on 8 songs")
 OV_NOTES_MODEL = ("estimate: repeat = repeated ASR text (chorus/hook candidate; quiet = <=-12 dB rel), verse/pre-chorus "
                   "not distinguished, depends on ASR; audio sections from All-In-One, see sections for their functions")
+OV_NOTES_VOICE_UNKNOWN = ("estimate: repeat = repeated ASR text (possible chorus/hook; quiet <=-12 dB rel); "
+                          "gap = voice unknown when only punctuation or symbols support a vocal label; "
+                          "verse/pre-chorus not distinguished")
 
 
 def _ov_wquantile(pairs, q=0.5):
@@ -2141,6 +2144,10 @@ class _Ov:
         self.vocal_by = "words" if self.words is not None else "melody" if self.melody else "none"
         self.touched = self._touched([(max(s, 0.0), max(s, e)) for s, e in self.words] if self.words is not None
                                      else [(s, e) for s, e, _ in self.notes])
+        self.lexical_spans = [
+            (float(s), float(e)) for text, s, e in words
+            if any(c.isalnum() for c in unicodedata.normalize("NFKC", text))
+        ] if words is not None else None
         self.chords = sorted((c["start"], c["end"], c["label"]) for c in v["chords"])
         self.dropped = 0  # repeats turned into silence
 
@@ -2373,11 +2380,19 @@ class _Ov:
             h = len(loud) // 2
             median = loud[h] if len(loud) % 2 else (loud[h - 1] + loud[h]) / 2
         out = []
+        voice_unknown = False
         for s in segs:
             a, b = s["start"], s["end"]
+            kind = s["kind"]
+            if kind == "vocal" and self.lexical_spans is not None:
+                idx = self.windows(a, b)
+                if (idx and not any(s0 < b and (s0 >= a or e0 > a) for s0, e0 in self.lexical_spans)
+                        and sum(self.touched[i] for i in idx) / len(idx) >= OV_VOCAL_FRACTION):
+                    kind = "gap"
+                    voice_unknown = True
             mean = self.energy(a, b, s["kind"])
             rel = None if mean is None or median is None else round(mean - median, 2)
-            out.append({"start": round(a, 3), "end": round(b, 3), "kind": s["kind"], "group": s["group"],
+            out.append({"start": round(a, 3), "end": round(b, 3), "kind": kind, "group": s["group"],
                         "internal": s["kind"] == "repeat" and len(blocks_of[s["group"]]) == 1, "label": s["label"], "energy": {"mean_db": mean, "rel_db": rel, "rank": None},
                         "quiet": s["kind"] == "repeat" and rel is not None and rel <= OV_QUIET_DB,
                         "chords": self.chord_info(a, b), "melody": self.melody_info(a, b), "words": self.words_info(a, b)})
@@ -2393,7 +2408,8 @@ class _Ov:
                 "reliability": "low_reference", "segment_count": len(out),
                 "repeat_groups": [{"group": g, "count": len(blocks_of[g]), "seconds": secs[g] / 1000.0}
                                   for g in sorted(secs)],
-                "dropped_repeats": self.dropped, "segments": out, "notes": OV_NOTES_MODEL if model else OV_NOTES}
+                "dropped_repeats": self.dropped, "segments": out,
+                "notes": OV_NOTES_VOICE_UNKNOWN if voice_unknown else (OV_NOTES_MODEL if model else OV_NOTES)}
 
 
 def overview_words(payload, sha, v):
