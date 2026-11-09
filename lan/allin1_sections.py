@@ -1,9 +1,10 @@
 """Song sections from All-In-One (MIT, mir-aidj/all-in-one) on stems that already exist. Runs in its own environment.
 
-Usage: allin1_sections.py MODEL_DIR STEMS_DIR OUT.json
+Usage: allin1_sections.py MODEL_DIR STEMS_DIR CACHE_DIR OUT.json
 MODEL_DIR holds the eight harmonix-fold checkpoints; the worker checks their SHA-256 first. STEMS_DIR holds bass.wav,
 drums.wav, other.wav and vocals.wav. OUT.json gets {"segments": [{"start", "end", "label"}], "downbeats": [seconds],
-"beats": [seconds]}. No download and no separation here.
+"beats": [seconds]}. No download and no separation here. CACHE_DIR (0700, kept between runs) holds matplotlib's font
+list, which the library's import builds in about 9 s when the directory has none.
 The checkpoints load with torch's restricted unpickler; the library's own loader uses the unrestricted one.
 """
 import json
@@ -16,13 +17,14 @@ CHECKPOINTS = ("harmonix-fold0-0vra4ys2.pth", "harmonix-fold1-3ozjhtsj.pth", "ha
 
 
 def main(argv):
-    if len(argv) != 4:
-        sys.stderr.write("usage: allin1_sections.py MODEL_DIR STEMS_DIR OUT.json\n")
+    if len(argv) != 5:
+        sys.stderr.write("usage: allin1_sections.py MODEL_DIR STEMS_DIR CACHE_DIR OUT.json\n")
         return 2
-    model_dir, stems, out = argv[1:]
+    model_dir, stems, cache, out = argv[1:]
     work = os.path.join(os.path.dirname(out), "allin1")
     os.makedirs(work, mode=0o700, exist_ok=True)
-    os.environ["MPLCONFIGDIR"] = os.environ["NUMBA_CACHE_DIR"] = work  # imported libraries write caches here
+    os.environ["NUMBA_CACHE_DIR"] = work  # imported libraries write caches here
+    os.environ["MPLCONFIGDIR"] = cache
     from pathlib import Path
 
     import torch
