@@ -65,7 +65,7 @@ RHYTHM_SINGING_KEYS = {"yourmt3_python"}
 SEP_DIR = "sep"  # per-request scratch of the rhythm worker, under the upload directory
 RHYTHM_DIR = "results-rhythm"  # under root: <result_id>.json, 0600, written atomically
 SECTIONS_CACHE_DIR = "cache-allin1"  # under root, 0700: matplotlib's font list for allin1_sections.py, kept between runs
-RHYTHM_LAYERS = ("beats", "chords", "energy", "melody", "genre", "bass", "other", "drums", "bars")
+RHYTHM_LAYERS = ("beats", "all_in_one_beats", "chords", "energy", "melody", "genre", "bass", "other", "drums", "bars")
 RHYTHM_MAX_BEATS = 5000
 RHYTHM_MAX_CHORDS = 20000
 RHYTHM_MAX_KEY_SECTIONS = 64  # worker 0.2.0 emits <= 30 (20 s windows over 600 s)
@@ -1005,6 +1005,12 @@ def check_rhythm(v):
             return None
         if any(b2 < b1 for b1, b2 in zip(beats, beats[1:])):
             return None
+        if "all_in_one_beats" in v:
+            model_beats = v["all_in_one_beats"]
+            if (not isinstance(model_beats, list) or not 1 <= len(model_beats) <= RHYTHM_MAX_BEATS
+                    or not all(_num(t, 0, v["duration"]) for t in model_beats)
+                    or any(b <= a for a, b in zip(model_beats, model_beats[1:]))):
+                return None
         chords = v.get("chords")
         if not isinstance(chords, list) or len(chords) > RHYTHM_MAX_CHORDS:
             return None
@@ -1932,7 +1938,7 @@ def _has_separated_layer(v):
     """True when a stored result holds anything made from stems, which an upload without the band cannot give again."""
     m = v.get("melody")
     sp = m.get("separation") if isinstance(m, dict) else None
-    return ((isinstance(sp, dict) and sp.get("status") == "done")
+    return ("all_in_one_beats" in v or (isinstance(sp, dict) and sp.get("status") == "done")
             or any(isinstance(v.get(k), dict) and v[k].get("status") == "done" for k in ("bass", "other", "drums", "sections_model", "parts", "mix", "part_positions", "tone")))
 
 
@@ -1989,6 +1995,10 @@ QUICK_NOTE = ("rhythm=quick: no stem separation, so bass, other, drums, parts, b
               "the mix; a later rhythm=1 run on the full-band audio replaces this result")
 
 
+def all_in_one_beat_summary(times):
+    return {"method": "All-In-One", "count": len(times), "first_beat_s": times[0], "last_beat_s": times[-1]}
+
+
 def rhythm_summary(v, overview=None):
     """The summary below, plus profile + profile_note only on a rhythm=quick result (other bodies unchanged)."""
     out = _rhythm_summary(v, overview)
@@ -2013,6 +2023,7 @@ def _rhythm_summary(v, overview=None):
             "double_tempo_evidence_note": v.get("double_tempo_evidence_note"), "tempo_cnn": v.get("tempo_cnn"),
             "key": v["key"], "key_sections": v.get("key_sections"), "key_change_count": v.get("key_change_count"),
             "beat_count": len(v["beats"]), "chord_segment_count": len(v["chords"]),
+            **({"all_in_one_beats": all_in_one_beat_summary(v["all_in_one_beats"])} if "all_in_one_beats" in v else {}),
             "chords_grid": v.get("chords_grid"), "chords_reliability": v.get("chords_reliability"),
             "chord_vocabulary": v.get("chord_vocabulary"),
             "energy_summary": v.get("energy_summary"), "sections": v.get("sections"),
@@ -2506,8 +2517,8 @@ def overview_ok(o, dur):
 
 def rhythm_page(rid, v, layer, start, end, cursor, limit):
     """Native timeline rules: rows overlapping [start, end], cursor <= total, <= limit rows under the page byte cap."""
-    if layer == "beats":
-        rows = [{"time": t} for t in v["beats"] if start <= t <= end]
+    if layer in ("beats", "all_in_one_beats"):
+        rows = [{"time": t} for t in v[layer] if start <= t <= end]
     elif layer == "energy":  # a value covers [time, time + step_s); rows whose time lies in [start, end]
         e = v["energy"]
         rows = [{"time": round(i * e["step_s"], 3), "value": x} for i, x in enumerate(e["values"])
@@ -2535,7 +2546,9 @@ def rhythm_page(rid, v, layer, start, end, cursor, limit):
     out = {"result_id": rid, "clock": "seconds_from_audio_start", "range": {"start": start, "end": end},
            "cursor": cursor, "total": len(rows), "layer": layer, layer: page, "layer_status": "done",
            "warnings": v["warnings"], "truncated": nxt < len(rows), "continuation": nxt if nxt < len(rows) else None}
-    if layer == "chords":
+    if layer == "all_in_one_beats":
+        out.update(all_in_one_beat_summary(v[layer]))
+    elif layer == "chords":
         out["reliability"] = v.get("chords_reliability", "low_reference")
     elif layer == "energy":
         out["unit"], out["step_s"] = v["energy"]["unit"], v["energy"]["step_s"]
@@ -2909,7 +2922,7 @@ class Engine:
         return "ml", args
 
     def rhythm_timeline(self, rid, q):
-        """layer=beats|chords|energy|melody|genre|bass|other|drums|bars, served from the stored rhythm file with the native range/limit/cursor rules."""
+        """Page a stored rhythm layer with the native range/limit/cursor rules."""
         vals = {}
         for k, default in (("start", 0.0), ("end", 600.0)):
             if k in q:
@@ -2937,6 +2950,8 @@ class Engine:
             raise HttpError("rhythm_not_found")
         if st != "ok":
             raise HttpError("invalid_result")
+        if q["layer"] == "all_in_one_beats" and "all_in_one_beats" not in v:
+            raise HttpError("rhythm_not_found")
         if q["layer"] == "energy" and "energy" not in v:  # stored before worker 0.3.0: that layer is not stored
             raise HttpError("rhythm_not_found")
         if q["layer"] == "melody" and "melody_notes" not in v:  # stored before worker 0.4.0

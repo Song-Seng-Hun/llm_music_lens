@@ -83,7 +83,7 @@ cleanup, so it alone does not prove the pipeline is idle).
    check (including 0 < duration <= 600 s) and no-overwrite hard link. A canonical WAV (PCM mono 16 kHz s16) skips
    afconvert. A conversion failure gives 400 `invalid_audio`; size limits, magic-byte detection and framing are
    unchanged.
-12. Optional rhythm layer (an addition to the spec): `rhythm=1` on `/analyze`, a `rhythm` summary in `/report`, `layer=beats|chords|energy|melody|genre|bass|other|drums|bars`
+12. Optional rhythm layer (an addition to the spec): `rhythm=1` on `/analyze`, a `rhythm` summary in `/report`, `layer=beats|all_in_one_beats|chords|energy|melody|genre|bass|other|drums|bars`
    on `/timeline`, and a `rhythm` object in `/status` (see "Optional rhythm layer: API" in the [API reference](api-reference.md)). New rhythm work and the `/status`
    field need the `rhythm` config key; `/report` and `/timeline` read stored files whenever they exist. The receipt
    records the ASR outcome only; the rhythm result lives in `results-rhythm/`. The worker runs while the API gate is
