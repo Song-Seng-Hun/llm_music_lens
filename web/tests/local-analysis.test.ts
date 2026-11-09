@@ -4,6 +4,10 @@ import { reportSchema, summaryOf, timelineOf, MAX_REPORT_BYTES } from "../lib/re
 import { VOICE_LABELS, MUSIC_LABELS } from "../lib/local-analysis.ts";
 import { callMusicTool, MCP_TOOLS } from "../lib/mcp.ts";
 
+// The fixtures below are mutated into invalid shapes on purpose, so they stay untyped.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Mutable = any;
+
 const sha = "a".repeat(64), other = "b".repeat(64);
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value));
 function sample() {
@@ -31,7 +35,7 @@ check("native words/emotion round-trip without precision loss", () => {
   assert.equal(timelineOf(reportSchema.parse(terminal), 0, 4).localWords.items.at(-1)!.text, " end");
 });
 check("invalid native/state/hash/path evidence rejected", () => {
-  const cases: [string, (v: any) => void][] = [
+  const cases: [string, (v: Mutable) => void][] = [
     ["schema", v => { v.localAnalysis.schema_version = "music-lens-local/999"; }],
     ["source hash", v => { v.source.sha256 = other; }], ["duration", v => { v.source.duration = 3; }],
     ["audio frames", v => { v.localAnalysis.audio.frames = 63999; }],
@@ -52,31 +56,31 @@ check("invalid native/state/hash/path evidence rejected", () => {
   for (const [name, mutate] of cases) { const input = sample(); mutate(input); assert.equal(reportSchema.safeParse(input).success, false, name); }
 });
 check("legacy minimal report remains valid", () => {
-  const input: any = sample(); delete input.localAnalysis;
+  const input: Mutable = sample(); delete input.localAnalysis;
   assert.deepEqual(reportSchema.parse(input), input);
   assert.equal(summaryOf(reportSchema.parse(input)).localAnalysis, null);
 });
 check("independent failed layer and unrequested emotion remain explicit", () => {
-  const input: any = sample(); const local = input.localAnalysis;
+  const input: Mutable = sample(); const local = input.localAnalysis;
   local.asr_status = "failed"; local.words = []; local.word_count = 0; local.timing_notes = []; local.state = "partial"; local.warnings = ["ASR failed (empty_output)"];
   assert.equal(reportSchema.parse(input).localAnalysis!.emotion.windows.length, 2);
   local.provenance.tool_version = "0.2.1"; local.provenance.failure_attempt = "c".repeat(32);
   const transient = summaryOf(reportSchema.parse(input)).localAnalysis!;
   assert.equal(transient.cacheable, false); assert.equal(transient.retry_recommended, true);
-  const invalid: any = sample(); invalid.localAnalysis.provenance.failure_attempt = "c".repeat(32);
+  const invalid: Mutable = sample(); invalid.localAnalysis.provenance.failure_attempt = "c".repeat(32);
   assert.equal(reportSchema.safeParse(invalid).success, false, "complete result cannot claim a failed attempt");
-  const none: any = sample(); none.localAnalysis.emotion = { mode: "none", status: "not_requested", warnings: [], window_seconds: 0, hop_seconds: 0, minimum_tail_seconds: 0, coverage: { covered_seconds: 0, uncovered_seconds: 4 }, windows: [], score_semantics: "native_uncalibrated", accuracy: "unmeasured", dimension_scale: "model native, approximately 1..9" };
+  const none: Mutable = sample(); none.localAnalysis.emotion = { mode: "none", status: "not_requested", warnings: [], window_seconds: 0, hop_seconds: 0, minimum_tail_seconds: 0, coverage: { covered_seconds: 0, uncovered_seconds: 4 }, windows: [], score_semantics: "native_uncalibrated", accuracy: "unmeasured", dimension_scale: "model native, approximately 1..9" };
   none.localAnalysis.provenance.emotion = { mode: "none", settings: { window_seconds: 0, hop_seconds: 0, minimum_tail_seconds: 0 } };
   assert.equal(reportSchema.parse(none).localAnalysis!.emotion.status, "not_requested");
 });
 check("native music scale remains separate and unclamped", () => {
-  const input: any = sample(), local = input.localAnalysis;
+  const input: Mutable = sample(), local = input.localAnalysis;
   local.provenance.emotion.mode = "music"; local.provenance.emotion.settings = { window_seconds: 5, hop_seconds: 2.5, minimum_tail_seconds: 3 };
   local.emotion = { mode: "music", status: "complete", warnings: [], window_seconds: 5, hop_seconds: 2.5, minimum_tail_seconds: 3, coverage: { covered_seconds: 4, uncovered_seconds: 0 }, windows: [{ start: 0, end: 4, mood_labels: [...MUSIC_LABELS], mood_scores: [0.1, 0.6, 0.1, 0.1, 0.1], top_mood: MUSIC_LABELS[1], arousal: 9.2, valence: 0.9 }], score_semantics: "native_uncalibrated", accuracy: "unmeasured", dimension_scale: "model native, approximately 1..9" };
   assert.equal(reportSchema.parse(input).localAnalysis!.emotion.windows[0].arousal, 9.2);
 });
 check("summary omits full arrays and timeline includes point words with caps", () => {
-  const input: any = sample(), local = input.localAnalysis;
+  const input: Mutable = sample(), local = input.localAnalysis;
   local.words = Array.from({ length: 250 }, (_, i) => ({ text: `w${i}`, start: i / 100, end: i / 100, probability: 0.4 })); local.word_count = 250; local.timing_notes = [];
   const report = reportSchema.parse(input), summary = JSON.stringify(summaryOf(report));
   assert.equal(summary.includes('"words"'), false); assert.equal(summary.includes('"windows"'), false);
@@ -88,7 +92,7 @@ check("summary omits full arrays and timeline includes point words with caps", (
 let writes = 0;
 const services = { list: async () => [], get: async () => reportSchema.parse(sample()), importReport: async (report: ReturnType<typeof reportSchema.parse>) => { writes++; return report; } };
 const saved = await callMusicTool("import_music_report", { report: sample() }, services);
-assert.equal(writes, 1); assert.equal((saved as any).localAnalysis.word_count, 2);
+assert.equal(writes, 1); assert.equal((saved as { localAnalysis: { word_count: number } }).localAnalysis.word_count, 2);
 assert.equal(JSON.stringify(saved).includes('"words"'), false);
 await assert.rejects(callMusicTool("import_music_report", { report: { ...sample(), localAnalysis: { invalid: true } } }, services));
 await assert.rejects(callMusicTool("import_music_report", { report: { ...sample(), extra: "x".repeat(MAX_REPORT_BYTES) } }, services));

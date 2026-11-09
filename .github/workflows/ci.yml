@@ -1,0 +1,49 @@
+name: CI
+
+# web/ runs the checks the README lists (typecheck, test, build) plus lint.
+# lan/ runs the offline unittest suite with macOS's own /usr/bin/python3, as
+# lan/docs/contributing.md says; the server converts audio with afconvert,
+# which only macOS has.
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  lan:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: lan
+    steps:
+      - uses: actions/checkout@v7
+      - run: /usr/bin/python3 --version
+      - run: /usr/bin/python3 -m unittest discover -s tests -v
